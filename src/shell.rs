@@ -18,6 +18,7 @@ pub fn process_command(input: &str) {
         "clear" => cmd_clear(),
         "about" => cmd_about(),
         "reboot" => cmd_reboot(),
+        "panic" => cmd_panic(),
         _ => {
             println!("Unknown command: '{}'. Type 'help' for a list of commands.", command);
         }
@@ -30,8 +31,9 @@ fn cmd_help() {
     println!("  help        - Show this help message");
     println!("  echo <text> - Print text to the screen");
     println!("  clear       - Clear the screen");
+    println!("  reboot      - Reboot the system");
+    println!("  panic       - Causes a system panic");
     println!("  about       - Show information about this kernel");
-    println!("  reboot      - Reboot the system")
 }
 
 fn cmd_echo(args: &str) {
@@ -43,13 +45,13 @@ fn cmd_clear() {
 }
 
 fn cmd_about() {
-    println!("FrostDOS v0.2.1 - A kernel in Rust");
+    println!("FrostDOS v0.2.2 - A kernel in Rust");
     println!("Based on Philipp Oppermann's 'Writing an OS in Rust'");
     println!("https://os.phil-opp.com/");
 }
 
 pub fn print_welcome() {
-    println!("FrostDOS v0.2.1");
+    println!("FrostDOS v0.2.2");
     println!("----------------------------------------");
 }
 
@@ -64,4 +66,9 @@ fn cmd_reboot() {
     loop {
         x86_64::instructions::hlt();
     }
+}
+
+fn cmd_panic() {
+    crate::vga_buffer::clear_screen();
+    panic!("User triggered kernel panic")
 }
