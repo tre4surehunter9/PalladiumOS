@@ -15,6 +15,7 @@ i used AI for
 * Basic Shell
 * Heap Allocation
 * Keyboard Input
+* Filesystem
 
 ## Instructions for Running the Kernel
 * Install QEMU
@@ -29,6 +30,7 @@ i used AI for
 * help - Show the help message
 * reboot - Reboots the system
 * panic - Causes system panic
+* Filesystem commands shown in screenshot
 
 ## Credits
 Philipp Oppermann for his 'Writing an OS in Rust' guide
