@@ -7,6 +7,10 @@
 ## Notice
 I do want to make things clear and say i used AI for some parts of my code as this is my first kernel so I dont understand much yet, I am so sorry and in the future i'll try to use less AI
 
+i used AI for
+* the filesystem
+* the shell
+
 ## Features
 * Basic Shell
 * Heap Allocation
