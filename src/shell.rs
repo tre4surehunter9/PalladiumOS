@@ -63,14 +63,14 @@ fn cmd_clear() {
 }
 
 fn cmd_about() {
-    println!("PalladiumOS v0.3.3 - A kernel in Rust");
+    println!("PalladiumOS v0.3.4 - A kernel in Rust");
     println!("Based on Philipp Oppermann's 'Writing an OS in Rust'");
     println!("https://os.phil-opp.com/");
 }
 
 pub fn print_welcome() {
     println!("------------------");
-    println!("PalladiumOS v0.3.3");
+    println!("PalladiumOS v0.3.4");
     println!("------------------");
 }
 
