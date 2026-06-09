@@ -74,6 +74,7 @@ pub fn print_welcome() {
     println!("------------------");
     println!("PalladiumOS v0.3.2");
     println!("------------------");
+}
 
 fn cmd_reboot() {
     use x86_64::instructions::port::Port;
