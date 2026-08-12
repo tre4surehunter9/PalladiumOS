@@ -25,6 +25,7 @@ i used AI for
 * Filesystem
 * Scripting
 * Text Editor
+* Ring 3/Usermode
 
 ## Programs
 the only program is hello which can be run with runprogram hello
