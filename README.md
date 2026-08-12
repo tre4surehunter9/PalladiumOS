@@ -28,7 +28,7 @@ i used AI for
 * Ring 3/Usermode
 
 ## Programs
-the only program is hello which can be run with runprogram hello
+The only program is Hello which can be ran with "run hello"
 
 ## Instructions for Running the Kernel
 * Install QEMU
