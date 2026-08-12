@@ -2,7 +2,7 @@
 
 ## An OS (more of a kernel) coded entirely in Rust
 
-![Screenshot](Screenshot_20260609_001038.png)
+![Screenshot](Screenshot_20260811_194819.png)
 
 ## Warning
 Currently compling using 'cargo build' is broken for some Goddamn reason so it only works on my pc I really dont know why.
