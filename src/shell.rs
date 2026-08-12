@@ -46,7 +46,7 @@ fn cmd_help() {
     println!("  reboot              - Reboot the system");
     println!("  about               - Show information about this kernel");
     println!("  edit <file>         - Open file in the text editor");
-    println!("  script <file>          - Run a script file");
+    println!("  script <file>       - Run a script file");
     println!("  ls [path]           - List directory");
     println!("  cat <file>          - Print file contents");
     println!("  mkdir <dir>         - Create directory");
