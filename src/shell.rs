@@ -28,8 +28,8 @@ pub fn process_command(input: &str) -> bool {
         "rm"     => cmd_rm(args),
         "cd"     => cmd_cd(args),
         "pwd"    => { cmd_pwd(); true }
-        "run"    => cmd_run(args),
-        "runprogram" => cmd_runprogram(args),
+        "script"    => cmd_script(args),
+        "run" => cmd_run(args),
         _ => {
             println!("Unknown command: '{}'. Type 'help'.", command);
             false
@@ -44,17 +44,16 @@ fn cmd_help() {
     println!("  echo <text>         - Print text to the screen");
     println!("  clear               - Clear the screen");
     println!("  reboot              - Reboot the system");
-    println!("  panic               - Causes a system panic");
     println!("  about               - Show information about this kernel");
     println!("  edit <file>         - Open file in the text editor");
-    println!("  run <file>          - Run a script file");
+    println!("  script <file>          - Run a script file");
     println!("  ls [path]           - List directory");
     println!("  cat <file>          - Print file contents");
     println!("  mkdir <dir>         - Create directory");
     println!("  rm <file>           - Remove file or empty directory");
     println!("  cd <dir>            - Change directory");
     println!("  pwd                 - Print working directory");
-    println!("  runprogram          - Run ring 3 program")
+    println!("  run                 - Run a Ring 3 program")
 }
 
 
@@ -194,7 +193,7 @@ fn cmd_edit(args: &str) -> bool {
     true
 }
 
-fn cmd_run(args: &str) -> bool {
+fn cmd_script(args: &str) -> bool {
     if args.is_empty() {
         println!("Usage: run <script>");
         return false;
@@ -230,7 +229,7 @@ fn cmd_run(args: &str) -> bool {
     true
 }
 
-fn cmd_runprogram(args: &str) -> bool {
+fn cmd_run(args: &str) -> bool {
     static HELLO_PROGRAM: &[u8] = include_bytes!("user_progs/hello.bin");
 
     if args.is_empty() {
