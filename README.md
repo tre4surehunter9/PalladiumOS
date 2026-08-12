@@ -2,7 +2,7 @@
 
 ## An OS (more of a kernel) coded entirely in Rust
 
-![Screenshot](Screenshot_20260811_194819.png)
+![Screenshot](Screenshot_20260811_212123.png)
 
 ## Warning
 Currently compling using 'cargo build' is broken for some Goddamn reason so it only works on my pc I really dont know why.
@@ -42,8 +42,7 @@ the only program is hello which can be run with runprogram hello
 * clear               - Clear the screen
 * help                - Show the help message
 * reboot              - Reboots the system
-* panic               - Causes system panic
-* run <file>          - Runs script
+* script <file>       - Runs script
 * edit <file>         - Open file in the text editor
 * ls <path>           - List directory
 * cat <file>          - Print file contents
@@ -51,7 +50,7 @@ the only program is hello which can be run with runprogram hello
 * rm <file>           - Remove file or empty directory
 * cd  <dir>           - Change directory
 * pwd                 - Print working directory
-* runprogram          - Run Ring 3 program in usermode
+* run                 - Run a Ring 3 program
 
 ## Credits
 Philipp Oppermann for his 'Writing an OS in Rust' guide
