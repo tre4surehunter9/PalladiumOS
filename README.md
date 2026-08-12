@@ -46,6 +46,7 @@ i used AI for
 * rm <file>           - Remove file or empty directory
 * cd  <dir>           - Change directory
 * pwd                 - Print working directory
+* runprogram          - Run Ring 3 program in usermode
 
 ## Credits
 Philipp Oppermann for his 'Writing an OS in Rust' guide
