@@ -19,6 +19,8 @@ lazy_static! {
         .set_handler_fn(keyboard_interrupt_handler);
     idt.page_fault.set_handler_fn(page_fault_handler);
 
+    crate::syscall::init_syscalls(&mut idt);
+
     idt
 
    };

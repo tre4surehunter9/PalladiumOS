@@ -1,0 +1,44 @@
+             .',;::::;,'.
+         .';:cccccccccccc:;,.
+      .;cccccccccccccccccccccc;.
+    .:cccccccccccccccccccccccccc:.
+  .;ccccccccccccc;.:dddl:.;ccccccc;.
+ .:ccccccccccccc;OWMKOOXMWd;ccccccc:.
+.:ccccccccccccc;KMMc;cc;xMMc;ccccccc:.
+,cccccccccccccc;MMM.;cc;;WW:;cccccccc,
+:cccccccccccccc;MMM.;cccccccccccccccc:
+:ccccccc;oxOOOo;MMM000k.;cccccccccccc:
+cccccc;0MMKxdd:;MMMkddc.;cccccccccccc;
+ccccc;XMO';cccc;MMM.;cccccccccccccccc'
+ccccc;MMo;ccccc;MMW.;ccccccccccccccc;
+ccccc;0MNc.ccc.xMMd;ccccccccccccccc;
+cccccc;dNMWXXXWM0:;cccccccccccccc:,
+cccccccc;.:odl:.;cccccccccccccc:,.
+ccccccccccccccccccccccccccccc:'.
+:ccccccccccccccccccccccc:;,..
+ ':cccccccccccccccc::;,.[1G[18A[42Ctre4surehunter9@federation
+[42C--------------------------
+[42COS: Fedora Linux 44 (Forty Four) x86_64
+[42CKernel: Linux 7.0.10-201.fc44.x86_64
+[42CUptime: 15 hours, 4 mins
+[42CPackages: 15 (flatpak), 2915 (rpm)
+[42CShell: bash 5.3.9
+[42CDisplay (LG ULTRAGEAR): 2560x1440 in 31", 180 Hz [External]
+[42CDE: KDE Plasma 6.6.5
+[42CWM: KWin (Wayland)
+[42CWM Theme: plastik
+[42CTheme: Breeze (Dark) [Qt], Breeze-Dark [GTK2], Breeze [GTK3]
+[42CIcons: Papirus [Qt], Papirus [GTK2/3/4]
+[42CFont: Noto Sans (10pt) [Qt], Noto Sans (10pt) [GTK2/3/4]
+[42CCursor: Fossa (24px)
+[42CTerminal: konsole 26.4.1
+[42CCPU: AMD Ryzen 7 3700X (16) @ 4.43 GHz
+[42CGPU: NVIDIA GeForce RTX 5060 [Discrete]
+[42CMemory: 10.34 GiB / 31.27 GiB (33%)
+[42CSwap: 0 B / 8.00 GiB (0%)
+[42CDisk (/): 121.17 GiB / 514.00 GiB (24%) - btrfs
+[42CLocal IP (enp4s0): 192.168.0.123/24
+[42CLocale: en_US.UTF-8
+[42C
+[42C[40m   [41m   [42m   [43m   [44m   [45m   [46m   [47m   [m
+[42C[100m   [101m   [102m   [103m   [104m   [105m   [106m   [107m   [m

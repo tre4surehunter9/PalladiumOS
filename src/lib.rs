@@ -107,6 +107,8 @@ pub mod shell;
 pub mod fdfs;
 pub mod filesystem;
 pub mod editor;
+pub mod usermode;
+pub mod syscall;
 
 
 extern crate alloc;

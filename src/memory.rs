@@ -4,6 +4,9 @@ use x86_64::{
     VirtAddr,
 };
 
+use x86_64::PhysAddr;
+
+
 use x86_64::structures::paging::OffsetPageTable;
 
 
@@ -46,6 +49,7 @@ fn translate_addr_inner(addr: VirtAddr, physical_memory_offset: VirtAddr)
 
 
 
+
     let (level_4_table_frame, _) = Cr3::read();
 
     let table_indexes = [
@@ -68,10 +72,7 @@ fn translate_addr_inner(addr: VirtAddr, physical_memory_offset: VirtAddr)
     Some(frame.start_address() + u64::from(addr.page_offset()))
 }
 
-use x86_64::{
-    PhysAddr,
-    structures::paging::{Page, PhysFrame, Mapper, Size4KiB, FrameAllocator}
-};
+use x86_64::structures::paging::{Page, PhysFrame, Mapper, Size4KiB, FrameAllocator, PageTableFlags};
 
 pub fn create_example_mapping(
     page: Page,
@@ -140,3 +141,74 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
 
 
 
+pub fn map_user_page(
+    mapper: &mut impl Mapper<Size4KiB>,
+    frame_allocator: &mut impl x86_64::structures::paging::FrameAllocator<Size4KiB>,
+    page: Page<Size4KiB>,
+) {
+    let frame = frame_allocator.allocate_frame().expect("no frames left");
+    let flags = PageTableFlags::PRESENT
+    | PageTableFlags::WRITABLE
+    | PageTableFlags::USER_ACCESSIBLE;
+
+    unsafe {
+        mapper.map_to(page, frame, flags, frame_allocator)
+        .expect("map_to failed")
+        .flush();
+    }
+}
+
+const USER_PAYLOAD: [u8; 2] = [0xeb, 0xfe];
+
+pub fn load_payload(target_addr: VirtAddr) {
+    unsafe {
+        let dest = target_addr.as_mut_ptr::<u8>();
+        core::ptr::copy_nonoverlapping(USER_PAYLOAD.as_ptr(), dest, USER_PAYLOAD.len());
+    }
+}
+
+
+pub fn load_payload_bytes(target_addr: VirtAddr, bytes: &[u8]) {
+    assert!(
+        bytes.len() <= 4096,
+            "payload does not fit in a single page — multi-page loading needed"
+    );
+    unsafe {
+        let dest = target_addr.as_mut_ptr::<u8>();
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dest, bytes.len());
+    }
+}
+
+pub fn map_user_vga(mapper: &mut impl Mapper<Size4KiB>) {
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(0xb8000));
+    unsafe {
+        mapper
+        .update_flags(
+            page,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+        )
+        .expect("update_flags failed")
+        .flush();
+    }
+}
+
+pub fn ensure_user_accessible(addr: VirtAddr, physical_memory_offset: VirtAddr) {
+    use x86_64::registers::control::Cr3;
+    use x86_64::structures::paging::PageTableFlags as Flags;
+
+    let (level_4_frame, _) = Cr3::read();
+    let table_indexes = [addr.p4_index(), addr.p3_index(), addr.p2_index()];
+    let mut frame = level_4_frame;
+
+    for &index in &table_indexes {
+        let virt = physical_memory_offset + frame.start_address().as_u64();
+        let table_ptr: *mut PageTable = virt.as_mut_ptr();
+        let table = unsafe { &mut *table_ptr };
+        let entry = &mut table[index];
+
+        let flags = entry.flags() | Flags::USER_ACCESSIBLE;
+        entry.set_flags(flags);
+
+        frame = entry.frame().expect("expected a table frame, found huge page or missing entry");
+    }
+}

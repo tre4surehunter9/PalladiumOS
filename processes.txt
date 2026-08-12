@@ -1,0 +1,513 @@
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.0  40572 22328 ?        Ss   Jun09   0:05 /usr/lib/systemd/systemd --switched-root --system --deserialize=55 rhgb
+root           2  0.0  0.0      0     0 ?        S    Jun09   0:00 [kthreadd]
+root           3  0.0  0.0      0     0 ?        S    Jun09   0:00 [pool_workqueue_release]
+root           4  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-rcu_gp]
+root           5  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-sync_wq]
+root           6  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-kvfree_rcu_reclaim]
+root           7  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-slub_flushwq]
+root           8  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-netns]
+root          10  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/0:0H-kblockd]
+root          13  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-mm_percpu_wq]
+root          14  0.0  0.0      0     0 ?        I    Jun09   0:00 [kworker/u64:1-ipv6_addrconf]
+root          15  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/0]
+root          16  0.0  0.0      0     0 ?        I    Jun09   0:04 [rcu_preempt]
+root          17  0.0  0.0      0     0 ?        S    Jun09   0:00 [rcu_exp_par_gp_kthread_worker/0]
+root          18  0.0  0.0      0     0 ?        S    Jun09   0:00 [rcu_exp_gp_kthread_worker]
+root          19  0.0  0.0      0     0 ?        S    Jun09   0:03 [migration/0]
+root          20  0.0  0.0      0     0 ?        S    Jun09   0:00 [kprobe-optimizer]
+root          21  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/0]
+root          22  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/0]
+root          23  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/1]
+root          24  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/1]
+root          25  0.0  0.0      0     0 ?        S    Jun09   0:03 [migration/1]
+root          26  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/1]
+root          28  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/1:0H-kblockd]
+root          29  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/2]
+root          30  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/2]
+root          31  0.0  0.0      0     0 ?        S    Jun09   0:02 [migration/2]
+root          32  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/2]
+root          34  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/2:0H-kblockd]
+root          35  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/3]
+root          36  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/3]
+root          37  0.0  0.0      0     0 ?        S    Jun09   0:04 [migration/3]
+root          38  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/3]
+root          40  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/3:0H-kblockd]
+root          41  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/4]
+root          42  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/4]
+root          43  0.0  0.0      0     0 ?        S    Jun09   0:03 [migration/4]
+root          44  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/4]
+root          46  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/4:0H-kblockd]
+root          47  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/5]
+root          48  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/5]
+root          49  0.0  0.0      0     0 ?        S    Jun09   0:02 [migration/5]
+root          50  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/5]
+root          52  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/5:0H-kblockd]
+root          53  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/6]
+root          54  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/6]
+root          55  0.0  0.0      0     0 ?        S    Jun09   0:02 [migration/6]
+root          56  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/6]
+root          58  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/6:0H-kblockd]
+root          59  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/7]
+root          60  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/7]
+root          61  0.0  0.0      0     0 ?        S    Jun09   0:02 [migration/7]
+root          62  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/7]
+root          64  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/7:0H-kblockd]
+root          65  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/8]
+root          66  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/8]
+root          67  0.0  0.0      0     0 ?        S    Jun09   0:00 [migration/8]
+root          68  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/8]
+root          70  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/8:0H-kblockd]
+root          71  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/9]
+root          72  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/9]
+root          73  0.0  0.0      0     0 ?        S    Jun09   0:01 [migration/9]
+root          74  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/9]
+root          76  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/9:0H-kblockd]
+root          77  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/10]
+root          78  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/10]
+root          79  0.0  0.0      0     0 ?        S    Jun09   0:00 [migration/10]
+root          80  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/10]
+root          82  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/10:0H-kblockd]
+root          83  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/11]
+root          84  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/11]
+root          85  0.0  0.0      0     0 ?        S    Jun09   0:03 [migration/11]
+root          86  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/11]
+root          88  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/11:0H-kblockd]
+root          89  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/12]
+root          90  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/12]
+root          91  0.0  0.0      0     0 ?        S    Jun09   0:01 [migration/12]
+root          92  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/12]
+root          94  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/12:0H-kblockd]
+root          95  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/13]
+root          96  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/13]
+root          97  0.0  0.0      0     0 ?        S    Jun09   0:00 [migration/13]
+root          98  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/13]
+root         100  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/13:0H-kblockd]
+root         101  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/14]
+root         102  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/14]
+root         103  0.0  0.0      0     0 ?        S    Jun09   0:01 [migration/14]
+root         104  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/14]
+root         106  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/14:0H-kblockd]
+root         107  0.0  0.0      0     0 ?        S    Jun09   0:00 [cpuhp/15]
+root         108  0.0  0.0      0     0 ?        S    Jun09   0:00 [idle_inject/15]
+root         109  0.0  0.0      0     0 ?        S    Jun09   0:01 [migration/15]
+root         110  0.0  0.0      0     0 ?        S    Jun09   0:00 [ksoftirqd/15]
+root         112  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/15:0H-kblockd]
+root         115  0.0  0.0      0     0 ?        S    Jun09   0:00 [kdevtmpfs]
+root         116  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-inet_frag_wq]
+root         117  0.0  0.0      0     0 ?        I    Jun09   0:00 [rcu_tasks_kthread]
+root         118  0.0  0.0      0     0 ?        I    Jun09   0:00 [rcu_tasks_rude_kthread]
+root         119  0.0  0.0      0     0 ?        S    Jun09   0:00 [kauditd]
+root         120  0.0  0.0      0     0 ?        S    Jun09   0:00 [oom_reaper]
+root         123  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-writeback]
+root         124  0.0  0.0      0     0 ?        S    Jun09   0:00 [kcompactd0]
+root         125  0.0  0.0      0     0 ?        SN   Jun09   0:00 [ksmd]
+root         126  0.0  0.0      0     0 ?        SN   Jun09   0:00 [khugepaged]
+root         127  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-kblockd]
+root         128  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-blkcg_punt_bio]
+root         129  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-kintegrityd]
+root         130  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/9-acpi]
+root         132  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-tpm_dev_wq]
+root         133  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-ata_sff]
+root         134  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-md_bitmap]
+root         135  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-edac-poller]
+root         136  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-devfreq_wq]
+root         137  0.0  0.0      0     0 ?        S    Jun09   0:00 [watchdogd]
+root         138  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-quota_events_unbound]
+root         141  0.0  0.0      0     0 ?        I    Jun09   0:00 [kworker/10:1-mm_percpu_wq]
+root         142  0.0  0.0      0     0 ?        S    Jun09   0:00 [kswapd0]
+root         143  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-cryptd]
+root         147  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-kthrotld]
+root         149  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/25-aerdrv]
+root         150  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/26-aerdrv]
+root         151  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/27-aerdrv]
+root         152  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/29-aerdrv]
+root         153  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/30-aerdrv]
+root         154  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-acpi_thermal_pm]
+root         156  0.0  0.0      0     0 ?        S    Jun09   0:00 [scsi_eh_0]
+root         157  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-scsi_tmf_0]
+root         158  0.0  0.0      0     0 ?        S    Jun09   0:00 [scsi_eh_1]
+root         159  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-scsi_tmf_1]
+root         160  0.0  0.0      0     0 ?        S    Jun09   0:00 [scsi_eh_2]
+root         161  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-scsi_tmf_2]
+root         162  0.0  0.0      0     0 ?        S    Jun09   0:00 [scsi_eh_3]
+root         163  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-scsi_tmf_3]
+root         164  0.0  0.0      0     0 ?        S    Jun09   0:00 [scsi_eh_4]
+root         165  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-scsi_tmf_4]
+root         166  0.0  0.0      0     0 ?        S    Jun09   0:00 [scsi_eh_5]
+root         167  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-scsi_tmf_5]
+root         175  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-dm_bufio_cache]
+root         178  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-mld]
+root         179  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-ipv6_addrconf]
+root         180  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-kstrp]
+root         183  0.0  0.0      0     0 ?        I    Jun09   0:00 [kworker/6:1-mm_percpu_wq]
+root         196  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/u68:0]
+root         197  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/u69:0]
+root         566  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-nvme-wq]
+root         567  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-nvme-reset-wq]
+root         568  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-nvme-delete-wq]
+root         569  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-nvme-auth-wq]
+root         575  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/2:1H-kblockd]
+root         594  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-worker]
+root         595  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-delalloc]
+root         596  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-flush_delalloc]
+root         597  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-cache]
+root         598  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-fixup]
+root         599  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-endio]
+root         600  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-endio-meta]
+root         601  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-rmw]
+root         602  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-endio-write]
+root         603  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-freespace-write]
+root         604  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-delayed-meta]
+root         605  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-btrfs-qgroup-rescan]
+root         606  0.0  0.0      0     0 ?        S    Jun09   0:00 [btrfs-cleaner]
+root         607  0.0  0.0      0     0 ?        S    Jun09   0:13 [btrfs-transaction]
+root         658  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/13:1H-kblockd]
+root         660  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/12:1H-kblockd]
+root         669  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/3:1H-kblockd]
+root         671  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/9:1H-kblockd]
+root         814  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/10:1H-kblockd]
+root         815  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/8:1H-kblockd]
+root         816  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/1:1H-kblockd]
+root         817  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/11:1H-kblockd]
+root         820  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/0:1H-kblockd]
+root         825  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/15:1H-kblockd]
+root         828  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/5:1H-kblockd]
+root         850  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/7:1H-kblockd]
+root         857  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/14:1H-kblockd]
+root         859  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/6:1H-kblockd]
+root         872  0.0  0.0 118224 25048 ?        Ss   Jun09   0:01 /usr/lib/systemd/systemd-journald
+root         900  0.0  0.0  15276  6052 ?        Ss   Jun09   0:00 /usr/lib/systemd/systemd-userdbd
+systemd+     915  0.0  0.0  32408 24584 ?        Ss   Jun09   0:08 /usr/lib/systemd/systemd-resolved
+root         921  0.0  0.0  41664 15832 ?        Ss   Jun09   0:00 /usr/lib/systemd/systemd-udevd
+root         924  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/4:1H-kblockd]
+root         925  0.0  0.0      0     0 ?        S    Jun09   0:00 [psimon]
+systemd+    1001  0.0  0.0  16016  7208 ?        Ss   Jun09   0:18 /usr/lib/systemd/systemd-oomd
+root        1030  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-cfg80211]
+root        1040  0.0  0.0      0     0 ?        I    Jun09   0:02 [kworker/9:2-mm_percpu_wq]
+root        1057  0.0  0.0      0     0 ?        S    Jun09   0:00 [jbd2/nvme0n1p1-8]
+root        1058  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-ext4-rsv-conversion]
+root        1065  0.0  0.0      0     0 ?        S    Jun09   0:00 [nv_queue]
+root        1066  0.0  0.0      0     0 ?        S    Jun09   0:00 [nv_mem_pool_scrubber_queue]
+root        1067  0.0  0.0      0     0 ?        S    Jun09   0:00 [nv_mem_pool_scrubber_queue]
+root        1068  0.0  0.0      0     0 ?        S    Jun09   0:00 [nv_mem_pool_scrubber_queue]
+root        1069  0.0  0.0      0     0 ?        S    Jun09   0:00 [nv_queue]
+root        1070  0.0  0.0      0     0 ?        S    Jun09   0:00 [nv_open_q]
+root        1083  0.1  0.0      0     0 ?        R    Jun09   1:21 [nvidia-modeset/kthread_q]
+root        1084  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-modeset/deferred_close_kthread_q]
+root        1085  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/73-nvidia]
+root        1086  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/74-nvidia]
+root        1087  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/75-nvidia]
+root        1088  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/76-nvidia]
+root        1089  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/77-nvidia]
+root        1090  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/78-nvidia]
+root        1091  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/79-nvidia]
+root        1092  0.0  0.0      0     0 ?        S    Jun09   0:00 [irq/80-nvidia]
+root        1094  0.0  0.0      0     0 ?        S    Jun09   0:00 [nv_queue]
+root        1101  0.0  0.0  29576  3400 ?        S<sl Jun09   0:00 /usr/bin/auditd
+root        1103  0.0  0.0   6968  3892 ?        S<   Jun09   0:00 /usr/sbin/sedispatch
+dbus        1131  0.0  0.0   9908  5396 ?        Ss   Jun09   0:00 /usr/bin/dbus-broker-launch --scope system --audit
+root        1134  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-rpciod]
+root        1135  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-xprtiod]
+dbus        1138  0.0  0.0  10828  6828 ?        S    Jun09   0:02 dbus-broker --log 10 --controller 9 --machine-id c8a753379f14450f838443f7b707fc2b --max-bytes 536870912 --max-fds 4096 --max-matches 131072 --audit
+avahi       1142  0.0  0.0   7296  5404 ?        Ss   Jun09   0:02 avahi-daemon: running [federation.local]
+root        1143  0.0  0.0   9780  6156 ?        Ss   Jun09   0:00 /usr/libexec/bluetooth/bluetoothd
+chrony      1146  0.0  0.0  86792  6824 ?        Ss   Jun09   0:00 /usr/sbin/chronyd -n -F 2
+root        1153  0.0  0.0  81436  4336 ?        Ssl  Jun09   0:01 /usr/sbin/irqbalance
+polkitd     1155  0.0  0.0 614076 15332 ?        Ssl  Jun09   0:03 /usr/lib/polkit-1/polkitd --no-debug --log-level=notice
+rtkit       1157  0.0  0.0  87524  3660 ?        SNsl Jun09   0:00 /usr/libexec/rtkit-daemon
+root        1159  0.0  0.0  10192  6432 ?        Ss   Jun09   0:00 /usr/bin/smartd -n -q never --capabilities=mail
+root        1164  0.0  0.0 531828  7488 ?        Ssl  Jun09   0:00 /usr/libexec/switcheroo-control
+root        1165  0.0  0.0  16112  8076 ?        Ss   Jun09   0:00 /usr/lib/systemd/systemd-homed
+root        1166  0.0  0.0  16968  7952 ?        Ss   Jun09   0:00 /usr/lib/systemd/systemd-machined
+root        1172  0.0  0.0 617904 16268 ?        Ssl  Jun09   0:00 /usr/libexec/udisks2/udisksd
+root        1174  0.0  0.0 543352 11932 ?        Ssl  Jun09   0:00 /usr/libexec/upowerd
+root        1205  0.0  0.0 534752  8652 ?        Ssl  Jun09   0:00 /usr/libexec/accounts-daemon
+root        1207  0.0  0.0      0     0 ?        S    Jun09   0:00 [psimon]
+root        1217  0.0  0.0  20244 11904 ?        Ss   Jun09   0:00 /usr/lib/systemd/systemd-logind
+root        1222  0.0  0.0   5112  3488 ?        SNs  Jun09   0:00 /usr/sbin/alsactl -s -n 19 -c -E ALSA_CONFIG_PATH=/etc/alsa/alsactl.conf --initfile=/lib/alsa/init/00main rdaemon
+avahi       1225  0.0  0.0   6748  1756 ?        S    Jun09   0:00 avahi-daemon: chroot helper
+root        1240  0.0  0.0 555176 14936 ?        Ssl  Jun09   0:00 /usr/sbin/abrtd -d -s
+root        1290  0.0  0.0 391756 13944 ?        Ssl  Jun09   0:00 /usr/bin/ModemManager
+root        1293  0.0  0.1 371488 50944 ?        Ssl  Jun09   0:00 /usr/bin/python3 -sP /usr/bin/firewalld --nofork --nopid
+root        1305  0.0  0.1 599132 34628 ?        Ss   Jun09   0:00 /usr/bin/abrt-dump-journal-core -D -T -f -e
+root        1306  0.0  0.0 590264 31304 ?        Ss   Jun09   0:00 /usr/bin/abrt-dump-journal-oops -fxtD
+root        1307  0.0  0.0 590168 26220 ?        Ss   Jun09   0:00 /usr/bin/abrt-dump-journal-xorg -fxtD
+root        1364  0.0  0.0 979672 24700 ?        Ssl  Jun09   0:02 /usr/bin/NetworkManager --no-daemon
+root        1384  0.0  0.0 253520 11880 ?        Ss   Jun09   0:00 /usr/bin/cupsd -l
+root        1386  0.0  0.0 282984  8316 ?        Ssl  Jun09   0:00 /usr/bin/gssproxy -i
+root        1393  0.0  0.0   9140  6660 ?        Ss   Jun09   0:00 sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+root        1394  0.0  0.1 501500 37400 ?        Ssl  Jun09   0:02 /usr/bin/python3 -Es /usr/sbin/tuned -l -P
+root        1751  0.0  0.1 500072 35316 ?        Ssl  Jun09   0:01 /usr/bin/python3 -Es /usr/sbin/tuned-ppd -l
+root        1774  0.0  0.0 495644 28548 ?        Ssl  Jun09   0:01 /usr/sbin/rsyslogd -n
+root        1782  0.0  0.0   5284  3208 ?        Ss   Jun09   0:00 /usr/sbin/atd -f
+root        1783  0.0  0.0 232776  3868 ?        Ss   Jun09   0:00 /usr/sbin/crond -n
+root        1840  0.0  0.0 388540 24800 ?        Ssl  Jun09   0:00 /usr/bin/plasmalogin
+root        1864  0.0  0.0 306644  7524 ?        Ssl  Jun09   0:00 /usr/libexec/uresourced
+root        2016  0.0  0.0      0     0 ?        S<   Jun09   0:00 [krfcommd]
+root        2074  0.0  0.0 319296 28148 ?        S    Jun09   0:00 /usr/libexec/plasmalogin-helper --socket /tmp/plasmalogin-auth-991ec550-d0cd-4042-bbc9-53c94b438ee7 --id 1 --start /usr/libexec/plasma-dbus-run-session-if-needed /usr/bin/startplasma-wayland --user tre4surehunter9
+tre4sur+    2080  0.0  0.0  25828 16500 ?        Ss   Jun09   0:03 /usr/lib/systemd/systemd --user
+tre4sur+    2082  0.0  0.0  16488  3220 ?        S    Jun09   0:00 (sd-pam)
+tre4sur+    2103  0.0  0.0   9332  4532 ?        Ss   Jun09   0:00 /usr/bin/dbus-broker-launch --scope user
+tre4sur+    2104  0.0  0.0   9116  7076 ?        S    Jun09   0:03 dbus-broker --log 11 --controller 10 --machine-id c8a753379f14450f838443f7b707fc2b --max-bytes 100000000000000 --max-fds 25000000000000 --max-matches 5000000000
+tre4sur+    2107  0.0  0.4 976212 137248 ?       SLl  Jun09   0:00 /usr/bin/ksecretd --pam-login 13 14
+tre4sur+    2108  0.0  0.1 613068 49468 tty2     Ssl+ Jun09   0:00 /usr/bin/startplasma-wayland
+tre4sur+    2380  0.0  0.0 386396 21244 ?        Ssl  Jun09   0:00 /usr/bin/kwin_wayland_wrapper --xwayland
+tre4sur+    2381  0.0  0.0 382104  9952 ?        Ssl  Jun09   0:01 /usr/libexec/uresourced --user
+tre4sur+    2391  0.0  0.0 355492 31648 ?        Ssl  Jun09   0:49 /usr/bin/pipewire
+tre4sur+    2393  0.0  0.1 948268 33332 ?        Ssl  Jun09   0:26 /usr/bin/wireplumber
+tre4sur+    2394  0.1  0.0 356528 30944 ?        SLsl Jun09   1:12 /usr/bin/pipewire-pulse
+tre4sur+    2395  0.0  0.1 268905136 38632 ?     SNsl Jun09   0:01 /usr/libexec/kf6/baloo_file
+tre4sur+    2396  4.2  1.3 2011140 438324 ?      Sl   Jun09  38:13 /usr/bin/kwin_wayland --wayland-fd 7 --socket wayland-0 --xwayland-fd 8 --xwayland-fd 9 --xwayland-display :0 --xwayland-xauthority /run/user/1000/xauth_JpkcMh --xwayland
+root        2453  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-1a]
+root        2454  0.0  0.0      0     0 ?        S    Jun09   0:06 [nvidia-drm/timeline-1b]
+tre4sur+    2457  0.0  0.6 1358200 219080 ?      Sl   Jun09   0:05 /usr/bin/plasma-keyboard
+tre4sur+    2465  0.2  0.6 499408 221280 ?       S    Jun09   1:59 /usr/bin/Xwayland :0 -auth /run/user/1000/xauth_JpkcMh -listenfd 8 -listenfd 9 -displayfd 96 -wm 99 -rootless -enable-ei-portal
+root        2471  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-1d]
+root        2472  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-1e]
+tre4sur+    2487  0.0  0.0 381208  8192 ?        Ssl  Jun09   0:00 /usr/libexec/at-spi-bus-launcher
+tre4sur+    2497  0.0  0.0   9200  4240 ?        S    Jun09   0:00 /usr/bin/dbus-broker-launch --config-file=/usr/share/defaults/at-spi2/accessibility.conf --scope user
+tre4sur+    2501  0.0  0.0   5420  3436 ?        S    Jun09   0:00 dbus-broker --log 10 --controller 9 --machine-id c8a753379f14450f838443f7b707fc2b --max-bytes 100000000000000 --max-fds 6400000 --max-matches 5000000000
+tre4sur+    2508  0.0  0.3 697896 115216 ?       Ssl  Jun09   0:00 /usr/bin/ksmserver
+tre4sur+    2510  0.0  0.5 2263020 193644 ?      Ssl  Jun09   0:10 /usr/bin/kded6
+root        2523  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-23]
+root        2524  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-24]
+root        2525  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-25]
+tre4sur+    2530  0.1  2.4 5868624 796260 ?      Ssl  Jun09   1:46 /usr/bin/plasmashell --no-respawn
+tre4sur+    2533  0.0  0.0 168944  7760 ?        Ssl  Jun09   0:00 /usr/libexec/at-spi2-registryd --use-gnome-session
+tre4sur+    2585  0.0  0.0 164212  6080 ?        Ssl  Jun09   0:00 /usr/libexec/dconf-service
+root        2595  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-27]
+tre4sur+    2598  0.0  0.1 895528 48128 ?        Ssl  Jun09   0:09 /usr/libexec/kactivitymanagerd
+tre4sur+    2601  0.0  0.0 463428 28864 ?        Ssl  Jun09   0:00 /usr/bin/gmenudbusmenuproxy
+tre4sur+    2602  0.0  0.3 699968 115684 ?       Ssl  Jun09   0:00 /usr/bin/kaccess
+tre4sur+    2603  0.0  0.5 1585036 194712 ?      Ssl  Jun09   0:00 /usr/libexec/kf6/polkit-kde-authentication-agent-1
+tre4sur+    2604  0.0  0.1 1003232 61472 ?       Ssl  Jun09   0:07 /usr/libexec/org_kde_powerdevil
+tre4sur+    2605  0.0  0.0 462840 28048 ?        Ssl  Jun09   0:00 /usr/bin/xembedsniproxy
+tre4sur+    2606  0.0  0.0   8884  5492 ?        Ss   Jun09   0:00 /usr/bin/ssh-agent -D
+tre4sur+    2643  0.0  0.0   8332  4760 ?        S    Jun09   0:00 /usr/bin/xsettingsd
+tre4sur+    2647  0.0  0.0  48436  8336 ?        Ss   Jun09   0:00 /usr/libexec/bluetooth/obexd
+root        2671  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-28]
+root        2690  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-29]
+tre4sur+    2754  0.0  0.5 1427416 173308 ?      Ssl  Jun09   0:07 /usr/bin/kdeconnectd
+tre4sur+    2774  0.0  0.0 516120 23556 ?        Ssl  Jun09   0:00 /usr/bin/abrt-applet --gapplication-service
+tre4sur+    2788  0.0  0.4 1197660 146352 ?      Ssl  Jun09   0:00 /usr/bin/xwaylandvideobridge
+tre4sur+    2791  0.0  0.1 2164124 59968 ?       Ssl  Jun09   0:00 /usr/bin/python3 -Es /usr/bin/seapplet
+tre4sur+    2796  0.0  0.0 402524 29544 ?        Ssl  Jun09   0:00 /usr/bin/kunifiedpush-distributor
+tre4sur+    2799  0.0  0.0 1054148 19992 ?       Ssl  Jun09   0:02 /usr/libexec/xdg-desktop-portal
+tre4sur+    2806  0.0  0.0 558788  9560 ?        Ssl  Jun09   0:00 /usr/libexec/geoclue-2.0/demos/agent
+tre4sur+    2811  0.0  0.6 1470920 205024 ?      Ssl  Jun09   0:01 /usr/libexec/DiscoverNotifier --check-delay 20
+tre4sur+    2812  0.0  0.5 1493076 194112 ?      Ssl  Jun09   0:01 /usr/bin/kalendarac
+tre4sur+    2838  0.0  0.0 531240  6452 ?        Ssl  Jun09   0:00 /usr/libexec/xdg-permission-store
+tre4sur+    2868  0.0  0.0 1051708 9204 ?        Ssl  Jun09   0:00 /usr/libexec/xdg-document-portal
+root        2883  0.0  0.0 555720 15452 ?        Ssl  Jun09   0:00 /usr/sbin/abrt-dbus -t133
+root        2892  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-2d]
+root        2896  0.0  0.0   2616  1880 ?        Ss   Jun09   0:00 fusermount3 -o rw,nosuid,nodev,fsname=portal,auto_unmount,subtype=portal -- /run/user/1000/doc
+tre4sur+    2917  0.0  0.5 1945388 173380 ?      Ssl  Jun09   0:09 /usr/libexec/xdg-desktop-portal-kde
+root        3071  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-2f]
+tre4sur+    3087  0.0  0.0 479140 10968 ?        Ssl  Jun09   0:00 /usr/libexec/imsettings-daemon --replace
+root        3094  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-31]
+root        3095  0.0  0.0      0     0 ?        S    Jun09   0:00 [UVM global queue]
+root        3096  0.0  0.0      0     0 ?        S    Jun09   0:00 [UVM deferred release queue]
+root        3097  0.0  0.0      0     0 ?        S    Jun09   0:00 [UVM Tools Event Queue]
+root        3113  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-32]
+root        3117  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-33]
+tre4sur+    3127  0.0  0.0 716272 26140 ?        Ssl  Jun09   0:00 /usr/libexec/xdg-desktop-portal-gtk
+root        3177  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-36]
+tre4sur+    3184  0.0  0.3 970820 131120 ?       Ssl  Jun09   0:00 /usr/bin/akonadi_control
+root        3188  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-3a]
+tre4sur+    3193  0.0  0.1 2668712 49696 ?       Sl   Jun09   0:00 /usr/bin/akonadiserver
+tre4sur+    3200  0.0  0.2 2719356 92564 ?       Sl   Jun09   0:01 /usr/bin/mysqld --defaults-file=/home/tre4surehunter9/.local/share/akonadi/mysql.conf --datadir=/home/tre4surehunter9/.local/share/akonadi/db_data/ --socket=/run/user/1000/akonadi/mysql.socket --pid-file=/run/user/1000/akonadi/mysql.pid
+root        3209  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-dio/nvme0n1p2]
+tre4sur+    3334  0.0  0.5 1495224 194208 ?      Sl   Jun09   0:00 /usr/bin/akonadi_archivemail_agent --identifier akonadi_archivemail_agent
+tre4sur+    3335  0.0  0.1 513104 36080 ?        Sl   Jun09   0:00 /usr/bin/akonadi_birthdays_resource --identifier akonadi_birthdays_resource
+tre4sur+    3336  0.0  0.1 513460 35348 ?        Sl   Jun09   0:00 /usr/bin/akonadi_contacts_resource --identifier akonadi_contacts_resource_0
+tre4sur+    3337  0.0  0.4 1052812 138136 ?      Sl   Jun09   0:00 /usr/bin/akonadi_followupreminder_agent --identifier akonadi_followupreminder_agent
+tre4sur+    3338  0.0  0.1 515556 39100 ?        Sl   Jun09   0:00 /usr/bin/akonadi_ical_resource --identifier akonadi_ical_resource_0
+tre4sur+    3339  0.0  0.1 538236 45680 ?        SNl  Jun09   0:00 /usr/bin/akonadi_indexing_agent --identifier akonadi_indexing_agent
+tre4sur+    3340  0.0  0.1 529864 42268 ?        Sl   Jun09   0:00 /usr/bin/akonadi_maildir_resource --identifier akonadi_maildir_resource_0
+tre4sur+    3341  0.0  0.4 1051712 138220 ?      Sl   Jun09   0:00 /usr/bin/akonadi_maildispatcher_agent --identifier akonadi_maildispatcher_agent
+tre4sur+    3342  0.0  0.5 1495332 194432 ?      Sl   Jun09   0:00 /usr/bin/akonadi_mailfilter_agent --identifier akonadi_mailfilter_agent
+tre4sur+    3343  0.0  0.4 1065172 145896 ?      Sl   Jun09   0:00 /usr/bin/akonadi_mailmerge_agent --identifier akonadi_mailmerge_agent
+tre4sur+    3344  0.0  0.4 1052320 137632 ?      Sl   Jun09   0:00 /usr/bin/akonadi_migration_agent --identifier akonadi_migration_agent
+tre4sur+    3345  0.0  0.4 1067452 146704 ?      Sl   Jun09   0:00 /usr/bin/akonadi_newmailnotifier_agent --identifier akonadi_newmailnotifier_agent
+tre4sur+    3346  0.0  0.5 1418040 191208 ?      Sl   Jun09   0:00 /usr/bin/akonadi_sendlater_agent --identifier akonadi_sendlater_agent
+tre4sur+    3347  0.0  0.5 1421580 192672 ?      Sl   Jun09   0:00 /usr/bin/akonadi_unifiedmailbox_agent --identifier akonadi_unifiedmailbox_agent
+root        3373  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-3c]
+root        3375  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-3d]
+root        3376  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-3e]
+root        3378  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-3f]
+root        3381  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-40]
+root        3395  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-41]
+root        3398  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-42]
+root        3399  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-43]
+root        3402  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-44]
+tre4sur+    3533  0.0  0.0   1068   720 ?        S    Jun09   0:00 catatonit -P
+tre4sur+    3927  0.0  0.4 269407760 133744 ?    Ssl  Jun09   0:00 /usr/libexec/baloorunner
+root        3931  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-4e]
+root        5913  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-82]
+tre4sur+    8673  0.0  0.4 987604 145848 ?       Ssl  Jun09   0:00 /usr/bin/dolphin --daemon
+root        8677  0.0  0.0      0     0 ?        S    Jun09   0:00 [nvidia-drm/timeline-a0]
+root        9476  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-uas]
+root       18236  0.0  0.0      0     0 ?        I    Jun09   0:00 [kworker/12:0-events]
+root       28512  0.0  0.0      0     0 ?        I    Jun09   0:00 [kworker/14:2-mm_percpu_wq]
+root       30320  0.0  0.0      0     0 ?        I    Jun09   0:01 [kworker/3:1-events]
+root       30621  0.0  0.0   7216  2152 ?        S    Jun09   0:00 dbus-launch --autolaunch=c8a753379f14450f838443f7b707fc2b --binary-syntax --close-stderr
+root       30622  0.0  0.0   8680  3016 ?        Ss   Jun09   0:00 /usr/bin/dbus-daemon --syslog-only --fork --print-pid 5 --print-address 7 --session
+root       30634  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsIO]
+root       30635  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30636  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30637  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30638  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30639  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30640  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30641  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30642  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30643  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30644  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30645  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30646  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30647  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30648  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30649  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30650  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsCommit]
+root       30651  0.0  0.0      0     0 ?        S    Jun09   0:00 [jfsSync]
+root       30660  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-xfsalloc]
+root       30661  0.0  0.0      0     0 ?        I<   Jun09   0:00 [kworker/R-xfs_mru_cache]
+root       31858  0.0  0.0      0     0 ?        I    Jun09   0:00 [kworker/2:2-inode_switch_wbs]
+root       32010  0.0  0.0      0     0 ?        I    Jun09   0:00 [kworker/1:1-mm_percpu_wq]
+root       33469  0.0  0.0      0     0 ?        S    Jun09   0:00 [psimon]
+passim     33818  0.0  0.0 322696 13820 ?        Ssl  Jun09   0:00 /usr/libexec/passimd
+tre4sur+   34165  0.0  0.0 531352  6760 ?        Ssl  Jun09   0:00 /usr/libexec/flatpak-session-helper
+tre4sur+   34170  0.0  0.0   4352   992 ?        Ss   Jun09   0:00 server --sh -n /run/user/1000/.flatpak-helper/pkcs11-flatpak-34165 --provider p11-kit-trust.so pkcs11:model=p11-kit-trust?write-protected=yes
+tre4sur+   34648  0.0  0.1 411532 35908 ?        Ssl  Jun09   0:00 /usr/libexec/drkonqi-coredump-launcher
+tre4sur+   35192  0.0  0.0  13776  3708 ?        Ssl  Jun09   0:00 /usr/bin/gamemoded
+tre4sur+   35211  0.0  0.1 411536 35908 ?        Ssl  Jun09   0:00 /usr/libexec/drkonqi-coredump-launcher
+root       35235  0.0  0.0      0     0 ?        I    Jun09   0:00 [kworker/8:0-mm_percpu_wq]
+root       50473  0.0  0.0      0     0 ?        I    Jun09   0:02 [kworker/13:1-events]
+root       57252  0.0  0.0      0     0 ?        I    Jun09   0:00 [kworker/11:2-events]
+root       65024  0.0  0.0      0     0 ?        I    00:09   0:00 [kworker/7:0-mm_percpu_wq]
+root       69435  0.0  0.0      0     0 ?        I    00:21   0:00 [kworker/2:1-mm_percpu_wq]
+root       70393  0.0  0.0      0     0 ?        I    00:23   0:00 [kworker/9:1-events]
+root       71091  0.0  0.0      0     0 ?        I    00:25   0:00 [kworker/13:2-events]
+root       72917  0.0  0.0      0     0 ?        I    00:29   0:00 [kworker/0:0-events]
+root       73236  0.0  0.0      0     0 ?        I    00:30   0:00 [kworker/4:2-cgroup_free]
+root       73425  0.0  0.0      0     0 ?        I    00:31   0:00 [kworker/12:2-inode_switch_wbs]
+root       74232  0.0  0.0      0     0 ?        I    00:38   0:00 [kworker/7:1-inode_switch_wbs]
+root       75100  0.0  0.0      0     0 ?        I    00:39   0:00 [kworker/14:1-events]
+root       75248  0.0  0.0      0     0 ?        I    00:55   0:00 [kworker/5:0-mm_percpu_wq]
+root       75408  0.0  0.0      0     0 ?        I    07:29   0:00 [kworker/u64:0-netns]
+root       75416  0.0  0.0      0     0 ?        I    07:29   0:00 [kworker/u66:2-btrfs-endio-write]
+root       75422  0.0  0.0      0     0 ?        S    07:29   0:00 [nvidia]
+root       75428  0.0  0.0      0     0 ?        I    07:29   0:00 [kworker/4:0-events]
+root       75454  0.0  0.0      0     0 ?        I    07:29   0:00 [kworker/15:0-events]
+root       75496  0.0  0.0      0     0 ?        I    07:29   0:00 [kworker/3:2]
+tre4sur+   75573  0.0  0.0   3812  2324 ?        Ss   07:29   0:00 /usr/bin/bwrap --args 73 -- prismlauncher
+tre4sur+   75579  0.0  0.0   3812  2344 ?        S    07:29   0:00 /usr/bin/bwrap --args 75 -- /usr/bin/xdg-dbus-proxy --args=74
+tre4sur+   75580  0.0  0.0 457616  6392 ?        Sl   07:29   0:00 /usr/bin/xdg-dbus-proxy --args=74
+tre4sur+   75583  0.0  0.0   3820  1640 ?        S    07:29   0:00 /usr/bin/bwrap --args 73 -- prismlauncher
+tre4sur+   75584  0.0  0.6 1468720 206320 ?      Sl   07:29   0:00 /app/bin/prismrun
+root       75600  0.0  0.0      0     0 ?        S    07:29   0:00 [nvidia-drm/timeline-5a2]
+root       75608  0.0  0.0      0     0 ?        S    07:29   0:00 [nvidia-drm/timeline-5a3]
+tre4sur+   75625 81.4 14.4 16463464 4736984 ?    Sl   07:30  50:29 /home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/java/java-runtime-gamma/bin/java -Duser.language=en -Xms512m -Xmx4096m -Djava.library.path=/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances/kanye/natives -cp /app/share/PrismLauncher/NewLaunch.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-glfw-natives-linux/3.3.2-lwjgl.1/lwjgl-glfw-natives-linux-3.3.2-lwjgl.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-glfw/3.3.1/lwjgl-glfw-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-jemalloc-natives-linux/3.3.1/lwjgl-jemalloc-natives-linux-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-jemalloc/3.3.1/lwjgl-jemalloc-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-natives-linux/3.3.1/lwjgl-natives-linux-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-openal-natives-linux/3.3.1/lwjgl-openal-natives-linux-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-openal/3.3.1/lwjgl-openal-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-opengl-natives-linux/3.3.1/lwjgl-opengl-natives-linux-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-opengl/3.3.1/lwjgl-opengl-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-stb-natives-linux/3.3.1/lwjgl-stb-natives-linux-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-stb/3.3.1/lwjgl-stb-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-tinyfd-natives-linux/3.3.1/lwjgl-tinyfd-natives-linux-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl-tinyfd/3.3.1/lwjgl-tinyfd-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/github/oshi/oshi-core/6.2.2/oshi-core-6.2.2.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/google/code/gson/gson/2.10/gson-2.10.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/google/guava/failureaccess/1.0.1/failureaccess-1.0.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/google/guava/guava/31.1-jre/guava-31.1-jre.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/ibm/icu/icu4j/71.1/icu4j-71.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/mojang/authlib/4.0.43/authlib-4.0.43.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/mojang/blocklist/1.0.10/blocklist-1.0.10.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/mojang/brigadier/1.1.8/brigadier-1.1.8.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/mojang/datafixerupper/6.0.8/datafixerupper-6.0.8.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/mojang/logging/1.1.1/logging-1.1.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/mojang/patchy/2.2.10/patchy-2.2.10.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/mojang/text2speech/1.17.9/text2speech-1.17.9.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/commons-codec/commons-codec/1.15/commons-codec-1.15.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/commons-io/commons-io/2.11.0/commons-io-2.11.0.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/commons-logging/commons-logging/1.2/commons-logging-1.2.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/io/netty/netty-buffer/4.1.82.Final/netty-buffer-4.1.82.Final.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/io/netty/netty-codec/4.1.82.Final/netty-codec-4.1.82.Final.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/io/netty/netty-common/4.1.82.Final/netty-common-4.1.82.Final.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/io/netty/netty-handler/4.1.82.Final/netty-handler-4.1.82.Final.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/io/netty/netty-resolver/4.1.82.Final/netty-resolver-4.1.82.Final.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/io/netty/netty-transport-classes-epoll/4.1.82.Final/netty-transport-classes-epoll-4.1.82.Final.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/io/netty/netty-transport-native-epoll/4.1.82.Final/netty-transport-native-epoll-4.1.82.Final-linux-aarch_64.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/io/netty/netty-transport-native-epoll/4.1.82.Final/netty-transport-native-epoll-4.1.82.Final-linux-x86_64.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/io/netty/netty-transport-native-unix-common/4.1.82.Final/netty-transport-native-unix-common-4.1.82.Final.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/io/netty/netty-transport/4.1.82.Final/netty-transport-4.1.82.Final.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/it/unimi/dsi/fastutil/8.5.9/fastutil-8.5.9.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/net/java/dev/jna/jna-platform/5.12.1/jna-platform-5.12.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/net/java/dev/jna/jna/5.12.1/jna-5.12.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/net/sf/jopt-simple/jopt-simple/5.0.4/jopt-simple-5.0.4.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/apache/commons/commons-compress/1.21/commons-compress-1.21.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/apache/commons/commons-lang3/3.12.0/commons-lang3-3.12.0.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/apache/httpcomponents/httpclient/4.5.13/httpclient-4.5.13.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/apache/httpcomponents/httpcore/4.4.15/httpcore-4.4.15.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/apache/logging/log4j/log4j-api/2.19.0/log4j-api-2.19.0.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/apache/logging/log4j/log4j-core/2.19.0/log4j-core-2.19.0.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/apache/logging/log4j/log4j-slf4j2-impl/2.19.0/log4j-slf4j2-impl-2.19.0.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/joml/joml/1.10.5/joml-1.10.5.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/slf4j/slf4j-api/2.0.1/slf4j-api-2.0.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/net/fabricmc/intermediary/1.20.1/intermediary-1.20.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/ow2/asm/asm/9.10.1/asm-9.10.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/ow2/asm/asm-analysis/9.10.1/asm-analysis-9.10.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/ow2/asm/asm-commons/9.10.1/asm-commons-9.10.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/ow2/asm/asm-tree/9.10.1/asm-tree-9.10.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/org/ow2/asm/asm-util/9.10.1/asm-util-9.10.1.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/net/fabricmc/sponge-mixin/0.17.3+mixin.0.8.7/sponge-mixin-0.17.3+mixin.0.8.7.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/net/fabricmc/fabric-loader/0.19.3/fabric-loader-0.19.3.jar:/home/tre4surehunter9/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/mojang/minecraft/1.20.1/minecraft-1.20.1-client.jar org.prismlauncher.EntryPoint
+root       75718  0.0  0.0      0     0 ?        S    07:30   0:00 [nvidia-drm/timeline-5ab]
+root       75719  0.0  0.0      0     0 ?        S    07:30   0:00 [nvidia-drm/timeline-5ad]
+tre4sur+   75990 75.7  2.8 12873564 950856 ?     Ssl  07:39  40:12 /usr/lib64/firefox/firefox
+tre4sur+   76010  0.0  0.0 149224  2968 ?        Sl   07:39   0:00 /usr/lib64/firefox/crashhelper 75990 9 /tmp/ 11
+tre4sur+   76077  0.0  0.0 446848 29064 ?        S    07:39   0:00 /usr/lib64/firefox/firefox -contentproc -ipcHandle 0 -signalPipe 1 -initialChannelId {67898a07-58d0-4fad-b3c5-20432b5dac00} -parentPid 75990 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 1 forkserver
+root       76079  0.0  0.0      0     0 ?        S    07:39   0:00 [nvidia-drm/timeline-5bc]
+tre4sur+   76080  0.0  0.1 471380 47060 ?        Sl   07:39   0:00 /usr/lib64/firefox/firefox -contentproc -parentBuildID 20260527091838 -prefsHandle 0:36031 -prefMapHandle 1:286216 -sandboxReporter 2 -chrootClient 3 -ipcHandle 4 -initialChannelId {37661a74-d23e-4427-8bed-a33b25db90ad} -parentPid 75990 -crashReporter 5 -crashHelper 6 -appDir /usr/lib64/firefox/browser 2 socket
+pcscd      76088  0.0  0.0 1355140 10508 ?       Ssl  07:39   0:00 /usr/bin/pcscd --foreground --auto-exit
+tre4sur+   76229  1.6  0.7 3033116 260572 ?      Sl   07:39   0:52 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:36165 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {718f3922-0460-4477-9c0d-cb903640a255} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 3 tab
+tre4sur+   76241  0.0  0.2 588676 65888 ?        Sl   07:39   0:00 /usr/lib64/firefox/firefox -contentproc -parentBuildID 20260527091838 -prefsHandle 0:36165 -prefMapHandle 1:286216 -sandboxReporter 2 -chrootClient 3 -ipcHandle 4 -initialChannelId {ba47efaf-1b31-429f-917f-0b0ac2e92ec0} -parentPid 75990 -crashReporter 5 -crashHelper 6 -appDir /usr/lib64/firefox/browser 4 rdd
+tre4sur+   76450  0.0  0.3 2861948 116496 ?      Sl   07:39   0:00 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:36271 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {359e4066-bfcc-4af4-8a12-9a4affd79138} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 5 tab
+tre4sur+   76502  0.1  0.6 2984568 213112 ?      Sl   07:39   0:04 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:45597 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {40b5627f-7e80-4d0b-af88-41330d782b0d} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 6 tab
+tre4sur+   76548  0.0  0.1 542228 51412 ?        Sl   07:39   0:00 /usr/lib64/firefox/firefox -contentproc -parentBuildID 20260527091838 -sandboxingKind 0 -prefsHandle 0:50358 -prefMapHandle 1:286216 -sandboxReporter 2 -chrootClient 3 -ipcHandle 4 -initialChannelId {b0514046-faa2-4ee7-b76a-4003ab154e1c} -parentPid 75990 -crashReporter 5 -crashHelper 6 -appDir /usr/lib64/firefox/browser 7 utility
+tre4sur+   76593  0.3  0.5 2917748 171036 ?      Sl   07:39   0:12 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46605 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {7ca848bc-1317-45d4-9510-af6f3b55c046} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 10 tab
+tre4sur+   76770  5.3  1.0 3211216 354732 ?      Sl   07:39   2:51 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46712 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {f4ab2594-24cd-4c4b-aa6d-023f7ec98787} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 11 tab
+tre4sur+   76972  0.1  0.6 1810980 200704 ?      Ssl  07:39   0:04 /usr/bin/konsole
+root       76979  0.0  0.0      0     0 ?        S    07:39   0:00 [nvidia-drm/timeline-5c6]
+root       77053  0.0  0.0      0     0 ?        S    07:39   0:00 [nvidia-drm/timeline-5c7]
+root       77110  0.0  0.0  24628 15332 ?        Ss   07:40   0:00 /usr/lib/systemd/systemd --user
+root       77112  0.0  0.0  16472  3248 ?        S    07:40   0:00 (sd-pam)
+root       77124  0.0  0.0      0     0 ?        S    07:40   0:00 [psimon]
+root       77132  0.0  0.0   9200  4448 ?        Ss   07:40   0:00 /usr/bin/dbus-broker-launch --scope user
+root       77133  0.0  0.0   5420  3292 ?        S    07:40   0:00 dbus-broker --log 11 --controller 10 --machine-id c8a753379f14450f838443f7b707fc2b --max-bytes 100000000000000 --max-fds 25000000000000 --max-matches 5000000000
+root       77548  0.0  0.0      0     0 ?        S    07:48   0:00 [nvidia-drm/timeline-612]
+tre4sur+   77557  0.0  0.4 2892620 155720 ?      Sl   07:48   0:01 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46753 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {63b38a84-822d-4ff5-9349-551090f6ed36} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 16 tab
+root       77673  0.0  0.0      0     0 ?        I    07:49   0:00 [kworker/u65:4-btrfs-endio-meta]
+root       77695  0.0  0.0      0     0 ?        I    07:49   0:00 [kworker/u65:10-btrfs-endio]
+root       77711  0.0  0.0      0     0 ?        I    07:49   0:00 [kworker/u66:9-btrfs-endio-meta]
+root       77841  0.0  0.0      0     0 ?        I    07:49   0:00 [kworker/11:0-mm_percpu_wq]
+tre4sur+   77857  0.1  0.7 3025432 254400 ?      Sl   07:49   0:04 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46753 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {2a9c6079-1aff-4a08-a60d-9f5d73168149} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 17 tab
+root       78098  0.0  0.0      0     0 ?        I<   07:50   0:00 [kworker/R-ib-comp-wq]
+root       78099  0.0  0.0      0     0 ?        I<   07:50   0:00 [kworker/R-ib-comp-unb-wq]
+root       78100  0.0  0.0      0     0 ?        I<   07:50   0:00 [kworker/R-ib_mcast]
+root       78101  0.0  0.0      0     0 ?        I<   07:50   0:00 [kworker/R-ib_nl_sa_wq]
+root       78134  0.0  0.0      0     0 ?        I<   07:51   0:00 [kworker/u67:1-hci0]
+tre4sur+   78137  0.0  0.0 233756  6004 pts/5    Ss   07:51   0:00 /bin/bash
+root       78416  0.0  0.0      0     0 ?        I    07:55   0:00 [kworker/10:2]
+tre4sur+   78500  0.1  0.5 2956692 184552 ?      Sl   07:55   0:02 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46753 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {d9137a0c-0f47-4c2a-9d36-0323bdf49b05} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 19 tab
+root       78542  0.0  0.0      0     0 ?        I    07:55   0:00 [kworker/u65:2-events_unbound]
+root       78576  0.0  0.0      0     0 ?        I    07:56   0:00 [kworker/8:2]
+root       78665  0.0  0.0      0     0 ?        I    07:56   0:00 [kworker/6:2]
+root       78666  0.0  0.0      0     0 ?        I    07:56   0:00 [kworker/1:0]
+root       78747  0.0  0.0      0     0 ?        I    07:57   0:00 [kworker/u66:1-btrfs-endio-write]
+tre4sur+   78758 11.6  1.7 3618072 585280 ?      Sl   07:57   3:58 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46753 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {dfe25875-412e-4ac4-8c16-3cafb19b322c} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 20 tab
+tre4sur+   78814  0.5  0.7 3098508 252872 ?      Sl   07:57   0:10 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46753 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {e8891872-cc28-489f-ba49-b56f65186a5f} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 21 tab
+root       78927  0.0  0.0      0     0 ?        I    07:58   0:00 [kworker/u65:11-btrfs-endio]
+tre4sur+   79011  0.0  0.6 2109844 200304 ?      Ssl  07:58   0:01 /usr/bin/dolphin
+root       79015  0.0  0.0      0     0 ?        S    07:58   0:00 [nvidia-drm/timeline-6ba]
+root       79021  0.0  0.0      0     0 ?        S    07:58   0:00 [nvidia-drm/timeline-6bb]
+root       79248  0.0  0.0      0     0 ?        S    07:59   0:00 [nvidia-drm/timeline-6c2]
+root       79405  0.0  0.0      0     0 ?        I    08:03   0:00 [kworker/15:1-mm_percpu_wq]
+root       79480  0.0  0.0      0     0 ?        I    08:07   0:00 [kworker/u66:6-btrfs-endio]
+root       79486  0.0  0.0      0     0 ?        I    08:07   0:00 [kworker/u65:1-btrfs-endio-write]
+root       79617  0.0  0.0      0     0 ?        I    08:11   0:00 [kworker/u65:3-events_unbound]
+root       79643  0.0  0.0      0     0 ?        I<   08:12   0:00 [kworker/u67:2-hci0]
+root       79828  0.0  0.0      0     0 ?        I    08:18   0:00 [kworker/u65:6-btrfs-endio-write]
+root       79829  0.0  0.0      0     0 ?        I    08:18   0:00 [kworker/u65:7-btrfs-endio]
+root       79831  0.0  0.0      0     0 ?        I    08:18   0:00 [kworker/u65:13-writeback]
+root       79852  0.0  0.0      0     0 ?        I    08:19   0:00 [kworker/u66:4-btrfs-endio-meta]
+root       80078  0.0  0.0      0     0 ?        I    08:23   0:00 [kworker/5:1]
+root       80202  0.0  0.0      0     0 ?        I    08:24   0:00 [kworker/0:1-cgroup_free]
+root       80314  0.0  0.0      0     0 ?        I<   08:29   0:00 [kworker/u67:0]
+root       80447  0.0  0.0      0     0 ?        I    08:29   0:00 [kworker/u66:0-btrfs-endio-write]
+tre4sur+   80535 30.1  1.6 3598144 546932 ?      Sl   08:29   0:49 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46753 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {a051be23-a12d-45bb-b105-5dd93ea87e79} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 29 tab
+tre4sur+   80588  0.0  0.0 247708 11456 ?        S    08:29   0:00 /usr/lib64/speech-dispatcher-modules//sd_espeak-ng /etc/speech-dispatcher/modules/espeak-ng.conf
+tre4sur+   80592  0.0  0.0 247792 11420 ?        S    08:29   0:00 /usr/lib64/speech-dispatcher-modules//sd_espeak-ng /etc/speech-dispatcher/modules/
+tre4sur+   80593  0.0  0.3 2843400 109404 ?      Sl   08:29   0:00 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46753 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {be2f2718-b488-4d82-b7c7-c49decb2cf49} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 30 tab
+tre4sur+   80628  0.0  0.0 159472  6468 ?        Sl   08:29   0:00 /usr/lib64/speech-dispatcher-modules//sd_dummy /etc/speech-dispatcher/modules/
+tre4sur+   80631  0.1  0.0 340636  6628 ?        Ssl  08:29   0:00 /usr/bin/speech-dispatcher --spawn --communication-method unix_socket --socket-path /run/user/1000/speech-dispatcher/speechd.sock
+root       80650  0.0  0.0      0     0 ?        I    08:29   0:00 [kworker/15:2]
+tre4sur+   80668  0.0  0.2 2829996 77000 ?       Sl   08:29   0:00 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46753 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {7e306656-83a8-488c-ab57-385af96a5214} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 31 tab
+tre4sur+   80675  0.0  0.2 2829996 77352 ?       Sl   08:29   0:00 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46753 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {06c8a1c4-fc66-41fd-b7dd-da2e9d97a5cc} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 32 tab
+root       80739  0.0  0.0      0     0 ?        I    08:29   0:00 [kworker/11:1]
+tre4sur+   80744  0.0  0.2 2829996 76636 ?       Sl   08:29   0:00 /usr/lib64/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:46753 -prefMapHandle 1:286216 -jsInitHandle 2:156120 -parentBuildID 20260527091838 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {adab7306-245c-42d8-9e1d-63d834a0246d} -parentPid 75990 -crashReporter 6 -crashHelper 7 -greomni /usr/lib64/firefox/omni.ja -appomni /usr/lib64/firefox/browser/omni.ja -appDir /usr/lib64/firefox/browser 33 tab
+root       80780  0.0  0.0      0     0 ?        I    08:29   0:00 [kworker/u66:3-btrfs-endio]
+root       80781  0.0  0.0      0     0 ?        I    08:29   0:00 [kworker/u66:5-btrfs-endio]
+root       80782  0.0  0.0      0     0 ?        I    08:29   0:00 [kworker/u66:7-events_unbound]
+root       80787  0.0  0.0      0     0 ?        I    08:30   0:00 [kworker/u65:0-btrfs-endio]
+root       80788  0.0  0.0      0     0 ?        I    08:30   0:00 [kworker/u65:5-btrfs-endio-write]
+root       80789  0.0  0.0      0     0 ?        I    08:30   0:00 [kworker/u65:8-btrfs-endio]
+tre4sur+   80793  0.0  0.0 268767524 31020 ?     S    08:30   0:00 /usr/libexec/kf6/kioworker /usr/lib64/qt6/plugins/kf6/kio/tags.so tags  local:/run/user/1000/xdg-desktop-portal-kdeOYemgK.86.kioworker.socket
+tre4sur+   80806  0.1  0.3 619280 110624 ?       SNl  08:30   0:00 /usr/libexec/kf6/kioworker /usr/lib64/qt6/plugins/kf6/kio/thumbnail.so thumbnail  local:/run/user/1000/xdg-desktop-portal-kdeOKVmea.92.kioworker.socket
+tre4sur+   80811  0.1  0.3 619280 110604 ?       SNl  08:30   0:00 /usr/libexec/kf6/kioworker /usr/lib64/qt6/plugins/kf6/kio/thumbnail.so thumbnail  local:/run/user/1000/xdg-desktop-portal-kdekXwyWq.93.kioworker.socket
+tre4sur+   80813  0.1  0.3 619280 110620 ?       SNl  08:30   0:00 /usr/libexec/kf6/kioworker /usr/lib64/qt6/plugins/kf6/kio/thumbnail.so thumbnail  local:/run/user/1000/xdg-desktop-portal-kdeuOpucv.94.kioworker.socket
+tre4sur+   80816  0.1  0.3 619280 110628 ?       SNl  08:30   0:00 /usr/libexec/kf6/kioworker /usr/lib64/qt6/plugins/kf6/kio/thumbnail.so thumbnail  local:/run/user/1000/xdg-desktop-portal-kdeoBKAit.95.kioworker.socket
+tre4sur+   80818  0.1  0.3 619280 110808 ?       SNl  08:30   0:00 /usr/libexec/kf6/kioworker /usr/lib64/qt6/plugins/kf6/kio/thumbnail.so thumbnail  local:/run/user/1000/xdg-desktop-portal-kdebUXBag.96.kioworker.socket
+root       80857  0.0  0.0  15888  6792 ?        S    08:30   0:00 systemd-userwork: waiting...
+root       80858  0.0  0.0  15888  6708 ?        S    08:30   0:00 systemd-userwork: waiting...
+root       80859  0.0  0.0  15748  6704 ?        S    08:30   0:00 systemd-userwork: waiting...
+tre4sur+   80914  0.3  0.0   4144  3296 pts/5    S+   08:32   0:00 bootimage runner target/x86_64-palladiumos/debug/palladiumos
+tre4sur+   80980 35.8  0.4 4008432 147136 pts/5  Sl+  08:32   0:03 qemu-system-x86_64 -drive format=raw,file=target/x86_64-palladiumos/debug/bootimage-palladiumos.bin
+tre4sur+   80999  0.0  0.0   3820  2352 pts/5    S+   08:32   0:00 bwrap --unshare-all --die-with-parent --chdir / --ro-bind /usr /usr --dev /dev --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache --ro-bind-try /nix/store /nix/store --tmpfs /tmp-home --tmpfs /tmp-run --clearenv --setenv HOME /tmp-home --setenv XDG_RUNTIME_DIR /tmp-run --setenv XDG_RUNTIME_DIR /run/user/1000 --symlink /usr/lib /lib --symlink /usr/lib64 /lib64 --ro-bind-try /etc/fonts/conf.d /etc/fonts/conf.d --ro-bind-try /etc/fonts/fonts.conf /etc/fonts/fonts.conf --ro-bind-try /home/tre4surehunter9/.cache/fontconfig /home/tre4surehunter9/.cache/fontconfig --ro-bind-try /usr/lib/fontconfig/cache /usr/lib/fontconfig/cache --bind-try /home/tre4surehunter9/.cache/glycin/usr/libexec/glycin-loaders/2+/glycin-svg /home/tre4surehunter9/.cache/glycin/usr/libexec/glycin-loaders/2+/glycin-svg --setenv XDG_CACHE_HOME /home/tre4surehunter9/.cache/glycin/usr/libexec/glycin-loaders/2+/glycin-svg --seccomp 30 /usr/libexec/glycin-loaders/2+/glycin-svg --dbus-fd 29
+tre4sur+   81000  0.0  0.0   3820  1492 pts/5    S+   08:32   0:00 bwrap --unshare-all --die-with-parent --chdir / --ro-bind /usr /usr --dev /dev --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache --ro-bind-try /nix/store /nix/store --tmpfs /tmp-home --tmpfs /tmp-run --clearenv --setenv HOME /tmp-home --setenv XDG_RUNTIME_DIR /tmp-run --setenv XDG_RUNTIME_DIR /run/user/1000 --symlink /usr/lib /lib --symlink /usr/lib64 /lib64 --ro-bind-try /etc/fonts/conf.d /etc/fonts/conf.d --ro-bind-try /etc/fonts/fonts.conf /etc/fonts/fonts.conf --ro-bind-try /home/tre4surehunter9/.cache/fontconfig /home/tre4surehunter9/.cache/fontconfig --ro-bind-try /usr/lib/fontconfig/cache /usr/lib/fontconfig/cache --bind-try /home/tre4surehunter9/.cache/glycin/usr/libexec/glycin-loaders/2+/glycin-svg /home/tre4surehunter9/.cache/glycin/usr/libexec/glycin-loaders/2+/glycin-svg --setenv XDG_CACHE_HOME /home/tre4surehunter9/.cache/glycin/usr/libexec/glycin-loaders/2+/glycin-svg --seccomp 30 /usr/libexec/glycin-loaders/2+/glycin-svg --dbus-fd 29
+tre4sur+   81001  0.1  0.0 303612 17516 pts/5    Sl+  08:32   0:00 /usr/libexec/glycin-loaders/2+/glycin-svg --dbus-fd 29
+tre4sur+   81042  0.1  0.0 268767524 30932 ?     S    08:32   0:00 /usr/libexec/kf6/kioworker /usr/lib64/qt6/plugins/kf6/kio/tags.so tags  local:/run/user/1000/kded6ympZPr.17.kioworker.socket
+tre4sur+   81045  0.1  0.0 268767524 30920 ?     S    08:32   0:00 /usr/libexec/kf6/kioworker /usr/lib64/qt6/plugins/kf6/kio/tags.so tags  local:/run/user/1000/plasmashelllokECC.98.kioworker.socket
+tre4sur+   81047  0.1  0.0 268767524 30868 ?     S    08:32   0:00 /usr/libexec/kf6/kioworker /usr/lib64/qt6/plugins/kf6/kio/tags.so tags  local:/run/user/1000/kdeconnect.daemonALinaW.15.kioworker.socket
+tre4sur+   81048  0.2  0.0 268767524 30968 ?     S    08:32   0:00 /usr/libexec/kf6/kioworker /usr/lib64/qt6/plugins/kf6/kio/tags.so tags  local:/run/user/1000/plasmashellVdsmko.99.kioworker.socket
+tre4sur+   81049  0.1  0.0 268767524 30524 ?     S    08:32   0:00 /usr/libexec/kf6/kioworker /usr/lib64/qt6/plugins/kf6/kio/tags.so tags  local:/run/user/1000/dolphinOFgbRs.33.kioworker.socket
+root       81153  0.0  0.0      0     0 ?        S    08:32   0:00 [nvidia-drm/timeline-809]
+tre4sur+   81161  0.6  0.0 233624  5928 pts/1    Ss   08:32   0:00 /bin/bash
+tre4sur+   81193  0.0  0.0 235148  5140 pts/1    R+   08:32   0:00 ps aux
