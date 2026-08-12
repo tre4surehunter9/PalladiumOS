@@ -26,6 +26,9 @@ i used AI for
 * Scripting
 * Text Editor
 
+## Programs
+the only program is hello which can be run with runprogram hello
+
 ## Instructions for Running the Kernel
 * Install QEMU
 * Download the Latest Release
