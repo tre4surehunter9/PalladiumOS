@@ -8,7 +8,7 @@
 Currently compling using 'cargo build' is broken for some Goddamn reason so it only works on my pc I really dont know why.
 
 ## Notice
-I do want to make things clear and say i used AI for some parts of my code as this is my first kernel so I dont understand much yet, I am so sorry and in the future i'll try to use less AI
+I do want to make things clear and say i used AI for some parts of my code as this is my first kernel so I dont understand much yet
 
 i used AI for
 * the filesystem
