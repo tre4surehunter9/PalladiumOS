@@ -63,63 +63,42 @@ entry_point!(kernel_main);
 extern crate alloc;
 use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
 
-// start function
-fn kernel_main(boot_info: &'static BootInfo) -> ! {
-    use palladiumos::allocator;
-    use palladiumos::memory;
-    use palladiumos::memory::translate_addr;
-    use palladiumos::memory::BootInfoFrameAllocator;
-    use palladiumos::task::executor::Executor;
-    use palladiumos::task::keyboard;
-    use palladiumos::task::keyboard::run_shell;
-    use palladiumos::usermode::enter_usermode;
-    use x86_64::structures::paging::Page;
-    use x86_64::{structures::paging::Translate, VirtAddr};
+    // start function
+    fn kernel_main(boot_info: &'static BootInfo) -> ! {
+        use palladiumos::allocator;
+        use palladiumos::memory;
+        use palladiumos::memory::BootInfoFrameAllocator;
+        use palladiumos::task::executor::Executor;
+        use palladiumos::task::keyboard::run_shell;
+        use x86_64::VirtAddr;
 
-    // welcome message
-    palladiumos::shell::print_welcome();
-    palladiumos::init();
+        // welcome message
+        palladiumos::shell::print_welcome();
+        palladiumos::init();
 
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+        let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+        let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+        let mut mapper = unsafe { memory::init(phys_mem_offset) };
 
-    allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+        allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
 
-    static HELLO_PROGRAM: &[u8] = include_bytes!("user_progs/hello.bin");
+        palladiumos::filesystem::init_default_files();
 
-    palladiumos::filesystem::init_default_files();
+        // One-time fixups so a ring-3 program can touch VGA memory whenever
+        // it's launched later via the shell's `runprogram` command.
+        memory::ensure_user_accessible(VirtAddr::new(0xb8000), phys_mem_offset);
+        memory::map_user_vga(&mut mapper);
 
-    // --- ring 3 test: this block must run BEFORE the executor, since
-    // executor.run() and enter_usermode() both never return. Whatever is
-    // placed after either of them is dead code. ---
+        // Hand the mapper/frame allocator off to memory::MAPPER / memory::FRAME_ALLOCATOR
+        // so shell.rs's cmd_runprogram can reach them later. This is why the ring-3
+        // launch no longer happens here — kernel_main boots straight to the shell now.
+        *memory::MAPPER.lock() = Some(mapper);
+        *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
 
-    let user_page = Page::containing_address(VirtAddr::new(0x_6666_6666_0000));
-    memory::map_user_page(&mut mapper, &mut frame_allocator, user_page);
-    memory::load_payload_bytes(user_page.start_address(), HELLO_PROGRAM);
-
-    memory::ensure_user_accessible(VirtAddr::new(0xb8000), phys_mem_offset);
-    memory::map_user_vga(&mut mapper);
-
-    let user_stack_page = Page::containing_address(VirtAddr::new(0x_5555_5555_0000));
-    memory::map_user_page(&mut mapper, &mut frame_allocator, user_stack_page);
-
-    enter_usermode(
-        user_page.start_address(),
-                   user_stack_page.start_address() + 4096u64, // stack grows down, start at top
-    );
-
-    // everything below here is currently unreachable, since enter_usermode
-    // never returns (-> !). Left in place for when the syscall/return path
-    // exists and this becomes reachable again.
-    #[allow(unreachable_code)]
-    {
         let mut executor = Executor::new();
         executor.spawn(Task::new(run_shell()));
         executor.run();
-        palladiumos::hlt_loop();
     }
-}
 
 #[cfg(not(test))]
 #[panic_handler]

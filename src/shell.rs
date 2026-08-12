@@ -29,6 +29,7 @@ pub fn process_command(input: &str) -> bool {
         "cd"     => cmd_cd(args),
         "pwd"    => { cmd_pwd(); true }
         "run"    => cmd_run(args),
+        "runprogram" => cmd_runprogram(args),
         _ => {
             println!("Unknown command: '{}'. Type 'help'.", command);
             false
@@ -53,6 +54,7 @@ fn cmd_help() {
     println!("  rm <file>           - Remove file or empty directory");
     println!("  cd <dir>            - Change directory");
     println!("  pwd                 - Print working directory");
+    println!("  runprogram          - Run ring 3 program")
 }
 
 
@@ -226,4 +228,25 @@ fn cmd_run(args: &str) -> bool {
 
     println!("Script completed.");
     true
+}
+
+fn cmd_runprogram(args: &str) -> bool {
+    static HELLO_PROGRAM: &[u8] = include_bytes!("user_progs/hello.bin");
+
+    if args.is_empty() {
+        println!("Usage: runprogram <program>");
+        return false;
+    }
+
+    let bytes: &[u8] = match args {
+        "hello" => HELLO_PROGRAM,
+        other => {
+            println!("runprogram: no such program '{}'", other);
+            return false;
+        }
+    };
+
+    println!("Entering ring 3 to run '{}'...", args);
+    println!("(no return path yet — this halts the machine on exit; reboot to get the shell back)");
+    crate::usermode::launch_program(bytes)
 }

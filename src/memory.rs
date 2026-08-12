@@ -17,6 +17,11 @@ pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static>
     }
 }
 
+use spin::Mutex;
+
+pub static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
+pub static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
+
 unsafe fn active_level_4_table(physical_memory_offset: VirtAddr)
 -> &'static mut PageTable
 {
