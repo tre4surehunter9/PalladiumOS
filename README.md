@@ -16,6 +16,7 @@ i used AI for
 * text editor (as a guide)
 * finding bugs
 * guiding for implimenting stuff
+* ring 3/usermode stuff
 
 ## Features
 * Basic Shell
