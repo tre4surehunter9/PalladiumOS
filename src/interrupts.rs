@@ -18,6 +18,8 @@ lazy_static! {
     idt[InterruptIndex::Keyboard.as_usize()]
         .set_handler_fn(keyboard_interrupt_handler);
     idt.page_fault.set_handler_fn(page_fault_handler);
+    idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
+    idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
 
     crate::syscall::init_syscalls(&mut idt);
 
@@ -78,12 +80,41 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     use x86_64::registers::control::Cr2;
 
+    if crate::usermode::from_user(stack_frame.code_segment) {
+        println!("Segmentation fault (address {:?}, rip {:?})",
+                 Cr2::read(), stack_frame.instruction_pointer);
+        crate::usermode::exit_current(128 + SIGSEGV);
+    }
+
     println!("EXCEPTION: PAGE FAULT");
     println!("Accessed Address: {:?}", Cr2::read());
     println!("Error Code: {:?}", error_code);
     println!("{:#?}", stack_frame);
     hlt_loop();
 }
+
+extern "x86-interrupt" fn general_protection_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    if crate::usermode::from_user(stack_frame.code_segment) {
+        println!("General protection fault (rip {:?})", stack_frame.instruction_pointer);
+        crate::usermode::exit_current(128 + SIGSEGV);
+    }
+    panic!("EXCEPTION: GENERAL PROTECTION FAULT (error {:#x})\n{:#?}", error_code, stack_frame);
+}
+
+extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    if crate::usermode::from_user(stack_frame.code_segment) {
+        println!("Illegal instruction (rip {:?})", stack_frame.instruction_pointer);
+        crate::usermode::exit_current(128 + SIGILL);
+    }
+    panic!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
+}
+
+// Signal numbers (Linux), used for "killed by signal" exit statuses.
+const SIGILL: i32 = 4;
+const SIGSEGV: i32 = 11;
 
 use crate::gdt;
 

@@ -79,18 +79,19 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
         let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
         let mut mapper = unsafe { memory::init(phys_mem_offset) };
+        memory::PHYS_MEM_OFFSET.store(phys_mem_offset.as_u64(), core::sync::atomic::Ordering::Relaxed);
 
         allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
 
         palladiumos::filesystem::init_default_files();
 
         // One-time fixups so a ring-3 program can touch VGA memory whenever
-        // it's launched later via the shell's `runprogram` command.
+        // it's launched later via the shell's `run` command.
         memory::ensure_user_accessible(VirtAddr::new(0xb8000), phys_mem_offset);
         memory::map_user_vga(&mut mapper);
 
         // Hand the mapper/frame allocator off to memory::MAPPER / memory::FRAME_ALLOCATOR
-        // so shell.rs's cmd_runprogram can reach them later. This is why the ring-3
+        // so shell.rs's cmd_run can reach them later. This is why the ring-3
         // launch no longer happens here — kernel_main boots straight to the shell now.
         *memory::MAPPER.lock() = Some(mapper);
         *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);

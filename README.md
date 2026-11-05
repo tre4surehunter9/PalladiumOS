@@ -28,7 +28,22 @@ i used AI for
 * Ring 3/Usermode
 
 ## Programs
-The only program is Hello which can be ran with "run hello"
+Ring 3 programs live in `src/user_progs` and are run with `run <name>`:
+* hello - prints a message and exits
+* crash - checks that bad pointers return EFAULT and that a segfault only kills the program
+
+## Syscalls
+PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`, result in `rax`, negative errno on failure), entered with `int 0x80`.
+
+| # | Name | Status |
+|---|------|--------|
+| 0 | read | not yet (returns -ENOSYS) |
+| 1 | write | stdout/stderr only |
+| 24 | sched_yield | yes |
+| 39 | getpid | yes (always 1) |
+| 60 | exit | yes |
+| 63 | uname | yes |
+| 231 | exit_group | yes |
 
 ## Building from Source
 The repo includes a `rust-toolchain.toml`, so `rustup` installs the right nightly toolchain and components automatically.
@@ -57,7 +72,7 @@ The repo includes a `rust-toolchain.toml`, so `rustup` installs the right nightl
 * rm <file>           - Remove file or empty directory
 * cd  <dir>           - Change directory
 * pwd                 - Print working directory
-* run                 - Run a Ring 3 program
+* run <program>       - Run a Ring 3 program
 
 ## Credits
 Philipp Oppermann for his 'Writing an OS in Rust' guide

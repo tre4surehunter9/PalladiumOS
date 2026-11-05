@@ -22,6 +22,10 @@ use spin::Mutex;
 pub static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
 pub static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
 
+/// Virtual address where the bootloader mapped all of physical memory.
+/// Set once at boot by kernel_main; used to walk page tables later.
+pub static PHYS_MEM_OFFSET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 unsafe fn active_level_4_table(physical_memory_offset: VirtAddr)
 -> &'static mut PageTable
 {
@@ -151,6 +155,12 @@ pub fn map_user_page(
     frame_allocator: &mut impl x86_64::structures::paging::FrameAllocator<Size4KiB>,
     page: Page<Size4KiB>,
 ) {
+    // Already mapped from a previous run: reuse it. The frame allocator
+    // can't free frames yet, so remapping would just leak (and map_to errors).
+    if mapper.translate_page(page).is_ok() {
+        return;
+    }
+
     let frame = frame_allocator.allocate_frame().expect("no frames left");
     let flags = PageTableFlags::PRESENT
     | PageTableFlags::WRITABLE
@@ -216,4 +226,65 @@ pub fn ensure_user_accessible(addr: VirtAddr, physical_memory_offset: VirtAddr) 
 
         frame = entry.frame().expect("expected a table frame, found huge page or missing entry");
     }
+}
+
+/// Highest address (exclusive) of the lower, user half of the address space.
+const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+
+/// Check that `[ptr, ptr + len)` is entirely user memory: every page must be
+/// present and USER_ACCESSIBLE at every page-table level (and WRITABLE too
+/// if `write` is set). Syscalls must call this before touching user pointers,
+/// otherwise a ring-3 program could make the kernel read or write kernel memory.
+pub fn is_user_range(ptr: u64, len: u64, write: bool) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let end = match ptr.checked_add(len) {
+        Some(end) if end <= USER_SPACE_END => end,
+        _ => return false,
+    };
+
+    let mut page = ptr & !0xfff;
+    while page < end {
+        if !is_user_page(VirtAddr::new(page), write) {
+            return false;
+        }
+        page += 4096;
+    }
+    true
+}
+
+fn is_user_page(addr: VirtAddr, write: bool) -> bool {
+    use x86_64::registers::control::Cr3;
+    use x86_64::structures::paging::PageTableFlags as Flags;
+    use core::sync::atomic::Ordering;
+
+    let offset = PHYS_MEM_OFFSET.load(Ordering::Relaxed);
+    if offset == 0 {
+        return false;
+    }
+
+    let mut required = Flags::PRESENT | Flags::USER_ACCESSIBLE;
+    if write {
+        required |= Flags::WRITABLE;
+    }
+
+    let (level_4_frame, _) = Cr3::read();
+    let indexes = [addr.p4_index(), addr.p3_index(), addr.p2_index(), addr.p1_index()];
+    let mut table_phys = level_4_frame.start_address().as_u64();
+
+    for (level, &index) in indexes.iter().enumerate() {
+        let table = unsafe { &*((offset + table_phys) as *const PageTable) };
+        let entry = &table[index];
+        let flags = entry.flags();
+        if !flags.contains(required) {
+            return false;
+        }
+        // A huge page at the P3 (1 GiB) or P2 (2 MiB) level ends the walk.
+        if level > 0 && level < 3 && flags.contains(Flags::HUGE_PAGE) {
+            return true;
+        }
+        table_phys = entry.addr().as_u64();
+    }
+    true
 }
