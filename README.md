@@ -30,6 +30,13 @@ i used AI for
 ## Programs
 The only program is Hello which can be ran with "run hello"
 
+## Building from Source
+The repo includes a `rust-toolchain.toml`, so `rustup` installs the right nightly toolchain and components automatically.
+* Install [rustup](https://rustup.rs) and QEMU
+* Install bootimage: `cargo install bootimage`
+* Build: `cargo bootimage`
+* Run: `cargo run` (boots it in QEMU)
+
 ## Instructions for Running the Kernel
 * Install QEMU
 * Download the Latest Release

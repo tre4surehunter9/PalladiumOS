@@ -53,7 +53,7 @@ fn cmd_help() {
     println!("  rm <file>           - Remove file or empty directory");
     println!("  cd <dir>            - Change directory");
     println!("  pwd                 - Print working directory");
-    println!("  run                 - Run a Ring 3 program")
+    println!("  run <program>       - Run a Ring 3 program (try: run hello)");
 }
 
 
@@ -88,11 +88,6 @@ fn cmd_reboot() {
     loop {
         x86_64::instructions::hlt();
     }
-}
-
-fn cmd_panic() {
-    crate::vga_buffer::clear_screen();
-    panic!("User triggered kernel panic")
 }
 
 fn cmd_ls(args: &str) -> bool {
@@ -195,7 +190,7 @@ fn cmd_edit(args: &str) -> bool {
 
 fn cmd_script(args: &str) -> bool {
     if args.is_empty() {
-        println!("Usage: run <script>");
+        println!("Usage: script <file>");
         return false;
     }
 
@@ -233,14 +228,14 @@ fn cmd_run(args: &str) -> bool {
     static HELLO_PROGRAM: &[u8] = include_bytes!("user_progs/hello.bin");
 
     if args.is_empty() {
-        println!("Usage: runprogram <program>");
+        println!("Usage: run <program>");
         return false;
     }
 
     let bytes: &[u8] = match args {
         "hello" => HELLO_PROGRAM,
         other => {
-            println!("runprogram: no such program '{}'", other);
+            println!("run: no such program '{}'", other);
             return false;
         }
     };
