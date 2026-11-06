@@ -30,3 +30,26 @@ fetch() {
     tar -xf "$tarball" -C "$PORTS/src"
     cd "$PORTS/src/$dir"
 }
+
+# fetch_git NAME URL COMMIT: clone (once) and check out exactly COMMIT (git
+# verifies the content by its hash), into a fresh $PORTS/src/NAME.
+fetch_git() {
+    dir=$1 url=$2 commit=$3
+    mirror="$PORTS/src/$dir.git"
+    if [ ! -d "$mirror" ]; then
+        echo "Cloning $url"
+        git clone -q --bare "$url" "$mirror"
+    fi
+    if ! git -C "$mirror" cat-file -e "$commit^{commit}" 2>/dev/null; then
+        git -C "$mirror" fetch -q origin '+refs/heads/*:refs/heads/*'
+    fi
+    rm -rf "$PORTS/src/$dir"
+    git clone -q "$mirror" "$PORTS/src/$dir"
+    cd "$PORTS/src/$dir"
+    git -c advice.detachedHead=false checkout -q "$commit"
+    echo "$dir at $(git rev-parse HEAD)"
+}
+
+# The files that go on the system disk, mounted at /usr in PalladiumOS
+# (build.rs makes target/usr.img from it).
+SYSROOT="$ROOT/target/sysroot"

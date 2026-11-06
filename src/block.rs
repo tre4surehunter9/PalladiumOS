@@ -66,6 +66,11 @@ const DF: u8 = 0x20;
 const DRQ: u8 = 0x08;
 const ERR: u8 = 0x01;
 
+/// How many times to poll the status register before giving up. QEMU
+/// finishes disk I/O on another thread, so on a busy host a request can
+/// take a while; a dead disk still times out (in seconds).
+const POLL_LIMIT: u32 = 100_000_000;
+
 const CMD_READ_SECTORS: u8 = 0x20;
 const CMD_WRITE_SECTORS: u8 = 0x30;
 const CMD_CACHE_FLUSH: u8 = 0xE7;
@@ -84,6 +89,11 @@ impl AtaDisk {
     /// None if there's no disk.
     pub fn primary_slave() -> Option<AtaDisk> {
         AtaDisk::probe(0x1F0, 0x3F6, true)
+    }
+
+    /// The master disk on the secondary IDE bus (QEMU's `index=2`).
+    pub fn secondary_master() -> Option<AtaDisk> {
+        AtaDisk::probe(0x170, 0x376, false)
     }
 
     fn probe(io: u16, control: u16, slave: bool) -> Option<AtaDisk> {
@@ -143,7 +153,7 @@ impl AtaDisk {
     }
 
     fn wait_ready(&self) -> Result<(), &'static str> {
-        for _ in 0..10_000_000 {
+        for _ in 0..POLL_LIMIT {
             let s = self.status();
             if s & BSY == 0 {
                 if s & (ERR | DF) != 0 {
@@ -156,7 +166,7 @@ impl AtaDisk {
     }
 
     fn wait_drq(&self) -> Result<(), &'static str> {
-        for _ in 0..10_000_000 {
+        for _ in 0..POLL_LIMIT {
             let s = self.status();
             if s & (ERR | DF) != 0 {
                 return Err("disk error");
@@ -228,4 +238,20 @@ impl BlockDevice for AtaDisk {
 /// Probe for the data disk (see AtaDisk::primary_slave).
 pub fn data_disk() -> Option<Box<dyn BlockDevice>> {
     AtaDisk::primary_slave().map(|d| Box::new(d) as Box<dyn BlockDevice>)
+}
+
+/// Probe for the system disk: the files under /usr (C headers and
+/// libraries for tcc), made by build.rs as target/usr.img.
+pub fn system_disk() -> Option<Box<dyn BlockDevice>> {
+    AtaDisk::secondary_master().map(|d| Box::new(d) as Box<dyn BlockDevice>)
+}
+
+/// Mount the system disk read-only at /usr, if there is one with files.
+pub fn mount_system_disk() -> bool {
+    let Some(dev) = system_disk() else { return false };
+    let Ok(mut fs) = crate::ext2::Ext2::mount(dev) else { return false };
+    fs.make_read_only();
+    let _ = crate::filesystem::make_dir("/usr");
+    crate::mounts::mount("/usr", Box::new(fs));
+    true
 }

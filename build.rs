@@ -125,6 +125,8 @@ fn make_disk_images(root: &std::path::Path, out_dir: &std::path::Path) {
         mke2fs(&disk, "32M", None, &[]);
     }
 
+    make_system_disk(root, &target);
+
     // A scratch disk for the tests (recreated every build).
     let test_disk = target.join("test-disk.img");
     let _ = fs::remove_file(&test_disk);
@@ -200,4 +202,61 @@ fn ported_programs(root: &std::path::Path) -> Vec<(String, PathBuf)> {
         .collect();
     found.sort();
     found
+}
+
+/// The system disk, mounted read-only at /usr: target/sysroot (C headers
+/// and libraries, staged by tools/ports/tcc.sh) as an ext2 image, made
+/// fresh every build so it never mixes with your files on disk.img. An
+/// empty image when there's no sysroot (QEMU always attaches it).
+fn make_system_disk(root: &std::path::Path, target: &std::path::Path) {
+    let sysroot = root.join("target/sysroot");
+    println!("cargo:rerun-if-changed=target/sysroot");
+    let image = target.join("usr.img");
+    let _ = fs::remove_file(&image);
+    let empty = target.join("usr-empty");
+    let source = if sysroot.is_dir() {
+        sysroot.clone()
+    } else {
+        fs::create_dir_all(&empty).unwrap();
+        empty
+    };
+    // Room for the files plus some slack (sizes in KiB).
+    let used = dir_size(&source) / 1024;
+    let size = format!("{}K", (used * 3 / 2 + 2048).max(4096));
+    if !mke2fs(&image, &size, Some(&source), &[]) {
+        return;
+    }
+    // The files belong to root, not to whoever ran the build (mke2fs -d
+    // copies the host owners; uid 1000 is "user" in PalladiumOS).
+    let mut cmds = String::new();
+    for path in walk(&source) {
+        let rel = path.strip_prefix(&source).unwrap();
+        let p = format!("/{}", rel.display());
+        writeln!(cmds, "sif \"{}\" uid 0\nsif \"{}\" gid 0", p, p).unwrap();
+    }
+    cmds.push_str("sif / uid 0\nsif / gid 0\n");
+    let cmd_file = target.join("usr-img.debugfs");
+    fs::write(&cmd_file, cmds).unwrap();
+    let ok = Command::new("debugfs").arg("-w").arg("-f").arg(&cmd_file).arg(&image).output().is_ok_and(|o| o.status.success());
+    if !ok {
+        println!("cargo:warning=debugfs failed: files on the system disk keep their host owners");
+    }
+}
+
+fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                out.extend(walk(&path));
+            }
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn dir_size(dir: &std::path::Path) -> u64 {
+    walk(dir).iter().filter_map(|p| p.metadata().ok()).map(|m| if m.is_file() { m.len() + 1024 } else { 1024 }).sum()
 }

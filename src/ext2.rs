@@ -248,6 +248,11 @@ impl Ext2 {
         (rd32(&self.sb, 12), rd32(&self.sb, 16))
     }
 
+    /// Refuse every change from now on (for the system disk at /usr).
+    pub fn make_read_only(&mut self) {
+        self.read_only = true;
+    }
+
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }

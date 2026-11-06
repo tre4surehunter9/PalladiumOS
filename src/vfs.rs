@@ -26,8 +26,9 @@ use crate::pipe::{self, PipeReader, PipeWriter};
 use crate::syscall::*;
 
 pub const MAX_FDS: usize = 64;
-/// Largest file a program may create (the kernel heap is small).
-pub const MAX_FILE_SIZE: usize = 512 * 1024;
+/// Largest file a program may create in an in-memory filesystem (/tmp),
+/// which lives in the kernel heap. (Big enough for a compiled tcc.)
+pub const MAX_FILE_SIZE: usize = 4 * 1024 * 1024;
 pub const PATH_MAX: usize = 4096;
 
 // open() flags (Linux values)

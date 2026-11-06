@@ -142,6 +142,9 @@ fn mount_filesystems() {
     mounts::mount("/tmp", Box::new(tmp));
     mounts::mount("/dev", Box::new(DevFs));
     mounts::mount("/proc", Box::new(palladiumos::procfs::ProcFs));
+    if block::mount_system_disk() {
+        println!("Mounted the system disk at /usr (read-only)");
+    }
 }
 
 #[cfg(not(test))]

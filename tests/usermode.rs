@@ -35,6 +35,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
     palladiumos::process::init();
     palladiumos::rtc::init(); // the real date, as at boot (CLOCK_REALTIME)
+    palladiumos::block::mount_system_disk(); // /usr: tcc's headers and libraries, if built
     palladiumos::programs::install();
     for dir in ["/proc", "/dev"] {
         palladiumos::filesystem::make_dir(dir).unwrap();
@@ -1629,4 +1630,60 @@ fn fastfetch_port_works() {
     // With the logo (from /etc/xdg/fastfetch/config.jsonc)
     assert_eq!(sh("fastfetch > /tmp/ff2 2>&1"), 0);
     assert!(file("/tmp/ff2").contains("Palladium"), "{}", file("/tmp/ff2"));
+}
+
+/// tcc needs the system disk (/usr) too.
+fn tcc_ready() -> bool {
+    c_program("tcc").is_some() && filesystem::is_dir("/usr/lib/tcc")
+}
+
+#[test_case]
+fn tcc_compiles_and_runs_programs() {
+    if !tcc_ready() {
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    filesystem::write_file(
+        "/tmp/t1.c",
+        "#include <stdio.h>\n#include <math.h>\nint twice(int);\n\
+         int main(int c, char **v) { printf(\"%s %d %.3f\\n\", v[1], twice(c), sqrt(2.0)); return 5; }\n",
+    )
+    .unwrap();
+    filesystem::write_file("/tmp/t2.c", "int twice(int x) { return 2 * x; }\n").unwrap();
+    // separate compilation, then linking (with libm)
+    let steps = [
+        sh("cd /tmp && tcc -c t2.c > /tmp/s1 2>&1"),
+        sh("cd /tmp && tcc t1.c t2.o -lm -o t > /tmp/s2 2>&1"),
+        sh("cd /tmp && ls -l t > /tmp/s3 2>&1; ./t hi > out 2>> /tmp/s3"),
+    ];
+    assert_eq!(steps, [0, 0, 5], "{} | {} | {}", file("/tmp/s1"), file("/tmp/s2"), file("/tmp/s3"));
+    assert_eq!(file("/tmp/out"), "hi 4 1.414\n");
+    // tcc -run FILE ARGS: compile and run in memory
+    filesystem::write_file("/tmp/t3.c", "#include <stdio.h>\nint main(int c, char **v) { printf(\"%s %d\\n\", v[1], c); return 6; }\n").unwrap();
+    assert_eq!(sh("cd /tmp && tcc -run t3.c run > out2"), 6);
+    assert_eq!(file("/tmp/out2"), "run 2\n");
+    // a syntax error is reported and fails
+    filesystem::write_file("/tmp/bad.c", "int main( { return 0; }\n").unwrap();
+    assert_eq!(sh("tcc /tmp/bad.c -o /tmp/bad 2> /tmp/err"), 1);
+    assert!(file("/tmp/err").contains("error"), "{}", file("/tmp/err"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn tcc_compiles_itself() {
+    if !tcc_ready() || !filesystem::is_dir("/usr/src/tinycc") {
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    // tcc -> tcc2 (built inside PalladiumOS) -> tcc3 (built by tcc2)
+    assert_eq!(sh("cd /tmp && tcc -o tcc2 /usr/src/tinycc/tcc.c -I/usr/src/tinycc"), 0);
+    assert_eq!(sh("cd /tmp && ./tcc2 -o tcc3 /usr/src/tinycc/tcc.c -I/usr/src/tinycc"), 0);
+    let (two, three) = (filesystem::read_bytes("/tmp/tcc2").unwrap(), filesystem::read_bytes("/tmp/tcc3").unwrap());
+    assert!(two.len() > 100_000);
+    assert!(two == three, "a tcc built by itself is identical to the one that built it");
+    filesystem::write_file("/tmp/h.c", "int main(void) { return 42; }\n").unwrap();
+    assert_eq!(sh("cd /tmp && ./tcc3 h.c -o h && ./h"), 42);
+    for f in ["/tmp/tcc2", "/tmp/tcc3", "/tmp/h"] {
+        let _ = filesystem::remove(f);
+    }
 }
