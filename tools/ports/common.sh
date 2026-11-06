@@ -19,7 +19,7 @@ fi
 # $PORTS/src/NAME-VERSION, and cd there.
 fetch() {
     dir=$1 url=$2 sum=$3
-    tarball="$PORTS/src/$(basename "$url")"
+    tarball="$PORTS/src/$dir.tar.gz"
     if [ ! -f "$tarball" ]; then
         echo "Downloading $url"
         curl -fL --proto '=https' -o "$tarball.part" "$url"

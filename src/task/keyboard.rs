@@ -29,10 +29,25 @@ pub fn fix_key_event(mut event: pc_keyboard::KeyEvent) -> pc_keyboard::KeyEvent 
     event
 }
 
+/// Keys pressed during boot, before the queue (which needs the heap)
+/// exists. A fixed buffer, filled by the keyboard interrupt.
+static EARLY_KEYS: spin::Mutex<([u8; 128], usize)> = spin::Mutex::new(([0; 128], 0));
+
 /// Create the scancode queue if it doesn't exist yet. Safe to call repeatedly.
 pub fn init_queue() {
     // Room for plenty of type-ahead (each key press is 2 scancodes, 4 with Shift).
-    let _ = SCANCODE_QUEUE.try_init_once(|| ArrayQueue::new(1024));
+    if SCANCODE_QUEUE.try_init_once(|| ArrayQueue::new(1024)).is_ok() {
+        // Keys typed during boot come first.
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            let mut early = EARLY_KEYS.lock();
+            let (keys, n) = &mut *early;
+            let queue = SCANCODE_QUEUE.try_get().unwrap();
+            for &k in &keys[..*n] {
+                let _ = queue.push(k);
+            }
+            *n = 0;
+        });
+    }
 }
 
 /// Take the next scancode without waiting (used by the TTY while a
@@ -78,7 +93,14 @@ pub fn add_scancode(scancode: u8) {
             WAKER.wake();
         }
     } else {
-        println!("WARNING: scancode queue uninitialized");
+        // Booting: keep the key for later (the interrupt handler runs with
+        // interrupts off, and nothing else holds this lock with them on).
+        let mut early = EARLY_KEYS.lock();
+        let (keys, n) = &mut *early;
+        if *n < keys.len() {
+            keys[*n] = scancode;
+            *n += 1;
+        }
     }
 }
 

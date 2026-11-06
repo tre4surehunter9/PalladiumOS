@@ -1591,3 +1591,26 @@ fn lua_port_works() {
     assert_eq!(sh("lua -e 'os.exit(9)'"), 9);
     assert!(only_kernel_left(), "{:?}", process::list());
 }
+
+#[test_case]
+fn dash_port_works() {
+    let Some(_) = c_program("dash") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    filesystem::write_file("/tmp/check.sh", include_str!("ports/check.sh")).unwrap();
+    let status = sh("dash /tmp/check.sh > /tmp/dcheck.out 2>&1");
+    let out = file("/tmp/dcheck.out");
+    assert_eq!(status, 0, "{}", out);
+    assert!(out.ends_with("dash checks passed\n"), "{}", out);
+    // dash as an interactive shell, with its own job control
+    palladiumos::task::keyboard::init_queue();
+    type_line("sh -c 'kill -STOP $$; echo resumed > /tmp/dj'");
+    type_line("jobs > /tmp/dj0");
+    type_line("fg");
+    type_line("echo $? > /tmp/dj1");
+    type_line("exit 4");
+    assert_eq!(run(prog("dash"), &["dash", "-i"]), Ok(4));
+    assert!(file("/tmp/dj0").contains("Stopped"), "{}", file("/tmp/dj0"));
+    assert_eq!(file("/tmp/dj"), "resumed\n");
+    assert_eq!(file("/tmp/dj1"), "0\n");
+    assert!(only_kernel_left(), "{:?}", process::list());
+}

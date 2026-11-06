@@ -185,6 +185,7 @@ Then run `chello` or `test_libc` (a test of stdio, malloc, files, mmap, fork/exe
 Real-world programs are built from their original source by scripts in `tools/ports/` (after `tools/build-musl.sh`). Each downloads a pinned, checksum-verified release and installs into `target/ports/bin`, which goes into `/bin`:
 
 * `tools/ports/lua.sh`: Lua 5.4.7 (`lua` and `luac`). The REPL, scripts (also as `#!/bin/lua`), `io`, `os.execute`, `io.popen` and `os.clock` work.
+* `tools/ports/dash.sh`: dash 0.5.12, the Debian Almquist shell, a full POSIX shell (here-documents, `getopts`, `trap`, job control with Ctrl-Z/`fg`/`bg`). Run `dash`, or `dash script.sh`.
 
 The binaries are ordinary Linux static executables too, so they can be run on a Linux host to compare behaviour.
 
