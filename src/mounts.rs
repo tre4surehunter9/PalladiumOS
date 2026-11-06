@@ -12,6 +12,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use crate::perm;
 use crate::syscall::{EBUSY, EEXIST, EINVAL, EISDIR, ENOENT, ENOTDIR, EPERM};
 
 pub const EXDEV: i64 = 18;
@@ -58,6 +59,9 @@ pub struct Meta {
     pub nlink: u32,
     /// Modification time (seconds since 1970).
     pub mtime: u64,
+    /// Owner and group.
+    pub uid: u32,
+    pub gid: u32,
 }
 
 /// What every filesystem implements. Directory entries exclude "." and "..".
@@ -91,6 +95,9 @@ pub trait FileSystem: Send {
         Err(EINVAL)
     }
     fn chmod(&mut self, _ino: Ino, _perm: u32) -> FsResult<()> {
+        Err(EPERM)
+    }
+    fn chown(&mut self, _ino: Ino, _uid: u32, _gid: u32) -> FsResult<()> {
         Err(EPERM)
     }
     /// Set the modification time (seconds since 1970).
@@ -256,10 +263,13 @@ pub fn resolve_full(abs: &str, follow_last: bool) -> FsResult<(Loc, Meta, String
         let comps: Vec<String> = path.split('/').filter(|c| !c.is_empty()).map(String::from).collect();
         let mut prefix = String::from("/");
         let (mut loc, mut meta) = resolve_plain("/")?;
+        let cred = crate::process::current_cred();
         for (i, comp) in comps.iter().enumerate() {
             if meta.kind != FileType::Dir {
                 return Err(ENOTDIR);
             }
+            // Using a directory in a path needs search (x) permission.
+            perm::check(&meta, &cred, perm::EXEC)?;
             let candidate = join(&prefix, comp);
             let (l, m) = resolve_plain(&candidate)?;
             let last = i + 1 == comps.len();
@@ -301,6 +311,11 @@ pub fn lstat(abs: &str) -> FsResult<(Loc, Meta)> {
 /// Split "/a/b/c" into the parent directory (symlinks followed) and "c".
 /// Fails for "/" and for mount points (which can't be created or removed).
 fn parent_of(abs: &str) -> FsResult<(Loc, String, String)> {
+    parent_full(abs).map(|(loc, _, name, real)| (loc, name, real))
+}
+
+/// parent_of, also returning the parent directory's metadata.
+fn parent_full(abs: &str) -> FsResult<(Loc, Meta, String, String)> {
     ensure_root();
     if abs == "/" {
         return Err(EBUSY);
@@ -324,7 +339,22 @@ fn parent_of(abs: &str) -> FsResult<(Loc, String, String)> {
             return Err(EBUSY);
         }
     }
-    Ok((loc, name.to_string(), real))
+    Ok((loc, meta, name.to_string(), real))
+}
+
+/// Changing a directory's entries needs write and search permission on it.
+fn check_dir_writable(dir: &Meta) -> FsResult<()> {
+    perm::check(dir, &crate::process::current_cred(), perm::WRITE | perm::EXEC)
+}
+
+/// Give a new file to its creator: the effective uid, and the effective
+/// gid (or the directory's group, if the directory has the setgid bit).
+fn set_new_owner(loc: Loc, dir: &Meta) {
+    let cred = crate::process::current_cred();
+    let gid = if dir.perm & perm::S_ISGID != 0 { dir.gid } else { cred.egid };
+    if cred.euid != 0 || gid != 0 {
+        let _ = with_fs(loc.mount, |fs| fs.chown(loc.ino, cred.euid, gid));
+    }
 }
 
 /// Create a file or directory at `abs` with permissions `perm`.
@@ -332,12 +362,17 @@ pub fn create(abs: &str, kind: FileType, perm: u32) -> FsResult<Loc> {
     if lstat(abs).is_ok() {
         return Err(EEXIST);
     }
-    let (dir, name, _) = parent_of(abs).map_err(|e| if e == EBUSY { EEXIST } else { e })?;
+    let (dir, dir_meta, name, _) = parent_full(abs).map_err(|e| if e == EBUSY { EEXIST } else { e })?;
     if name.len() > 255 {
         return Err(crate::syscall::ENAMETOOLONG);
     }
+    check_dir_writable(&dir_meta)?;
+    // New directories inherit a setgid bit (so files in them keep the group).
+    let perm = if kind == FileType::Dir { perm | (dir_meta.perm & perm::S_ISGID) } else { perm };
     let ino = with_fs(dir.mount, |fs| fs.create(dir.ino, &name, kind, perm))?;
-    Ok(Loc { mount: dir.mount, ino })
+    let loc = Loc { mount: dir.mount, ino };
+    set_new_owner(loc, &dir_meta);
+    Ok(loc)
 }
 
 /// symlink(target, abs)
@@ -348,8 +383,11 @@ pub fn symlink(target: &str, abs: &str) -> FsResult<()> {
     if lstat(abs).is_ok() {
         return Err(EEXIST);
     }
-    let (dir, name, _) = parent_of(abs).map_err(|e| if e == EBUSY { EEXIST } else { e })?;
-    with_fs(dir.mount, |fs| fs.symlink(dir.ino, &name, target)).map(|_| ())
+    let (dir, dir_meta, name, _) = parent_full(abs).map_err(|e| if e == EBUSY { EEXIST } else { e })?;
+    check_dir_writable(&dir_meta)?;
+    let ino = with_fs(dir.mount, |fs| fs.symlink(dir.ino, &name, target))?;
+    set_new_owner(Loc { mount: dir.mount, ino }, &dir_meta);
+    Ok(())
 }
 
 /// link(existing, new): another name for a file (same filesystem only).
@@ -361,18 +399,26 @@ pub fn link(existing: &str, new: &str) -> FsResult<()> {
     if lstat(new).is_ok() {
         return Err(EEXIST);
     }
-    let (dir, name, _) = parent_of(new).map_err(|e| if e == EBUSY { EEXIST } else { e })?;
+    let (dir, dir_meta, name, _) = parent_full(new).map_err(|e| if e == EBUSY { EEXIST } else { e })?;
     if dir.mount != src.mount {
         return Err(EXDEV);
     }
+    check_dir_writable(&dir_meta)?;
     with_fs(dir.mount, |fs| fs.link(dir.ino, &name, src.ino))
 }
 
 /// rename(old, new)
 pub fn rename(old: &str, new: &str) -> FsResult<()> {
-    let (src_dir, src_name, src_real) = parent_of(old)?;
+    let (src_dir, src_dir_meta, src_name, src_real) = parent_full(old)?;
     let (src, src_meta) = lstat(old)?;
-    let (dst_dir, dst_name, dst_real) = parent_of(new)?;
+    let (dst_dir, dst_dir_meta, dst_name, dst_real) = parent_full(new)?;
+    let cred = crate::process::current_cred();
+    check_dir_writable(&src_dir_meta)?;
+    check_dir_writable(&dst_dir_meta)?;
+    perm::check_sticky(&src_dir_meta, &src_meta, &cred)?;
+    if let Ok((_, existing)) = lstat(new) {
+        perm::check_sticky(&dst_dir_meta, &existing, &cred)?;
+    }
     if src_dir.mount != dst_dir.mount {
         return Err(EXDEV);
     }
@@ -397,11 +443,16 @@ pub fn rename(old: &str, new: &str) -> FsResult<()> {
 
 /// unlink or rmdir `abs`.
 pub fn remove(abs: &str, is_dir: bool) -> FsResult<()> {
-    let (dir, name, _) = match parent_of(abs) {
+    let (dir, dir_meta, name, _) = match parent_full(abs) {
         Err(EBUSY) => return Err(if is_dir { EBUSY } else { EISDIR }),
         r => r?,
     };
+    check_dir_writable(&dir_meta)?;
+    let cred = crate::process::current_cred();
     with_fs(dir.mount, |fs| {
+        if let Ok(target) = fs.lookup(dir.ino, &name).and_then(|i| fs.meta(i)) {
+            perm::check_sticky(&dir_meta, &target, &cred)?;
+        }
         let ino = fs.lookup(dir.ino, &name)?;
         let kind = fs.meta(ino)?.kind;
         match (kind == FileType::Dir, is_dir) {

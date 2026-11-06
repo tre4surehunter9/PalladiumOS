@@ -103,13 +103,21 @@ fn status(p: &ProcInfo) -> String {
         _ => "S (sleeping)",
     };
     format!(
-        "Name:\t{}\nState:\t{}\nPid:\t{}\nPPid:\t{}\nPGid:\t{}\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n\
+        "Name:\t{}\nState:\t{}\nPid:\t{}\nPPid:\t{}\nPGid:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\n\
          FDSize:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} kB\nThreads:\t1\n",
         p.name,
         state,
         p.pid,
         p.ppid,
         p.pgid,
+        p.cred.ruid,
+        p.cred.euid,
+        p.cred.suid,
+        p.cred.euid,
+        p.cred.rgid,
+        p.cred.egid,
+        p.cred.sgid,
+        p.cred.egid,
         p.fds.len(),
         kib(p.pages),
         kib(p.pages),
@@ -243,8 +251,13 @@ impl FileSystem for ProcFs {
             }
         };
         let mtime = crate::rtc::now();
+        // /proc/PID belongs to the process's user.
+        let (uid, gid) = match split(ino) {
+            Some((pid, _)) => proc_info(pid).map(|p| (p.uid, p.gid)).unwrap_or((0, 0)),
+            None => (0, 0),
+        };
         // Like Linux, files report size 0: read them to see the contents.
-        Ok(Meta { ino, kind, size: 0, perm, nlink: 1, mtime })
+        Ok(Meta { ino, kind, size: 0, perm, nlink: 1, mtime, uid, gid })
     }
 
     fn read(&mut self, ino: Ino, offset: u64, buf: &mut [u8]) -> FsResult<usize> {

@@ -38,7 +38,7 @@ impl FileSystem for DevFs {
             FileType::CharDevice(*dev)
         };
         let perm = if kind == FileType::Dir { 0o755 } else { 0o666 };
-        Ok(Meta { ino, kind, size: 0, perm, nlink: 1, mtime: 0 })
+        Ok(Meta { ino, kind, size: 0, perm, nlink: 1, mtime: 0, uid: 0, gid: 0 })
     }
 
     // Device data never goes through the filesystem (see vfs.rs).

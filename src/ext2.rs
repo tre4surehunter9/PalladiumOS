@@ -133,6 +133,19 @@ impl Inode {
         wr32(&mut self.raw, 12, now); // ctime
         wr32(&mut self.raw, 16, now); // mtime
     }
+    /// Owner: low 16 bits at offset 2, high 16 bits at 120 (Linux layout).
+    fn uid(&self) -> u32 {
+        rd16(&self.raw, 2) as u32 | (rd16(&self.raw, 120) as u32) << 16
+    }
+    fn gid(&self) -> u32 {
+        rd16(&self.raw, 24) as u32 | (rd16(&self.raw, 122) as u32) << 16
+    }
+    fn set_owner(&mut self, uid: u32, gid: u32) {
+        wr16(&mut self.raw, 2, uid as u16);
+        wr16(&mut self.raw, 120, (uid >> 16) as u16);
+        wr16(&mut self.raw, 24, gid as u16);
+        wr16(&mut self.raw, 122, (gid >> 16) as u16);
+    }
     fn flags(&self) -> u32 {
         rd32(&self.raw, 32)
     }
@@ -747,6 +760,8 @@ impl FileSystem for Ext2 {
             perm: (inode.mode() & 0o7777) as u32,
             nlink: inode.links() as u32,
             mtime: inode.mtime() as u64,
+            uid: inode.uid(),
+            gid: inode.gid(),
         })
     }
 
@@ -1012,6 +1027,16 @@ impl FileSystem for Ext2 {
         let mode = (inode.mode() & S_IFMT) | (perm & 0o7777) as u16;
         wr16(&mut inode.raw, 0, mode);
         wr32(&mut inode.raw, 12, crate::rtc::now() as u32);
+        self.write_inode(ino, &inode)
+    }
+
+    fn chown(&mut self, ino: Ino, uid: u32, gid: u32) -> FsResult<()> {
+        if self.read_only {
+            return Err(EROFS);
+        }
+        let mut inode = self.inode(ino)?;
+        inode.set_owner(uid, gid);
+        wr32(&mut inode.raw, 12, crate::rtc::now() as u32); // ctime
         self.write_inode(ino, &inode)
     }
 

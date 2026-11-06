@@ -54,6 +54,18 @@ pub mod sys {
     pub const WAIT4: u64 = 61;
     pub const KILL: u64 = 62;
     pub const FCNTL: u64 = 72;
+    pub const GETUID: u64 = 102;
+    pub const GETGID: u64 = 104;
+    pub const SETUID: u64 = 105;
+    pub const SETGID: u64 = 106;
+    pub const GETEUID: u64 = 107;
+    pub const GETEGID: u64 = 108;
+    pub const GETGROUPS: u64 = 115;
+    pub const SETGROUPS: u64 = 116;
+    pub const SETRESUID: u64 = 117;
+    pub const SETRESGID: u64 = 119;
+    pub const CHOWN: u64 = 92;
+    pub const LCHOWN: u64 = 94;
     pub const SETPGID: u64 = 109;
     pub const GETPGRP: u64 = 111;
     pub const GETPPID: u64 = 110;
@@ -118,6 +130,7 @@ pub mod signal;
 pub use signal::*;
 pub mod io;
 pub mod procinfo;
+pub mod users;
 
 pub const STDIN: i32 = 0;
 pub const STDOUT: i32 = 1;
@@ -141,6 +154,45 @@ pub fn exit(status: i32) -> ! {
 
 pub fn getpid() -> i32 {
     unsafe { sys::syscall3(sys::GETPID, 0, 0, 0) as i32 }
+}
+
+pub fn getuid() -> u32 {
+    unsafe { sys::syscall3(sys::GETUID, 0, 0, 0) as u32 }
+}
+pub fn geteuid() -> u32 {
+    unsafe { sys::syscall3(sys::GETEUID, 0, 0, 0) as u32 }
+}
+pub fn getgid() -> u32 {
+    unsafe { sys::syscall3(sys::GETGID, 0, 0, 0) as u32 }
+}
+pub fn getegid() -> u32 {
+    unsafe { sys::syscall3(sys::GETEGID, 0, 0, 0) as u32 }
+}
+/// setuid(2)
+pub fn setuid(uid: u32) -> isize {
+    unsafe { sys::syscall3(sys::SETUID, uid as u64, 0, 0) as isize }
+}
+/// setgid(2)
+pub fn setgid(gid: u32) -> isize {
+    unsafe { sys::syscall3(sys::SETGID, gid as u64, 0, 0) as isize }
+}
+/// setresuid(2): u32::MAX leaves an ID unchanged.
+pub fn setresuid(r: u32, e: u32, s: u32) -> isize {
+    unsafe { sys::syscall3(sys::SETRESUID, r as u64, e as u64, s as u64) as isize }
+}
+pub fn setresgid(r: u32, e: u32, s: u32) -> isize {
+    unsafe { sys::syscall3(sys::SETRESGID, r as u64, e as u64, s as u64) as isize }
+}
+/// The supplementary groups.
+pub fn getgroups() -> alloc::vec::Vec<u32> {
+    let mut groups = alloc::vec![0u32; 64];
+    let n = unsafe { sys::syscall3(sys::GETGROUPS, 64, groups.as_mut_ptr() as u64, 0) };
+    groups.truncate(n.max(0) as usize);
+    groups
+}
+/// setgroups(2): root only.
+pub fn setgroups(groups: &[u32]) -> isize {
+    unsafe { sys::syscall3(sys::SETGROUPS, groups.len() as u64, groups.as_ptr() as u64, 0) as isize }
 }
 
 /// dup(2)

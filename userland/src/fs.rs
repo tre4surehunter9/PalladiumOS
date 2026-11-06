@@ -235,6 +235,16 @@ pub fn readlink<'a>(path: &str, buf: &'a mut [u8]) -> Result<&'a str, isize> {
     core::str::from_utf8(&buf[..r as usize]).map_err(|_| -EINVAL)
 }
 
+/// chown(2): u32::MAX leaves the owner or group unchanged.
+pub fn chown(path: &str, uid: u32, gid: u32) -> isize {
+    with_cstr(path, |p| unsafe { syscall3(sys::CHOWN, p, uid as u64, gid as u64) })
+}
+
+/// lchown(2): like chown, but on a symlink itself.
+pub fn lchown(path: &str, uid: u32, gid: u32) -> isize {
+    with_cstr(path, |p| unsafe { syscall3(sys::LCHOWN, p, uid as u64, gid as u64) })
+}
+
 pub fn chmod(path: &str, mode: u32) -> isize {
     with_cstr(path, |p| unsafe { syscall3(sys::CHMOD, p, mode as u64, 0) })
 }

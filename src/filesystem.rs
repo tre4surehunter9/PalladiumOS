@@ -153,4 +153,31 @@ pub fn init_default_files() {
             let _ = write_file(path, text);
         }
     }
+    init_users();
+}
+
+/// Set the owner of a file (kernel helper; no permission checks).
+pub fn chown(path: &str, uid: u32, gid: u32) -> Result<(), &'static str> {
+    let loc = mounts::resolve(path).map_err(message)?;
+    mounts::with_fs(loc.mount, |fs| fs.chown(loc.ino, uid, gid)).map_err(message)
+}
+
+/// The accounts a fresh system starts with: root, and an ordinary user
+/// (uid 1000). Neither has a password until one is set with `passwd`.
+/// Only created if /etc/passwd is missing, so existing accounts are kept.
+fn init_users() {
+    if mounts::resolve("/etc/passwd").is_ok() {
+        return;
+    }
+    let _ = make_dir("/etc");
+    let _ = write_file("/etc/passwd", "root:x:0:0:root:/root:/bin/sh\nuser:x:1000:1000:User:/home/user:/bin/sh\n");
+    let _ = write_file("/etc/group", "root:x:0:\nwheel:x:10:root,user\nuser:x:1000:\n");
+    // Empty password fields: log in without a password (set one with passwd).
+    let _ = write_file("/etc/shadow", "root::0:0:99999:7:::\nuser::0:0:99999:7:::\n");
+    let _ = chmod("/etc/shadow", 0o600);
+    let _ = make_dir("/root");
+    let _ = chmod("/root", 0o700);
+    let _ = make_dir("/home");
+    let _ = make_dir("/home/user");
+    let _ = chown("/home/user", 1000, 1000);
 }

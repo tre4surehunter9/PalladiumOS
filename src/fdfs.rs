@@ -45,6 +45,8 @@ pub struct Fdfs {
     mtimes: alloc::collections::BTreeMap<usize, u64>,
     /// File nodes that are symlinks (their data is the target).
     symlinks: alloc::collections::BTreeSet<usize>,
+    /// (uid, gid) of nodes not owned by root.
+    owners: alloc::collections::BTreeMap<usize, (u32, u32)>,
 }
 
 impl Fdfs {
@@ -59,6 +61,7 @@ impl Fdfs {
             perms: Default::default(),
             mtimes: Default::default(),
             symlinks: Default::default(),
+            owners: Default::default(),
         }
     }
 
@@ -404,7 +407,8 @@ impl FileSystem for Fdfs {
         };
         let perm = self.perms.get(&i).copied().unwrap_or(perm);
         let mtime = self.mtimes.get(&i).copied().unwrap_or(0);
-        Ok(Meta { ino, kind, size, perm, nlink, mtime })
+        let (uid, gid) = self.owners.get(&i).copied().unwrap_or((0, 0));
+        Ok(Meta { ino, kind, size, perm, nlink, mtime, uid, gid })
     }
 
     fn read(&mut self, ino: Ino, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
@@ -474,6 +478,14 @@ impl FileSystem for Fdfs {
 
     fn set_mtime(&mut self, ino: Ino, mtime: u64) -> FsResult<()> {
         self.mtimes.insert(ino as usize, mtime);
+        Ok(())
+    }
+
+    fn chown(&mut self, ino: Ino, uid: u32, gid: u32) -> FsResult<()> {
+        if self.nodes.get(ino as usize).is_none() {
+            return Err(ENOENT);
+        }
+        self.owners.insert(ino as usize, (uid, gid));
         Ok(())
     }
 

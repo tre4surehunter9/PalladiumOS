@@ -92,6 +92,8 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
         palladiumos::process::init();
         palladiumos::rtc::init();
+        // Keys pressed before anything reads the keyboard must not be lost.
+        palladiumos::task::keyboard::init_queue();
         mount_filesystems();
         palladiumos::programs::install();
         palladiumos::filesystem::init_default_files();
@@ -135,27 +137,46 @@ fn mount_filesystems() {
         let _ = palladiumos::filesystem::make_dir(dir); // mount points
     }
     mounts::mount("/bin", Box::new(Fdfs::new()));
-    mounts::mount("/tmp", Box::new(Fdfs::new()));
+    let mut tmp = Fdfs::new();
+    let _ = mounts::FileSystem::chmod(&mut tmp, 0, 0o1777); // sticky, writable by everyone
+    mounts::mount("/tmp", Box::new(tmp));
     mounts::mount("/dev", Box::new(DevFs));
     mounts::mount("/proc", Box::new(palladiumos::procfs::ProcFs));
 }
 
 #[cfg(not(test))]
 fn start_userland_shell() {
-    let bytes = match palladiumos::filesystem::read_bytes("/bin/sh") {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            println!("Can't read /bin/sh ({}); starting the kernel shell.", e);
-            return;
-        }
-    };
+    // login asks who you are and starts your shell; when you log out, it
+    // starts again. Ctrl-D at the login prompt (status 99) opens the kernel
+    // shell. Without /bin/login, start sh directly.
+    const TO_KERNEL_SHELL: i32 = 99;
     let env = palladiumos::process::DEFAULT_ENV;
-    match palladiumos::process::run_program_env(&bytes, &["sh"], env) {
-        Ok(status) => println!(
-            "\nsh exited with status {}. This is the kernel shell; type 'run sh' to start a new one.",
-            status
-        ),
-        Err(e) => println!("Can't start /bin/sh ({}); starting the kernel shell.", e),
+    loop {
+        let (bytes, argv) = match palladiumos::filesystem::read_bytes("/bin/login") {
+            Ok(b) => (b, ["login"]),
+            Err(_) => match palladiumos::filesystem::read_bytes("/bin/sh") {
+                Ok(b) => (b, ["sh"]),
+                Err(e) => {
+                    println!("Can't read /bin/login or /bin/sh ({}); starting the kernel shell.", e);
+                    return;
+                }
+            },
+        };
+        match palladiumos::process::run_program_env(&bytes, &argv, env) {
+            Ok(TO_KERNEL_SHELL) => {
+                println!("This is the kernel shell; type 'run login' to log in again.");
+                return;
+            }
+            Ok(_) if argv[0] == "login" => {} // logged out: ask again
+            Ok(status) => {
+                println!("\nsh exited with status {}. This is the kernel shell.", status);
+                return;
+            }
+            Err(e) => {
+                println!("Can't start {} ({}); starting the kernel shell.", argv[0], e);
+                return;
+            }
+        }
     }
 }
 

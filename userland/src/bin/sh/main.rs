@@ -170,6 +170,20 @@ fn main(args: Args) -> i32 {
     }
 }
 
+/// "user@palladium:/path $ " ("#" for root), with the home directory as ~.
+fn prompt_text() -> String {
+    let user = userlib::users::user_name(geteuid());
+    let mut dir = cwd();
+    if let Some(home) = userlib::getenv("HOME").filter(|h| *h != "/") {
+        if dir == home {
+            dir = "~".to_string();
+        } else if let Some(rest) = dir.strip_prefix(&format!("{}/", home)) {
+            dir = format!("~/{}", rest);
+        }
+    }
+    format!("{}@palladium:{} {} ", user, dir, if geteuid() == 0 { "#" } else { "$" })
+}
+
 fn interactive(name: String) -> i32 {
     let mut sh = Shell::new(vec![name], true);
     // Ctrl-C interrupts commands, not the interactive shell.
@@ -185,7 +199,7 @@ fn interactive(name: String) -> i32 {
         // Read lines until they form a complete command (an `if` or a
         // quote may continue over several lines, prompted with "> ").
         let mut text = String::new();
-        let mut prompt = format!("PalladiumOS:{} $ ", cwd());
+        let mut prompt = prompt_text();
         let list = loop {
             let line = if tty {
                 editor.read_line(&prompt)

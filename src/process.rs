@@ -104,6 +104,35 @@ pub struct Process {
     cpu_ticks: u64,
     /// Tick when it last started running.
     running_since: u64,
+    /// Who the process runs as.
+    pub cred: Cred,
+}
+
+/// Credentials: real, effective and saved user and group IDs, and the
+/// supplementary groups. Permission checks use the effective IDs; the real
+/// ones say who started the process; the saved ones let a setuid program
+/// switch back and forth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cred {
+    pub ruid: u32,
+    pub euid: u32,
+    pub suid: u32,
+    pub rgid: u32,
+    pub egid: u32,
+    pub sgid: u32,
+    pub groups: Vec<u32>,
+}
+
+impl Cred {
+    pub const ROOT: Cred = Cred { ruid: 0, euid: 0, suid: 0, rgid: 0, egid: 0, sgid: 0, groups: Vec::new() };
+
+    pub fn in_group(&self, gid: u32) -> bool {
+        self.egid == gid || self.groups.contains(&gid)
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.euid == 0
+    }
 }
 
 /// The brk heap starts here: level-4 slot 32, unused by the kernel.
@@ -182,6 +211,7 @@ pub fn init() {
         start_tick: 0,
         cpu_ticks: 0,
         running_since: 0,
+        cred: Cred::ROOT,
     }));
     CURRENT.store(0, Ordering::SeqCst);
 }
@@ -461,13 +491,13 @@ pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u64, ExitReason)>, i64> {
 /// fork(): duplicate the current process. Returns the child's pid to the
 /// parent; the child returns from the same syscall with 0.
 pub fn fork(frame: &SyscallFrame) -> i64 {
-    let (p4, files, name, ppid, brk, pgid, ignored, argv, exe) = {
+    let (p4, files, name, ppid, brk, pgid, ignored, argv, exe, cred) = {
         let table = TABLE.lock();
         if table.len() >= MAX_PROCESSES {
             return -EAGAIN;
         }
         let cur = table.get(&current_pid()).unwrap();
-        (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid, cur.brk, cur.pgid, cur.ignored, cur.argv.clone(), cur.exe.clone())
+        (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid, cur.brk, cur.pgid, cur.ignored, cur.argv.clone(), cur.exe.clone(), cur.cred.clone())
     };
 
     let child_p4 = {
@@ -501,6 +531,7 @@ pub fn fork(frame: &SyscallFrame) -> i64 {
         start_tick: ticks(),
         cpu_ticks: 0,
         running_since: 0,
+        cred,
     };
     match add_process(child) {
         Ok(pid) => pid as i64,
@@ -553,18 +584,20 @@ fn load_error_errno(e: &str) -> i64 {
 /// instead: `#!/bin/sh -x` in /s.sh with argv [s.sh, a] becomes
 /// /bin/sh with argv [/bin/sh, -x, /s.sh, a]. Returns (program path,
 /// ELF bytes, argv).
-fn load_executable(path: &str, argv: Vec<String>) -> Result<(String, Vec<u8>, Vec<String>), i64> {
-    let check = |path: &str| -> Result<Vec<u8>, i64> {
+fn load_executable(path: &str, argv: Vec<String>) -> Result<(String, Vec<u8>, Vec<String>, Option<crate::mounts::Meta>), i64> {
+    let cred = current_cred();
+    let check = |path: &str| -> Result<(Vec<u8>, crate::mounts::Meta), i64> {
         let abs = crate::filesystem::normalize(&with_current_files(|f| f.cwd.clone()), path);
         let (_, meta) = crate::mounts::stat(&abs)?;
-        if meta.kind == crate::mounts::FileType::Dir || meta.perm & 0o111 == 0 {
-            return Err(EACCES); // not executable
+        if meta.kind == crate::mounts::FileType::Dir {
+            return Err(EACCES);
         }
-        vfs::read_whole_file(path)
+        crate::perm::check(&meta, &cred, crate::perm::EXEC)?; // not executable (for us)
+        Ok((vfs::read_whole_file(path)?, meta))
     };
-    let bytes = check(path)?;
+    let (bytes, meta) = check(path)?;
     if crate::elf::is_elf(&bytes) {
-        return Ok((path.to_string(), bytes, argv));
+        return Ok((path.to_string(), bytes, argv, Some(meta)));
     }
     if !bytes.starts_with(b"#!") {
         // Not an executable format: a text file must not be run as raw code.
@@ -580,7 +613,7 @@ fn load_executable(path: &str, argv: Vec<String>) -> Result<(String, Vec<u8>, Ve
     if interp.is_empty() {
         return Err(ENOEXEC);
     }
-    let interp_bytes = check(interp)?;
+    let (interp_bytes, _) = check(interp)?;
     if !crate::elf::is_elf(&interp_bytes) {
         return Err(ENOEXEC); // an interpreter that's a script itself isn't supported
     }
@@ -590,7 +623,8 @@ fn load_executable(path: &str, argv: Vec<String>) -> Result<(String, Vec<u8>, Ve
     }
     new_argv.push(path.to_string());
     new_argv.extend(argv.into_iter().skip(1));
-    Ok((interp.to_string(), interp_bytes, new_argv))
+    // (setuid/setgid bits on scripts are ignored, as on Linux.)
+    Ok((interp.to_string(), interp_bytes, new_argv, None))
 }
 
 /// execve(path, argv, envp): replace the current program. On success it
@@ -605,7 +639,7 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
         (Ok(a), Ok(e)) => (a, e),
         (Err(e), _) | (_, Err(e)) => return -e,
     };
-    let (path, bytes, argv) = match load_executable(&path, argv) {
+    let (path, bytes, argv, exe_meta) = match load_executable(&path, argv) {
         Ok(found) => found,
         Err(e) => return -e,
     };
@@ -628,6 +662,10 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
         p.brk = HEAP_BASE; // the new program starts with an empty heap
         core::mem::replace(&mut p.p4, image.p4)
     };
+    // A setuid/setgid program runs as the file's owner/group.
+    let setuid = exe_meta.filter(|m| m.perm & crate::perm::S_ISUID != 0).map(|m| m.uid);
+    let setgid = exe_meta.filter(|m| m.perm & crate::perm::S_ISGID != 0).map(|m| m.gid);
+    apply_exec_ids(setuid, setgid);
     let (_, flags) = Cr3::read();
     unsafe { Cr3::write(image.p4, flags) };
     {
@@ -703,6 +741,7 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         start_tick: ticks(),
         cpu_ticks: 0,
         running_since: 0,
+        cred: current_cred(), // programs the kernel starts run as root
     };
     add_process(process).map_err(|_| {
         let mut alloc = FRAME_ALLOCATOR.lock();
@@ -943,18 +982,33 @@ pub fn sys_kill(pid: u64, sig: u64) -> i64 {
     let sig = sig as i32;
     let mut table = TABLE.lock();
     let cur = current_pid();
-    let hit = if pid > 0 {
-        signal_locked(&mut table, pid as u64, sig) as usize
+    let me = table.get(&cur).map(|p| p.cred.clone()).unwrap_or(Cred::ROOT);
+    // POSIX: root may signal anything; others only processes whose real or
+    // saved user ID matches their real or effective one.
+    let allowed = |p: &Process| {
+        me.euid == 0 || [me.ruid, me.euid].iter().any(|&u| u == p.cred.ruid || u == p.cred.suid)
+    };
+    let targets: Vec<u64> = if pid > 0 {
+        table.keys().copied().filter(|&p| p == pid as u64).collect()
     } else if pid == 0 {
         let pgid = table.get(&cur).map(|p| p.pgid).unwrap_or(0);
-        signal_group_locked(&mut table, pgid, sig)
+        table.values().filter(|p| p.pgid == pgid && p.pid != 0).map(|p| p.pid).collect()
     } else if pid == -1 {
-        let all: Vec<u64> = table.keys().copied().filter(|&p| p != 0 && p != cur).collect();
-        all.iter().filter(|&&p| signal_locked(&mut table, p, sig)).count()
+        table.keys().copied().filter(|&p| p != 0 && p != cur).collect()
     } else {
-        signal_group_locked(&mut table, (-pid) as u64, sig)
+        table.values().filter(|p| p.pgid == (-pid) as u64 && p.pid != 0).map(|p| p.pid).collect()
     };
-    if hit == 0 { -ESRCH } else { 0 }
+    if targets.is_empty() {
+        return -ESRCH;
+    }
+    let permitted: Vec<u64> = targets.iter().copied().filter(|t| table.get(t).is_some_and(|p| allowed(p))).collect();
+    if permitted.is_empty() {
+        return -EPERM;
+    }
+    for t in permitted {
+        signal_locked(&mut table, t, sig);
+    }
+    0
 }
 
 /// setpgid(pid, pgid): 0 means "the caller" / "same as pid".
@@ -1125,6 +1179,9 @@ pub struct ProcInfo {
     /// (fd, description) of each open fd.
     pub fds: Vec<(usize, String)>,
     pub kernel: bool,
+    pub cred: Cred,
+    pub uid: u32,
+    pub gid: u32,
 }
 
 fn state_letter(s: State) -> char {
@@ -1161,6 +1218,9 @@ pub fn snapshot(only: Option<u64>) -> Vec<ProcInfo> {
                 heap: p.brk.saturating_sub(HEAP_BASE),
                 fds: p.files.describe(),
                 kernel: p.kernel_stack.is_none(),
+                cred: p.cred.clone(),
+                uid: p.cred.ruid,
+                gid: p.cred.rgid,
             }
         })
         .collect()
@@ -1175,4 +1235,156 @@ pub fn counts() -> (usize, usize) {
 
 pub fn last_pid() -> u64 {
     NEXT_PID.load(Ordering::SeqCst).saturating_sub(1)
+}
+
+// ---- credentials ----
+
+/// The current process's credentials.
+pub fn current_cred() -> Cred {
+    TABLE.lock().get(&current_pid()).map(|p| p.cred.clone()).unwrap_or(Cred::ROOT)
+}
+
+fn with_cred<T>(f: impl FnOnce(&mut Cred) -> T) -> T {
+    let mut table = TABLE.lock();
+    f(&mut table.get_mut(&current_pid()).unwrap().cred)
+}
+
+/// The IDs a user (or group) value of -1 means "leave unchanged".
+const KEEP: u32 = u32::MAX;
+
+/// setresuid(r, e, s) (and the helper for setuid/setreuid): root may set
+/// anything; others may only use their current real, effective or saved ID.
+fn set_uids(r: u32, e: u32, s: u32) -> i64 {
+    with_cred(|c| {
+        let ok = |v: u32| v == KEEP || c.euid == 0 || v == c.ruid || v == c.euid || v == c.suid;
+        if !(ok(r) && ok(e) && ok(s)) {
+            return -EPERM;
+        }
+        if r != KEEP {
+            c.ruid = r;
+        }
+        if e != KEEP {
+            c.euid = e;
+        }
+        if s != KEEP {
+            c.suid = s;
+        }
+        0
+    })
+}
+
+fn set_gids(r: u32, e: u32, s: u32) -> i64 {
+    with_cred(|c| {
+        let ok = |v: u32| v == KEEP || c.euid == 0 || v == c.rgid || v == c.egid || v == c.sgid;
+        if !(ok(r) && ok(e) && ok(s)) {
+            return -EPERM;
+        }
+        if r != KEEP {
+            c.rgid = r;
+        }
+        if e != KEEP {
+            c.egid = e;
+        }
+        if s != KEEP {
+            c.sgid = s;
+        }
+        0
+    })
+}
+
+/// The uid/gid family of syscalls.
+pub fn sys_id(num: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let (u1, u2, u3) = (a1 as u32, a2 as u32, a3 as u32);
+    match num {
+        SYS_GETUID => current_cred().ruid as i64,
+        SYS_GETEUID => current_cred().euid as i64,
+        SYS_GETGID => current_cred().rgid as i64,
+        SYS_GETEGID => current_cred().egid as i64,
+        SYS_SETUID => {
+            // root: all three; others: just the effective ID (to r or s).
+            if current_cred().euid == 0 {
+                set_uids(u1, u1, u1)
+            } else {
+                set_uids(KEEP, u1, KEEP)
+            }
+        }
+        SYS_SETGID => {
+            if current_cred().euid == 0 {
+                set_gids(u1, u1, u1)
+            } else {
+                set_gids(KEEP, u1, KEEP)
+            }
+        }
+        SYS_SETREUID => {
+            let c = current_cred();
+            // If the real ID is set (or the effective one changes to
+            // something other than the real ID), the saved ID follows.
+            let saved = if u1 != KEEP || (u2 != KEEP && u2 != c.ruid) { if u2 != KEEP { u2 } else { c.euid } } else { KEEP };
+            set_uids(u1, u2, saved)
+        }
+        SYS_SETREGID => {
+            let c = current_cred();
+            let saved = if u1 != KEEP || (u2 != KEEP && u2 != c.rgid) { if u2 != KEEP { u2 } else { c.egid } } else { KEEP };
+            set_gids(u1, u2, saved)
+        }
+        SYS_SETRESUID => set_uids(u1, u2, u3),
+        SYS_SETRESGID => set_gids(u1, u2, u3),
+        SYS_GETRESUID | SYS_GETRESGID => {
+            let c = current_cred();
+            let vals = if num == SYS_GETRESUID { [c.ruid, c.euid, c.suid] } else { [c.rgid, c.egid, c.sgid] };
+            for (ptr, v) in [a1, a2, a3].into_iter().zip(vals) {
+                match unsafe { user_slice_mut(ptr, 4) } {
+                    Some(out) => out.copy_from_slice(&v.to_le_bytes()),
+                    None => return -EFAULT,
+                }
+            }
+            0
+        }
+        _ => -ENOSYS,
+    }
+}
+
+/// getgroups(size, list)
+pub fn sys_getgroups(size: u64, list: u64) -> i64 {
+    let groups = current_cred().groups;
+    if size == 0 {
+        return groups.len() as i64;
+    }
+    if (size as usize) < groups.len() {
+        return -EINVAL;
+    }
+    let Some(out) = (unsafe { user_slice_mut(list, groups.len() as u64 * 4) }) else { return -EFAULT };
+    for (i, g) in groups.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&g.to_le_bytes());
+    }
+    groups.len() as i64
+}
+
+/// setgroups(size, list): root only.
+pub fn sys_setgroups(size: u64, list: u64) -> i64 {
+    if current_cred().euid != 0 {
+        return -EPERM;
+    }
+    if size > 64 {
+        return -EINVAL;
+    }
+    let Some(input) = (unsafe { user_slice(list, size * 4) }) else { return -EFAULT };
+    let groups: Vec<u32> = input.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    with_cred(|c| c.groups = groups);
+    0
+}
+
+/// After execve of a setuid/setgid program: run as its owner/group.
+pub fn apply_exec_ids(setuid: Option<u32>, setgid: Option<u32>) {
+    with_cred(|c| {
+        if let Some(u) = setuid {
+            c.euid = u;
+        }
+        if let Some(g) = setgid {
+            c.egid = g;
+        }
+        // POSIX: the saved IDs become the effective ones.
+        c.suid = c.euid;
+        c.sgid = c.egid;
+    });
 }

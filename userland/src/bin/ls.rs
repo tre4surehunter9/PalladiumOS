@@ -23,7 +23,23 @@ fn when(t: i64) -> alloc::string::String {
     alloc::format!("{:04}-{:02}-{:02} {:02}:{:02}", y, mo, d, h, mi)
 }
 
-/// "drwxr-xr-x" for a mode.
+/// User and group names for ls -l (looked up once each).
+#[derive(Default)]
+struct Names {
+    users: alloc::collections::BTreeMap<u32, String>,
+    groups: alloc::collections::BTreeMap<u32, String>,
+}
+
+impl Names {
+    fn user(&mut self, uid: u32) -> String {
+        self.users.entry(uid).or_insert_with(|| userlib::users::user_name(uid)).clone()
+    }
+    fn group(&mut self, gid: u32) -> String {
+        self.groups.entry(gid).or_insert_with(|| userlib::users::group_name(gid)).clone()
+    }
+}
+
+/// "drwxr-xr-x" for a mode (s/S: setuid/setgid, t/T: sticky).
 fn mode_string(mode: u32) -> alloc::string::String {
     let kind = match mode & userlib::S_IFMT {
         userlib::S_IFDIR => 'd',
@@ -34,11 +50,17 @@ fn mode_string(mode: u32) -> alloc::string::String {
     };
     let mut s = alloc::string::String::new();
     s.push(kind);
-    for shift in [6, 3, 0] {
+    for (shift, special, mark) in [(6, 0o4000, 's'), (3, 0o2000, 's'), (0, 0o1000, 't')] {
         let bits = (mode >> shift) & 7;
         s.push(if bits & 4 != 0 { 'r' } else { '-' });
         s.push(if bits & 2 != 0 { 'w' } else { '-' });
-        s.push(if bits & 1 != 0 { 'x' } else { '-' });
+        let x = bits & 1 != 0;
+        s.push(match (mode & special != 0, x) {
+            (true, true) => mark,
+            (true, false) => mark.to_ascii_uppercase(),
+            (false, true) => 'x',
+            (false, false) => '-',
+        });
     }
     s
 }
@@ -66,8 +88,17 @@ fn list(path: &str, opts: &Options) -> i32 {
     match found {
         Ok(st) if !st.is_dir() => {
             if opts.long {
-                let mut line =
-                    alloc::format!("{} {:>2} {:>8}  {}  {}", mode_string(st.st_mode), st.st_nlink, st.st_size, when(st.st_mtime), path);
+                let mut names = Names::default();
+                let mut line = alloc::format!(
+                    "{} {:>2} {:<6} {:<6} {:>8}  {}  {}",
+                    mode_string(st.st_mode),
+                    st.st_nlink,
+                    names.user(st.st_uid),
+                    names.group(st.st_gid),
+                    st.st_size,
+                    when(st.st_mtime),
+                    path
+                );
                 if st.is_symlink() {
                     let mut target = [0u8; 1024];
                     if let Ok(t) = userlib::readlink(path, &mut target) {
@@ -102,6 +133,7 @@ fn list(path: &str, opts: &Options) -> i32 {
         }
     });
     entries.sort();
+    let mut names = Names::default();
     for (name, is_dir) in &entries {
         if opts.long {
             let mut buf = [0u8; 512];
@@ -109,9 +141,11 @@ fn list(path: &str, opts: &Options) -> i32 {
             match userlib::lstat(full) {
                 Ok(st) => {
                     let mut line = alloc::format!(
-                        "{} {:>2} {:>8}  {}  {}",
+                        "{} {:>2} {:<6} {:<6} {:>8}  {}  {}",
                         mode_string(st.st_mode),
                         st.st_nlink,
+                        names.user(st.st_uid),
+                        names.group(st.st_gid),
                         st.st_size,
                         when(st.st_mtime),
                         name

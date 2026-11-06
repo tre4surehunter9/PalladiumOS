@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::filesystem;
+use crate::perm;
 use crate::mounts::{self, Device, FileType, Loc};
 use crate::pipe::{self, PipeReader, PipeWriter};
 use crate::syscall::*;
@@ -278,6 +279,7 @@ fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
         return -EINVAL;
     }
 
+    let mut created = false;
     let looked_up = if flags & O_NOFOLLOW != 0 { mounts::lstat(abs) } else { mounts::stat(abs) };
     let (loc, meta) = match looked_up {
         Ok((_, meta)) if meta.kind == FileType::Symlink => return -ELOOP, // O_NOFOLLOW
@@ -289,16 +291,28 @@ fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
         }
         Err(ENOENT) if flags & O_CREAT != 0 => {
             let perm = mode as u32 & 0o7777 & !with_process(|p| p.umask);
-            let created = mounts::create(abs, FileType::File, perm)
+            let made = mounts::create(abs, FileType::File, perm)
                 .and_then(|loc| Ok((loc, mounts::with_fs(loc.mount, |fs| fs.meta(loc.ino))?)));
-            match created {
-                Ok(found) => found,
+            match made {
+                Ok(found) => {
+                    created = true;
+                    found
+                }
                 Err(e) => return -e,
             }
         }
         Err(e) => return -e,
     };
 
+    // Permission to open it the way asked (a just-created file is ours).
+    let cred = crate::process::current_cred();
+    let want = if readable { perm::READ } else { 0 } | if writable || flags & O_TRUNC != 0 { perm::WRITE } else { 0 };
+    // (The open that creates a file may use it whatever its new mode says.)
+    if !created {
+        if let Err(e) = perm::check(&meta, &cred, want) {
+            return -e;
+        }
+    }
     let kind = match meta.kind {
         FileType::Dir => {
             if writable {
@@ -688,7 +702,14 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
 
 /// Fill a Linux x86_64 `struct stat` (144 bytes).
 fn fill_stat(out: &mut [u8], dev: u64, ino: u64, mode: u32, nlink: u64, size: u64, mtime: u64) {
+    fill_stat_owned(out, dev, ino, mode, nlink, size, mtime, 0, 0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_stat_owned(out: &mut [u8], dev: u64, ino: u64, mode: u32, nlink: u64, size: u64, mtime: u64, uid: u32, gid: u32) {
     out.fill(0);
+    out[28..32].copy_from_slice(&uid.to_le_bytes()); // st_uid
+    out[32..36].copy_from_slice(&gid.to_le_bytes()); // st_gid
     let put64 = |out: &mut [u8], off: usize, v: u64| out[off..off + 8].copy_from_slice(&v.to_le_bytes());
     put64(out, 0, dev); // st_dev
     put64(out, 8, ino); // st_ino
@@ -715,7 +736,17 @@ fn stat_loc(loc: Loc, out: &mut [u8]) -> i64 {
         FileType::Symlink => S_IFLNK,
         FileType::CharDevice(_) => S_IFCHR,
     };
-    fill_stat(out, loc.mount as u64 + 1, meta.ino, kind_bits | meta.perm, meta.nlink as u64, meta.size, meta.mtime);
+    fill_stat_owned(
+        out,
+        loc.mount as u64 + 1,
+        meta.ino,
+        kind_bits | meta.perm,
+        meta.nlink as u64,
+        meta.size,
+        meta.mtime,
+        meta.uid,
+        meta.gid,
+    );
     0
 }
 
@@ -838,6 +869,9 @@ pub fn sys_chdir(path: u64) -> i64 {
     };
     match mounts::stat(&abs) {
         Ok((_, meta)) if meta.kind == FileType::Dir => {
+            if let Err(e) = perm::check(&meta, &crate::process::current_cred(), perm::EXEC) {
+                return -e;
+            }
             with_process(|p| p.cwd = abs);
             0
         }
@@ -956,10 +990,24 @@ pub fn sys_fchmodat(dirfd: u64, path: u64, mode: u64) -> i64 {
         Err(e) => return -e,
     };
     match mounts::stat(&abs) {
-        Ok((loc, _)) => match mounts::with_fs(loc.mount, |fs| fs.chmod(loc.ino, mode as u32 & 0o7777)) {
-            Ok(()) => 0,
-            Err(e) => -e,
-        },
+        Ok((loc, meta)) => chmod_loc(loc, &meta, mode),
+        Err(e) => -e,
+    }
+}
+
+/// chmod with the permission rules: only the owner (or root) may change
+/// the mode, and only root may keep setuid/setgid bits on others' groups.
+fn chmod_loc(loc: Loc, meta: &mounts::Meta, mode: u64) -> i64 {
+    let cred = crate::process::current_cred();
+    if let Err(e) = perm::check_owner(meta, &cred) {
+        return -e;
+    }
+    let mut mode = mode as u32 & 0o7777;
+    if !cred.is_root() && meta.kind != FileType::Dir && !cred.in_group(meta.gid) {
+        mode &= !perm::S_ISGID;
+    }
+    match mounts::with_fs(loc.mount, |fs| fs.chmod(loc.ino, mode)) {
+        Ok(()) => 0,
         Err(e) => -e,
     }
 }
@@ -977,8 +1025,8 @@ fn fd_loc(fd: u64) -> Result<Option<Loc>, i64> {
 /// fchmod(fd, mode)
 pub fn sys_fchmod(fd: u64, mode: u64) -> i64 {
     match fd_loc(fd) {
-        Ok(Some(loc)) => match mounts::with_fs(loc.mount, |fs| fs.chmod(loc.ino, mode as u32 & 0o7777)) {
-            Ok(()) => 0,
+        Ok(Some(loc)) => match mounts::with_fs(loc.mount, |fs| fs.meta(loc.ino)) {
+            Ok(meta) => chmod_loc(loc, &meta, mode),
             Err(e) => -e,
         },
         Ok(None) => -EINVAL,
@@ -986,9 +1034,8 @@ pub fn sys_fchmod(fd: u64, mode: u64) -> i64 {
     }
 }
 
-/// faccessat(dirfd, path, mode) (and access). Every process is root for
-/// now, so reading and writing are always allowed; executing needs an
-/// execute bit (as for root on Linux).
+/// faccessat(dirfd, path, mode) (and access): may the real user read,
+/// write or execute the file?
 pub fn sys_faccessat(dirfd: u64, path: u64, mode: u64) -> i64 {
     const X_OK: u64 = 1;
     if mode & !7 != 0 {
@@ -1000,10 +1047,16 @@ pub fn sys_faccessat(dirfd: u64, path: u64, mode: u64) -> i64 {
     };
     match mounts::stat(&abs) {
         Ok((_, meta)) => {
-            if mode & X_OK != 0 && meta.kind != FileType::Dir && meta.perm & 0o111 == 0 {
-                return -EACCES;
+            // access() checks with the *real* IDs (who started the program),
+            // so a setuid program can ask "may my user do this?".
+            let mut cred = crate::process::current_cred();
+            cred.euid = cred.ruid;
+            cred.egid = cred.rgid;
+            let want = (mode & 7) as u32 | if mode & X_OK != 0 { perm::EXEC } else { 0 };
+            match perm::check(&meta, &cred, want) {
+                Ok(()) => 0,
+                Err(e) => -e,
             }
-            0
         }
         Err(e) => -e,
     }
@@ -1068,6 +1121,7 @@ pub fn sys_utimensat(dirfd: u64, path: u64, times: u64, flags: u64) -> i64 {
             _ => Some(sec as u64),
         }
     };
+    let explicit = times != 0;
     let loc = if path == 0 {
         match fd_loc(dirfd) {
             Ok(Some(l)) => l,
@@ -1085,12 +1139,70 @@ pub fn sys_utimensat(dirfd: u64, path: u64, times: u64, flags: u64) -> i64 {
             Err(e) => return -e,
         }
     };
+    // Setting a time needs ownership; setting it to "now" is also allowed
+    // with write permission (like Linux).
+    let meta = match mounts::with_fs(loc.mount, |fs| fs.meta(loc.ino)) {
+        Ok(m) => m,
+        Err(e) => return -e,
+    };
+    let cred = crate::process::current_cred();
+    if perm::check_owner(&meta, &cred).is_err() && (explicit || !perm::allowed(&meta, &cred, perm::WRITE)) {
+        return if explicit { -EPERM } else { -EACCES };
+    }
     match mtime {
         Some(t) => match mounts::with_fs(loc.mount, |fs| fs.set_mtime(loc.ino, t)) {
             Ok(()) => 0,
             Err(e) => -e,
         },
         None => 0,
+    }
+}
+
+/// chown rules: only root may give a file to someone else; the owner may
+/// change its group to one of their own groups. A non-root chown clears
+/// the setuid/setgid bits (so you can't hand someone a setuid program).
+fn chown_loc(loc: Loc, uid: u32, gid: u32) -> i64 {
+    const KEEP: u32 = u32::MAX;
+    let meta = match mounts::with_fs(loc.mount, |fs| fs.meta(loc.ino)) {
+        Ok(m) => m,
+        Err(e) => return -e,
+    };
+    let cred = crate::process::current_cred();
+    let new_uid = if uid == KEEP { meta.uid } else { uid };
+    let new_gid = if gid == KEEP { meta.gid } else { gid };
+    if !cred.is_root() {
+        if cred.euid != meta.uid || new_uid != meta.uid || (new_gid != meta.gid && !cred.in_group(new_gid)) {
+            return -EPERM;
+        }
+    }
+    if let Err(e) = mounts::with_fs(loc.mount, |fs| fs.chown(loc.ino, new_uid, new_gid)) {
+        return -e;
+    }
+    if !cred.is_root() && meta.kind == FileType::File && meta.perm & (perm::S_ISUID | perm::S_ISGID) != 0 {
+        let _ = mounts::with_fs(loc.mount, |fs| fs.chmod(loc.ino, meta.perm & !(perm::S_ISUID | perm::S_ISGID)));
+    }
+    0
+}
+
+/// fchownat(dirfd, path, uid, gid, flags) (and chown, lchown)
+pub fn sys_fchownat(dirfd: u64, path: u64, uid: u64, gid: u64, flags: u64) -> i64 {
+    let abs = match user_at_path(dirfd, path) {
+        Ok(p) => p,
+        Err(e) => return -e,
+    };
+    let found = if flags & AT_SYMLINK_NOFOLLOW != 0 { mounts::lstat(&abs) } else { mounts::stat(&abs) };
+    match found {
+        Ok((loc, _)) => chown_loc(loc, uid as u32, gid as u32),
+        Err(e) => -e,
+    }
+}
+
+/// fchown(fd, uid, gid)
+pub fn sys_fchown(fd: u64, uid: u64, gid: u64) -> i64 {
+    match fd_loc(fd) {
+        Ok(Some(loc)) => chown_loc(loc, uid as u32, gid as u32),
+        Ok(None) => -EINVAL,
+        Err(e) => -e,
     }
 }
 

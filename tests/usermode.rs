@@ -1350,3 +1350,99 @@ fn cpu_time_is_counted() {
     assert!(time_of("test_proc spin 1000000") >= 1, "the busy one does:\n{}", ps);
     assert!(only_kernel_left());
 }
+
+// ---- users and permissions ----
+
+#[test_case]
+fn permissions_as_an_unprivileged_user() {
+    assert_eq!(run(prog("test_perm"), &["test_perm", "all"]), Ok(0));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+/// Make sure the default accounts exist (as on a fresh disk).
+fn setup_users() {
+    filesystem::init_default_files();
+    let _ = filesystem::make_dir("/tmp");
+    let _ = filesystem::chmod("/tmp", 0o1777);
+}
+
+#[test_case]
+fn login_as_user_then_su_and_passwd() {
+    setup_users();
+    palladiumos::task::keyboard::init_queue();
+    // login: user (no password yet), then commands in the user's shell
+    type_line("user");
+    type_line("whoami > /tmp/who1");
+    type_line("id > /tmp/id1");
+    type_line("touch /etc/nope 2> /tmp/err1");
+    // su to root (no root password yet) and give user a password
+    type_line("su");
+    type_line("whoami > /tmp/who2");
+    type_line("passwd user");
+    type_line("pw123");
+    type_line("pw123");
+    type_line("exit");
+    type_line("exit");
+    assert_eq!(run(prog("login"), &["login"]), Ok(0));
+    assert_eq!(file("/tmp/who1"), "user\n");
+    assert!(file("/tmp/id1").starts_with("uid=1000(user) gid=1000(user)"), "{}", file("/tmp/id1"));
+    assert!(file("/tmp/err1").contains("Permission denied"));
+    assert_eq!(file("/tmp/who2"), "root\n");
+    assert!(file("/etc/shadow").contains("user:$sha256$"), "password was set");
+    assert!(filesystem::read_file("/etc/nope").is_err());
+
+    // Now the password is needed: a wrong one fails, the right one works.
+    palladiumos::task::keyboard::init_queue();
+    type_line("user");
+    type_line("wrong");
+    type_line("user");
+    type_line("pw123");
+    type_line("whoami > /tmp/who3");
+    type_line("exit");
+    assert_eq!(run(prog("login"), &["login"]), Ok(0));
+    assert_eq!(file("/tmp/who3"), "user\n");
+
+    // Put the account back the way it was.
+    assert_eq!(sh("passwd -d user"), 0);
+    assert!(only_kernel_left());
+}
+
+#[test_case]
+fn login_ctrl_d_means_kernel_shell() {
+    setup_users();
+    palladiumos::task::keyboard::init_queue();
+    ctrl_d();
+    assert_eq!(run(prog("login"), &["login"]), Ok(99));
+}
+
+#[test_case]
+fn useradd_userdel_id_groups() {
+    setup_users();
+    assert_eq!(sh("useradd -G wheel alice"), 0);
+    assert!(file("/etc/passwd").contains("alice:x:1001:1001::/home/alice:/bin/sh"), "{}", file("/etc/passwd"));
+    assert!(file("/etc/group").contains("wheel:x:10:root,user,alice"));
+    assert!(filesystem::is_dir("/home/alice"));
+    assert_eq!(sh("id alice > /tmp/ida; groups alice > /tmp/ga; ls -ld /home/alice > /tmp/lsa 2>&1; ls -l /home > /tmp/lsh"), 0);
+    assert_eq!(file("/tmp/ida"), "uid=1001(alice) gid=1001(alice) groups=1001(alice),10(wheel)\n");
+    assert_eq!(file("/tmp/ga"), "alice wheel\n");
+    assert!(file("/tmp/lsh").contains("alice  alice"), "{}", file("/tmp/lsh"));
+    assert_eq!(sh("useradd alice"), 1, "already exists");
+    assert_eq!(sh("useradd 'bad name'"), 1);
+    assert_eq!(sh("userdel -r alice"), 0);
+    assert!(!file("/etc/passwd").contains("alice"));
+    assert!(!filesystem::is_dir("/home/alice"));
+    assert_eq!(sh("userdel root"), 1);
+    // ordinary users can't add users
+    assert_eq!(sh("su user -c 'useradd mallory'"), 1);
+}
+
+#[test_case]
+fn chown_chgrp_tools() {
+    setup_users();
+    assert_eq!(sh("touch /tmp/own && chown user:wheel /tmp/own && ls -l /tmp/own > /tmp/own.ls"), 0);
+    assert!(file("/tmp/own.ls").contains(" user   wheel "), "{}", file("/tmp/own.ls"));
+    assert_eq!(sh("chgrp root /tmp/own && chown 0 /tmp/own && stat /tmp/own > /tmp/own.st"), 0);
+    assert!(file("/tmp/own.st").contains("Uid: 0  Gid: 0"));
+    assert_eq!(sh("chown nobody /tmp/own"), 1, "unknown user");
+    assert_eq!(sh("su user -c 'chown user /tmp/own'"), 1, "only root gives files away");
+}

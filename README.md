@@ -126,7 +126,12 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 59 | execve | yes (static ELF executables) |
 | 60 | exit | yes |
 | 61 | wait4 | yes (`WNOHANG`; no rusage) |
-| 62 | kill | yes (pid, process group, or -1 for all) |
+| 62 | kill | yes (pid, process group, or -1 for all; `EPERM` for other users' processes) |
+| 92/93/94/260 | chown, fchown, lchown, fchownat | yes |
+| 102/104/107/108 | getuid, getgid, geteuid, getegid | yes |
+| 105/106/113/114/117/119 | setuid, setgid, setreuid, setregid, setresuid, setresgid | yes (POSIX rules) |
+| 115/116 | getgroups, setgroups | yes |
+| 118/120 | getresuid, getresgid | yes |
 | 72 | fcntl | `F_DUPFD`, `F_GETFD`/`F_SETFD` (close-on-exec), `F_GETFL` |
 | 109 | setpgid | yes |
 | 111 | getpgrp | yes |
@@ -154,7 +159,17 @@ Programs can start other programs with `fork` + `execve` and wait for them with 
 The kernel shell is task 0: `run` starts a program as its child and waits for it (and anything it started) to finish.
 Orphaned processes are handed to the kernel, which reaps them. Up to 32 processes can exist at once.
 
-Paths follow symbolic links (up to 40 per lookup, then `ELOOP`). Files have permission bits (`chmod`, and `umask` for new files) and `execve` needs an execute bit; it also runs `#!` scripts. Every process runs as root for now, so read and write permissions aren't enforced yet (root bypasses them on Unix too).
+Paths follow symbolic links (up to 40 per lookup, then `ELOOP`). Files have permission bits (`chmod`, and `umask` for new files) and `execve` needs an execute bit; it also runs `#!` scripts. 
+
+## Users and Permissions
+PalladiumOS boots into `login`. A fresh disk has two accounts, `root` and `user` (uid 1000), with no passwords: set them with `passwd`. Ctrl-D at the login prompt opens the kernel shell; logging out returns to login.
+
+* Each process has real, effective and saved user/group IDs and supplementary groups (`fork` copies them). Files have an owner and a group (stored in ext2 inodes).
+* Permissions are enforced POSIX-style: read/write/execute for owner, group and others; search (`x`) is needed on every directory in a path; creating, removing and renaming need write permission on the directory; in sticky directories (like `/tmp`, mode 1777) only a file's owner may remove it. Root may read and write anything.
+* Only the owner may `chmod` a file; only root may `chown` it to someone else. `access()` checks with the real IDs.
+* Setuid/setgid programs run as the file's owner/group (`su` and `passwd` are setuid root); the bits are ignored on `#!` scripts.
+* Accounts live in `/etc/passwd`, `/etc/group` and `/etc/shadow` (mode 600). Passwords are hashed with iterated, salted SHA-256 (`$sha256$salt$hash`, PalladiumOS's own format).
+* Tools: `login`, `su [-] [user] [-c cmd]`, `passwd [-d] [user]`, `whoami`, `id`, `groups`, `useradd [-u uid] [-G groups] name`, `userdel [-r] name`, `chown user[:group]`, `chgrp`. `ls -l` shows owners, and the prompt shows `user@palladium:~ $` (`#` for root).
 
 Open files work like POSIX: an fd refers to a shared open file description, so after `fork` or `dup` both fds share one file offset. Pipes hold 16 KiB; readers wait for data and get end-of-file when every writer has closed, writers wait for room and get SIGPIPE/`EPIPE` when no reader is left. `O_CLOEXEC` fds are closed by `execve`.
 
@@ -196,7 +211,7 @@ The date comes from the PC's real-time clock, so file times and `date` are real.
 * The system is running
 
 ## The Shell
-PalladiumOS boots into `/bin/sh`, a POSIX-style shell that runs in userland as a normal process.
+After you log in, you get `/bin/sh`, a POSIX-style shell that runs in userland as a normal process.
 
 * Run programs by name (`ls -l /bin`) or by path (`/bin/echo hi`); names are looked up in `$PATH`
 * Quoting: `'single'`, `"double with $VARS"`, `\` escapes, `# comments`
