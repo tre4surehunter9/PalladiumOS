@@ -47,6 +47,8 @@ User programs run in ring 3 and are started with `run <name> [args...]` (`run` a
 * sleep - waits for a number of seconds (`sleep 0.5` works)
 * kill - sends a signal (`kill -9 PID`, `kill -l`)
 * uptime - time since boot
+* date - the date and time (`date +%s` for seconds since 1970)
+* sync - writes cached data to the disk
 * grep - prints matching lines (`-i -v -n -c -q -F`; `.` `*` `^` `$` patterns)
 * wc - counts lines, words and bytes (`-l -w -c`)
 * head / tail - first or last lines (`-n N`)
@@ -117,7 +119,8 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 84 | rmdir | yes |
 | 87 | unlink | yes |
 | 110 | getppid | yes |
-| 169 | reboot | yes (restart, power off, halt) |
+| 162 | sync | yes |
+| 169 | reboot | yes (restart, power off, halt; syncs first) |
 | 217 | getdents64 | yes |
 | 228 | clock_gettime | yes (time since boot) |
 | 231 | exit_group | yes |
@@ -143,9 +146,24 @@ Programs live in `/bin` as ordinary files, installed at boot: `run ls` runs `/bi
 `cargo test` boots each test kernel in QEMU (no window) and reports results over serial.
 * `tests/usermode.rs` - ring 3 programs, syscalls, exit statuses and fault handling
 * `tests/filesystem.rs` - the filesystem and shell commands
+* `tests/ext2.rs` - the ext2 driver, the VFS, `/dev`, the ATA disk driver and the clock
 * `tests/heap_allocation.rs`, `tests/stack_overflow.rs`, `tests/should_panic.rs`, `tests/basic_boot.rs` - kernel basics
 
 The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh` rebuilds them).
+
+## Disk and Filesystems
+`cargo run` attaches a 32 MiB virtual disk, `target/disk.img`, formatted as **ext2** (the classic Linux filesystem). It's mounted at `/`, so **files you create are saved across reboots**. `build.rs` creates it with `mke2fs` (from e2fsprogs) the first time; delete it to start fresh.
+
+| Path | Filesystem | |
+|------|------------|---|
+| `/` | ext2 on the disk | saved; falls back to memory if there's no disk |
+| `/bin` | memory | the bundled programs, refreshed every boot |
+| `/tmp` | memory | cleared on reboot |
+| `/dev` | devfs | `null`, `zero`, `tty`, `console` |
+
+The kernel has a small VFS layer: every filesystem implements one interface, and paths are resolved through the mount table. The ext2 driver reads and writes files (including indirect blocks), creates and removes files and directories, and frees a file deleted while open only when it's closed. Linux tools can check and read the disk: `e2fsck -f target/disk.img`, `debugfs -R "ls -l /" target/disk.img`. Run `sync` (or `poweroff`/`reboot`, which sync first) before closing QEMU.
+
+The date comes from the PC's real-time clock, so file times and `date` are real.
 
 ## Instructions for Running the Kernel
 * Install QEMU

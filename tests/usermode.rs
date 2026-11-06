@@ -915,7 +915,7 @@ fn pipe_syscalls() {
 #[test_case]
 fn sh_pipelines() {
     assert_eq!(sh("ls /bin | grep ^s > /p1.txt"), 0);
-    assert_eq!(file("/p1.txt"), "sh\nsleep\nsort\n");
+    assert_eq!(file("/p1.txt"), "sh\nsleep\nsort\nsync\n");
     assert_eq!(sh("echo hello | cat | cat | cat > /p2.txt"), 0);
     assert_eq!(file("/p2.txt"), "hello\n");
     assert_eq!(sh("false | true"), 0, "status is the last command's");

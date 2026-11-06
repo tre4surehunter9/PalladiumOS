@@ -47,6 +47,7 @@ pub mod sys {
     pub const SETPGID: u64 = 109;
     pub const GETPGRP: u64 = 111;
     pub const GETPPID: u64 = 110;
+    pub const SYNC: u64 = 162;
     pub const REBOOT: u64 = 169;
     pub const CLOCK_GETTIME: u64 = 228;
     pub const UNAME: u64 = 63;
@@ -134,6 +135,11 @@ pub const REBOOT_POWER_OFF: u64 = 0x4321fedc;
 /// reboot(2) with the Linux magic numbers. Only returns on error.
 pub fn reboot(cmd: u64) -> isize {
     unsafe { sys::syscall3(sys::REBOOT, 0xfee1dead, 672274793, cmd) as isize }
+}
+
+/// sync(2): write cached data to the disks.
+pub fn sync() {
+    unsafe { sys::syscall3(sys::SYNC, 0, 0, 0) };
 }
 
 pub fn sched_yield() {

@@ -14,18 +14,10 @@ pub static FLAT_PROGRAMS: &[(&str, &[u8])] = &[
 /// Install every bundled program as /bin/<name>, so programs can be run by
 /// path (execve("/bin/ls", ...)) like on any Unix.
 pub fn install() {
-    let mut fs = crate::filesystem::FS.lock();
-    let _ = fs.make_dir("/bin");
+    let _ = crate::filesystem::make_dir("/bin");
     for (name, bytes) in USER_PROGRAMS.iter().chain(FLAT_PROGRAMS) {
         let path = alloc::format!("/bin/{}", name);
-        let idx = match fs.resolve(&path) {
-            Some(idx) => {
-                let _ = fs.truncate(idx, 0);
-                idx
-            }
-            None => fs.create_file(&path).expect("can't create /bin entry"),
-        };
-        fs.write_at(idx, 0, bytes).expect("can't write /bin entry");
+        crate::filesystem::write_bytes(&path, bytes).expect("can't write /bin entry");
     }
 }
 
@@ -46,3 +38,6 @@ pub fn names() -> impl Iterator<Item = &'static str> {
         .map(|&(n, _)| n)
         .filter(|n| !n.starts_with("test_"))
 }
+
+/// A small prefilled ext2 image (made by build.rs) for the ext2 tests.
+pub static EXT2_TEST_IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ext2-test.img"));

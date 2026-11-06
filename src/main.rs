@@ -83,7 +83,6 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
 
         allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
 
-        palladiumos::filesystem::init_default_files();
 
 
         // Hand the mapper/frame allocator off to memory::MAPPER / memory::FRAME_ALLOCATOR
@@ -92,7 +91,10 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         *memory::MAPPER.lock() = Some(mapper);
         *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
         palladiumos::process::init();
+        palladiumos::rtc::init();
+        mount_filesystems();
         palladiumos::programs::install();
+        palladiumos::filesystem::init_default_files();
 
         #[cfg(test)]
         test_main();
@@ -106,6 +108,36 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         executor.spawn(Task::new(run_shell()));
         executor.run();
     }
+
+/// `/` is the ext2 disk if there is one (so files survive a reboot),
+/// otherwise memory. /bin (the bundled programs, fresh every boot) and /tmp
+/// are in memory, and /dev has the device files.
+fn mount_filesystems() {
+    use alloc::boxed::Box;
+    use palladiumos::{block, devfs::DevFs, ext2::Ext2, fdfs::Fdfs, mounts};
+
+    let root: Box<dyn mounts::FileSystem> = match block::data_disk().map(Ext2::mount) {
+        Some(Ok(fs)) => {
+            println!("Mounted the ext2 disk at /{}", if fs.is_read_only() { " (read-only)" } else { "" });
+            Box::new(fs)
+        }
+        Some(Err(e)) => {
+            println!("Disk found but not mounted ({}); files will not be saved.", e);
+            Box::new(Fdfs::new())
+        }
+        None => {
+            println!("No disk attached; files will not be saved.");
+            Box::new(Fdfs::new())
+        }
+    };
+    mounts::mount("/", root);
+    for dir in ["/bin", "/tmp", "/dev"] {
+        let _ = palladiumos::filesystem::make_dir(dir); // mount points
+    }
+    mounts::mount("/bin", Box::new(Fdfs::new()));
+    mounts::mount("/tmp", Box::new(Fdfs::new()));
+    mounts::mount("/dev", Box::new(DevFs));
+}
 
 #[cfg(not(test))]
 fn start_userland_shell() {

@@ -115,6 +115,11 @@ pub mod programs;
 pub mod vfs;
 pub mod process;
 pub mod pipe;
+pub mod block;
+pub mod mounts;
+pub mod ext2;
+pub mod devfs;
+pub mod rtc;
 
 
 extern crate alloc;

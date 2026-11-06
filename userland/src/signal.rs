@@ -61,3 +61,27 @@ pub fn monotonic_time() -> (u64, u64) {
     unsafe { syscall3(sys::CLOCK_GETTIME, 1, ts.as_mut_ptr() as u64, 0) };
     (ts[0] as u64, ts[1] as u64)
 }
+
+/// Seconds since 1970 (CLOCK_REALTIME).
+pub fn unix_time() -> u64 {
+    let mut ts = [0i64; 2];
+    unsafe { syscall3(sys::CLOCK_GETTIME, 0, ts.as_mut_ptr() as u64, 0) };
+    ts[0] as u64
+}
+
+/// A Unix time as (year, month, day, hour, minute, second), UTC.
+pub fn civil_time(t: u64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = (t / 86400) as i64;
+    let secs = t % 86400;
+    // days -> civil date (Howard Hinnant's algorithm)
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    (y, m, d, (secs / 3600) as u32, (secs / 60 % 60) as u32, (secs % 60) as u32)
+}

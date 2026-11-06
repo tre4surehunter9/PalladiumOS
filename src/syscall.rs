@@ -51,6 +51,7 @@ pub const SYS_CHDIR: u64 = 80;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
 pub const SYS_UNLINK: u64 = 87;
+pub const SYS_SYNC: u64 = 162;
 pub const SYS_REBOOT: u64 = 169;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_CLOCK_GETTIME: u64 = 228;
@@ -244,6 +245,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_PIPE2 => vfs::sys_pipe2(a1, a2),
         SYS_FCNTL => vfs::sys_fcntl(a1, a2, a3),
         SYS_BRK => process::sys_brk(a1),
+        SYS_SYNC => vfs::sys_sync(),
         SYS_REBOOT => sys_reboot(a1, a2, a3),
         SYS_SCHED_YIELD => {
             process::yield_now();
@@ -297,6 +299,8 @@ fn sys_reboot(magic1: u64, magic2: u64, cmd: u64) -> i64 {
     if magic1 as u32 as u64 != MAGIC1 || magic2 as u32 as u64 != MAGIC2 {
         return -EINVAL;
     }
+    // Don't lose data that's still in disk caches.
+    crate::mounts::sync_all();
     match cmd as u32 as u64 {
         CMD_RESTART => unsafe {
             crate::println!("Rebooting...");

@@ -14,6 +14,15 @@ use userlib::{close, eprintln, for_each_entry, open, print, println, stat, strer
 
 userlib::entry!(main);
 
+/// "2026-11-06 07:02" (or blank padding for files without a time).
+fn when(t: i64) -> alloc::string::String {
+    if t <= 0 {
+        return alloc::string::String::from("                ");
+    }
+    let (y, mo, d, h, mi, _) = userlib::civil_time(t as u64);
+    alloc::format!("{:04}-{:02}-{:02} {:02}:{:02}", y, mo, d, h, mi)
+}
+
 struct Options {
     all: bool,
     long: bool,
@@ -66,8 +75,10 @@ fn list(path: &str, opts: &Options) -> i32 {
     for (name, is_dir) in &entries {
         if opts.long {
             let mut buf = [0u8; 512];
-            let size = stat(join(&mut buf, path, name)).map(|s| s.st_size).unwrap_or(0);
-            println!("{}  {:>8}  {}", if *is_dir { 'd' } else { '-' }, size, name);
+            let st = stat(join(&mut buf, path, name));
+            let size = st.as_ref().map(|s| s.st_size).unwrap_or(0);
+            let mtime = st.map(|s| s.st_mtime).unwrap_or(0);
+            println!("{}  {:>8}  {}  {}", if *is_dir { 'd' } else { '-' }, size, when(mtime), name);
         } else if *is_dir {
             println!("{}/", name);
         } else {

@@ -19,8 +19,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::fdfs::Node;
-use crate::filesystem::{self, FS};
+use crate::filesystem;
+use crate::mounts::{self, Device, FileType, Loc};
 use crate::pipe::{self, PipeReader, PipeWriter};
 use crate::syscall::*;
 
@@ -63,14 +63,19 @@ const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 
 // d_type values for getdents64
+const DT_CHR: u8 = 2;
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 
 enum Kind {
     /// The console: reads come from the TTY, writes go to the screen.
     Console,
-    File { node: usize, readable: bool, writable: bool, append: bool },
-    Dir { node: usize, path: String },
+    File { loc: Loc, readable: bool, writable: bool, append: bool },
+    Dir { loc: Loc, path: String },
+    /// /dev/null: reads are end-of-file, writes are discarded.
+    Null,
+    /// /dev/zero: reads are zeros, writes are discarded.
+    Zero,
     PipeRead(PipeReader),
     PipeWrite(PipeWriter),
 }
@@ -81,6 +86,16 @@ struct Description {
     /// Byte offset for files; for directories, the number of entries
     /// getdents64 has returned ("." and ".." first).
     offset: usize,
+}
+
+impl Drop for Description {
+    fn drop(&mut self) {
+        // The last fd for this open file is gone: tell the filesystem (a
+        // file deleted while open is freed now).
+        if let Kind::File { loc, .. } | Kind::Dir { loc, .. } = &self.kind {
+            mounts::with_fs(loc.mount, |fs| fs.close_inode(loc.ino));
+        }
+    }
 }
 
 type Handle = Arc<Mutex<Description>>;
@@ -136,12 +151,13 @@ fn with_process<T>(f: impl FnOnce(&mut Files) -> T) -> T {
 
 /// Read a whole file into memory (for execve). Directories are EACCES.
 pub fn read_whole_file(path: &str) -> Result<Vec<u8>, i64> {
-    let abs = absolute(path);
-    let fs = FS.lock();
-    let idx = fs.resolve(&abs).ok_or(ENOENT)?;
-    let size = fs.file_size(idx).ok_or(EACCES)?;
-    let mut data = vec![0u8; size];
-    fs.read_at(idx, 0, &mut data).map_err(errno_for)?;
+    let (loc, meta) = mounts::stat(&absolute(path))?;
+    if meta.kind != FileType::File {
+        return Err(EACCES);
+    }
+    let mut data = vec![0u8; meta.size as usize];
+    let n = mounts::with_fs(loc.mount, |fs| fs.read(loc.ino, 0, &mut data))?;
+    data.truncate(n);
     Ok(data)
 }
 
@@ -221,38 +237,54 @@ fn open_path(abs: &str, flags: u64) -> i64 {
         return -EINVAL;
     }
 
-    let mut fs = FS.lock();
-    let node = match fs.resolve(abs) {
-        Some(idx) => {
+    let (loc, meta) = match mounts::stat(abs) {
+        Ok(found) => {
             if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
                 return -EEXIST;
             }
-            idx
+            found
         }
-        None if flags & O_CREAT != 0 => match fs.create_file(abs) {
-            Ok(idx) => idx,
-            Err(e) => return -errno_for(e),
+        Err(ENOENT) if flags & O_CREAT != 0 => {
+            let created = mounts::create(abs, FileType::File)
+                .and_then(|loc| Ok((loc, mounts::with_fs(loc.mount, |fs| fs.meta(loc.ino))?)));
+            match created {
+                Ok(found) => found,
+                Err(e) => return -e,
+            }
+        }
+        Err(e) => return -e,
+    };
+
+    let kind = match meta.kind {
+        FileType::Dir => {
+            if writable {
+                return -EISDIR;
+            }
+            Kind::Dir { loc, path: abs.to_string() }
+        }
+        FileType::CharDevice(dev) => match dev {
+            Device::Null => Kind::Null,
+            Device::Zero => Kind::Zero,
+            Device::Tty => Kind::Console,
         },
-        None => return -ENOENT,
+        FileType::File => {
+            if flags & O_DIRECTORY != 0 {
+                return -ENOTDIR;
+            }
+            if flags & O_TRUNC != 0 && writable {
+                if let Err(e) = mounts::with_fs(loc.mount, |fs| fs.truncate(loc.ino, 0)) {
+                    return -e;
+                }
+            }
+            Kind::File { loc, readable, writable, append: flags & O_APPEND != 0 }
+        }
     };
-
-    let kind = if fs.node(node).is_some_and(Node::is_dir) {
-        if writable {
-            return -EISDIR;
-        }
-        Kind::Dir { node, path: abs.to_string() }
-    } else {
-        if flags & O_DIRECTORY != 0 {
-            return -ENOTDIR;
-        }
-        if flags & O_TRUNC != 0 && writable {
-            let _ = fs.truncate(node, 0);
-        }
-        Kind::File { node, readable, writable, append: flags & O_APPEND != 0 }
-    };
-    drop(fs);
-
-    match with_process(|p| alloc_fd(p, handle(kind), flags & O_CLOEXEC != 0)) {
+    if let Kind::File { loc, .. } | Kind::Dir { loc, .. } = &kind {
+        mounts::with_fs(loc.mount, |fs| fs.open_inode(loc.ino));
+    }
+    // (If there's no free fd, the description is dropped here, closing it.)
+    let h = handle(kind);
+    match with_process(|p| alloc_fd(p, h, flags & O_CLOEXEC != 0)) {
         Ok(fd) => fd as i64,
         Err(e) => -e,
     }
@@ -465,7 +497,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                     };
                     (mode | if *append { O_APPEND } else { 0 }) as i64
                 }
-                Kind::Console => O_RDWR as i64,
+                Kind::Console | Kind::Null | Kind::Zero => O_RDWR as i64,
                 Kind::PipeWrite(_) => O_WRONLY as i64,
                 Kind::Dir { .. } | Kind::PipeRead(_) => O_RDONLY as i64,
             },
@@ -492,18 +524,24 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
             drop(desc); // or while waiting for data
             pipe::read(&pipe, buf)
         }
-        Kind::File { node, readable, .. } => {
+        Kind::File { loc, readable, .. } => {
             if !readable {
                 return -EBADF;
             }
-            let node = *node;
-            match FS.lock().read_at(node, desc.offset, buf) {
+            let loc = *loc;
+            let offset = desc.offset as u64;
+            match mounts::with_fs(loc.mount, |fs| fs.read(loc.ino, offset, buf)) {
                 Ok(n) => {
                     desc.offset += n;
                     n as i64
                 }
-                Err(e) => -errno_for(e),
+                Err(e) => -e,
             }
+        }
+        Kind::Null => 0,
+        Kind::Zero => {
+            buf.fill(0);
+            buf.len() as i64
         }
         Kind::Dir { .. } => -EISDIR,
         Kind::PipeWrite(_) => -EBADF,
@@ -528,24 +566,29 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
             drop(desc);
             pipe::write(&pipe, bytes)
         }
-        Kind::File { node, writable, append, .. } => {
+        Kind::File { loc, writable, append, .. } => {
             if !writable {
                 return -EBADF;
             }
-            let (node, append) = (*node, *append);
-            let mut fs = FS.lock();
-            let offset = if append { fs.file_size(node).unwrap_or(0) } else { desc.offset };
-            if offset.saturating_add(bytes.len()) > MAX_FILE_SIZE {
-                return -EFBIG;
-            }
-            match fs.write_at(node, offset, bytes) {
-                Ok(n) => {
-                    desc.offset = offset + n;
+            let (loc, append) = (*loc, *append);
+            let cur = desc.offset as u64;
+            let result = mounts::with_fs(loc.mount, |fs| {
+                let offset = if append { fs.meta(loc.ino)?.size } else { cur };
+                // The in-memory filesystem lives in the (small) kernel heap.
+                if fs.name() == "memfs" && offset as usize + bytes.len() > MAX_FILE_SIZE {
+                    return Err(EFBIG);
+                }
+                fs.write(loc.ino, offset, bytes).map(|n| (offset, n))
+            });
+            match result {
+                Ok((offset, n)) => {
+                    desc.offset = offset as usize + n;
                     n as i64
                 }
-                Err(e) => -errno_for(e),
+                Err(e) => -e,
             }
         }
+        Kind::Null | Kind::Zero => bytes.len() as i64,
         Kind::Dir { .. } => -EISDIR,
         Kind::PipeRead(_) => -EBADF,
     }
@@ -560,8 +603,12 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
     };
     let mut desc = h.lock();
     match &desc.kind {
-        Kind::File { node, .. } => {
-            let size = FS.lock().file_size(*node).unwrap_or(0) as i64;
+        Kind::File { loc, .. } => {
+            let loc = *loc;
+            let size = match mounts::with_fs(loc.mount, |fs| fs.meta(loc.ino)) {
+                Ok(m) => m.size as i64,
+                Err(e) => return -e,
+            };
             let base = match whence {
                 SEEK_SET => 0,
                 SEEK_CUR => desc.offset as i64,
@@ -569,7 +616,7 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
                 _ => return -EINVAL,
             };
             match base.checked_add(delta) {
-                Some(pos) if pos >= 0 && pos as usize <= MAX_FILE_SIZE => {
+                Some(pos) if pos >= 0 => {
                     desc.offset = pos as usize;
                     pos
                 }
@@ -582,31 +629,40 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
             0
         }
         Kind::Dir { .. } => -EINVAL,
+        Kind::Null | Kind::Zero => 0,
         Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) => -ESPIPE,
     }
 }
 
 /// Fill a Linux x86_64 `struct stat` (144 bytes).
-fn fill_stat(out: &mut [u8], ino: u64, mode: u32, size: u64) {
+fn fill_stat(out: &mut [u8], dev: u64, ino: u64, mode: u32, nlink: u64, size: u64, mtime: u64) {
     out.fill(0);
     let put64 = |out: &mut [u8], off: usize, v: u64| out[off..off + 8].copy_from_slice(&v.to_le_bytes());
+    put64(out, 0, dev); // st_dev
     put64(out, 8, ino); // st_ino
-    put64(out, 16, 1); // st_nlink
+    put64(out, 16, nlink); // st_nlink
     out[24..28].copy_from_slice(&mode.to_le_bytes()); // st_mode
     put64(out, 48, size); // st_size
     put64(out, 56, 4096); // st_blksize
     put64(out, 64, size.div_ceil(512)); // st_blocks
+    put64(out, 72, mtime); // st_atime
+    put64(out, 88, mtime); // st_mtime
+    put64(out, 104, mtime); // st_ctime
 }
 
 pub const STAT_SIZE: u64 = 144;
 
-fn stat_node(node: usize, out: &mut [u8]) -> i64 {
-    let fs = FS.lock();
-    match fs.node(node) {
-        Some(Node::File { data, .. }) => fill_stat(out, node as u64 + 1, S_IFREG | 0o644, data.len() as u64),
-        Some(Node::Dir { .. }) => fill_stat(out, node as u64 + 1, S_IFDIR | 0o755, 0),
-        None => return -ENOENT,
-    }
+fn stat_loc(loc: Loc, out: &mut [u8]) -> i64 {
+    let meta = match mounts::with_fs(loc.mount, |fs| fs.meta(loc.ino)) {
+        Ok(m) => m,
+        Err(e) => return -e,
+    };
+    let kind_bits = match meta.kind {
+        FileType::File => S_IFREG,
+        FileType::Dir => S_IFDIR,
+        FileType::CharDevice(_) => S_IFCHR,
+    };
+    fill_stat(out, loc.mount as u64 + 1, meta.ino, kind_bits | meta.perm, meta.nlink as u64, meta.size, meta.mtime);
     0
 }
 
@@ -618,15 +674,15 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
     };
     let desc = h.lock();
     match &desc.kind {
-        Kind::Console => {
-            fill_stat(out, 0, S_IFCHR | 0o620, 0);
+        Kind::Console | Kind::Null | Kind::Zero => {
+            fill_stat(out, 0, 0, S_IFCHR | 0o666, 1, 0, 0);
             0
         }
         Kind::PipeRead(_) | Kind::PipeWrite(_) => {
-            fill_stat(out, 0, S_IFIFO | 0o600, 0);
+            fill_stat(out, 0, 0, S_IFIFO | 0o600, 1, 0, 0);
             0
         }
-        Kind::File { node, .. } | Kind::Dir { node, .. } => stat_node(*node, out),
+        Kind::File { loc, .. } | Kind::Dir { loc, .. } => stat_loc(*loc, out),
     }
 }
 
@@ -636,10 +692,9 @@ pub fn sys_stat(path: u64, out: &mut [u8]) -> i64 {
         Ok(p) => absolute(&p),
         Err(e) => return -e,
     };
-    let node = FS.lock().resolve(&abs);
-    match node {
-        Some(node) => stat_node(node, out),
-        None => -ENOENT,
+    match mounts::resolve(&abs) {
+        Ok(loc) => stat_loc(loc, out),
+        Err(e) => -e,
     }
 }
 
@@ -650,27 +705,30 @@ pub fn sys_getdents64(fd: u64, out: &mut [u8]) -> i64 {
         Err(e) => return -e,
     };
     let mut desc = h.lock();
-    let (node, path) = match &desc.kind {
-        Kind::Dir { node, path } => (*node, path.clone()),
+    let (loc, path) = match &desc.kind {
+        Kind::Dir { loc, path } => (*loc, path.clone()),
         _ => return -ENOTDIR,
     };
     let pos = desc.offset;
 
-    let fs = FS.lock();
-    let parent = fs.resolve(&filesystem::normalize(&path, "..")).unwrap_or(node);
-    let mut entries: Vec<(String, usize, u8)> = vec![(".".into(), node, DT_DIR), ("..".into(), parent, DT_DIR)];
-    match fs.dir_entries(node) {
-        Ok(children) => entries.extend(
-            children.into_iter().map(|(name, idx, is_dir)| (name, idx, if is_dir { DT_DIR } else { DT_REG })),
-        ),
-        Err(e) => return -errno_for(e),
+    let parent = mounts::resolve(&filesystem::normalize(&path, "..")).map(|l| l.ino).unwrap_or(loc.ino);
+    let mut entries: Vec<(String, u64, u8)> = vec![(".".into(), loc.ino, DT_DIR), ("..".into(), parent, DT_DIR)];
+    match mounts::with_fs(loc.mount, |fs| fs.readdir(loc.ino)) {
+        Ok(children) => entries.extend(children.into_iter().map(|(name, ino, kind)| {
+            let t = match kind {
+                FileType::Dir => DT_DIR,
+                FileType::File => DT_REG,
+                FileType::CharDevice(_) => DT_CHR,
+            };
+            (name, ino, t)
+        })),
+        Err(e) => return -e,
     }
-    drop(fs);
 
     // struct linux_dirent64 { u64 d_ino; i64 d_off; u16 d_reclen; u8 d_type; char d_name[]; }
     let mut written = 0usize;
     let mut next = pos;
-    for (name, idx, d_type) in entries.iter().skip(pos) {
+    for (name, ino, d_type) in entries.iter().skip(pos) {
         let reclen = (19 + name.len() + 1).next_multiple_of(8);
         if written + reclen > out.len() {
             if written == 0 {
@@ -680,7 +738,7 @@ pub fn sys_getdents64(fd: u64, out: &mut [u8]) -> i64 {
         }
         let rec = &mut out[written..written + reclen];
         rec.fill(0);
-        rec[0..8].copy_from_slice(&(*idx as u64 + 1).to_le_bytes());
+        rec[0..8].copy_from_slice(&ino.to_le_bytes());
         rec[8..16].copy_from_slice(&((next + 1) as i64).to_le_bytes());
         rec[16..18].copy_from_slice(&(reclen as u16).to_le_bytes());
         rec[18] = *d_type;
@@ -710,17 +768,13 @@ pub fn sys_chdir(path: u64) -> i64 {
         Ok(p) => absolute(&p),
         Err(e) => return -e,
     };
-    let is_dir = {
-        let fs = FS.lock();
-        fs.resolve(&abs).and_then(|i| fs.node(i)).map(Node::is_dir)
-    };
-    match is_dir {
-        Some(true) => {
+    match mounts::stat(&abs) {
+        Ok((_, meta)) if meta.kind == FileType::Dir => {
             with_process(|p| p.cwd = abs);
             0
         }
-        Some(false) => -ENOTDIR,
-        None => -ENOENT,
+        Ok(_) => -ENOTDIR,
+        Err(e) => -e,
     }
 }
 
@@ -730,12 +784,9 @@ pub fn sys_mkdir(path: u64) -> i64 {
         Ok(p) => absolute(&p),
         Err(e) => return -e,
     };
-    if abs == "/" {
-        return -EEXIST;
-    }
-    match FS.lock().make_dir(&abs) {
-        Ok(()) => 0,
-        Err(e) => -errno_for(e),
+    match mounts::create(&abs, FileType::Dir) {
+        Ok(_) => 0,
+        Err(e) => -e,
     }
 }
 
@@ -745,22 +796,14 @@ pub fn sys_remove(path: u64, want_dir: bool) -> i64 {
         Ok(p) => absolute(&p),
         Err(e) => return -e,
     };
-    if abs == "/" {
-        return if want_dir { -EBUSY } else { -EISDIR };
-    }
-    let mut fs = FS.lock();
-    let is_dir = match fs.resolve(&abs).and_then(|i| fs.node(i)) {
-        Some(n) => n.is_dir(),
-        None => return -ENOENT,
-    };
-    if want_dir && !is_dir {
-        return -ENOTDIR;
-    }
-    if !want_dir && is_dir {
-        return -EISDIR;
-    }
-    match fs.remove(&abs) {
+    match mounts::remove(&abs, want_dir) {
         Ok(()) => 0,
-        Err(e) => -errno_for(e),
+        Err(e) => -e,
     }
+}
+
+/// sync(): write everything cached to the disks.
+pub fn sys_sync() -> i64 {
+    mounts::sync_all();
+    0
 }

@@ -5,9 +5,12 @@ edition = "2024"
 
 [package.metadata.bootimage]
 test-timeout = 300 # (seconds)
+# The ext2 data disk (created by build.rs) is attached as the second IDE disk.
+run-args = ["-drive", "format=raw,file=target/disk.img,index=1,media=disk"]
 test-args = [
     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio",
-    "-display", "none"
+    "-display", "none",
+    "-drive", "format=raw,file=target/test-disk.img,index=1,media=disk"
 ]
 test-success-exit-code = 33     # (0x10 << 1 | 1
 

@@ -939,14 +939,14 @@ pub fn sys_nanosleep(req: u64, rem: u64) -> i64 {
     0
 }
 
-/// clock_gettime(clock, tp): time since boot (there's no real-time clock
-/// driver yet, so CLOCK_REALTIME starts at 0 too).
+/// clock_gettime(clock, tp)
 pub fn sys_clock_gettime(clock: u64, tp: u64) -> i64 {
     if !matches!(clock, 0 | 1 | 4 | 7) {
         return -EINVAL; // REALTIME, MONOTONIC, MONOTONIC_RAW, BOOTTIME
     }
     let Some(out) = (unsafe { user_slice_mut(tp, 16) }) else { return -EFAULT };
-    let ns = ticks() * TICK_NS;
+    // REALTIME is the date (from the CMOS clock); the others count from boot.
+    let ns = if clock == 0 { crate::rtc::now_ns() } else { ticks() * TICK_NS };
     out[0..8].copy_from_slice(&((ns / 1_000_000_000) as i64).to_le_bytes());
     out[8..16].copy_from_slice(&((ns % 1_000_000_000) as i64).to_le_bytes());
     0

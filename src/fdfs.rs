@@ -76,7 +76,7 @@ impl Fdfs {
     }
 
     /// Find a child of a directory node by name. Case-sensitive.
-    fn find_child(&self, dir_idx: usize, name: &str) -> Option<usize> {
+    pub fn find_child(&self, dir_idx: usize, name: &str) -> Option<usize> {
         if let Node::Dir { children, .. } = &self.nodes[dir_idx] {
             for &child_idx in children {
                 if self.nodes[child_idx].name() == name {
@@ -323,4 +323,100 @@ fn split_path(path: &str) -> Result<(&str, &str), &'static str> {
     }
 
     Ok((parent, name))
+}
+
+// ---- as a VFS filesystem (the in-memory one: /bin, /tmp, and / without a disk) ----
+
+use crate::mounts::{FileSystem, FileType, FsResult, Ino, Meta};
+use crate::syscall::{EEXIST, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY};
+
+impl Fdfs {
+    /// Create `name` in directory `dir`.
+    pub fn create_in(&mut self, dir: usize, name: &str, is_dir: bool) -> Result<usize, i64> {
+        if !self.nodes.get(dir).is_some_and(Node::is_dir) {
+            return Err(ENOTDIR);
+        }
+        if self.find_child(dir, name).is_some() {
+            return Err(EEXIST);
+        }
+        let idx = self.nodes.len();
+        self.nodes.push(if is_dir {
+            Node::Dir { name: name.to_string(), children: Vec::new() }
+        } else {
+            Node::File { name: name.to_string(), data: Vec::new() }
+        });
+        if let Node::Dir { children, .. } = &mut self.nodes[dir] {
+            children.push(idx);
+        }
+        Ok(idx)
+    }
+
+    /// Remove `name` from directory `dir` (the node stays as a tombstone,
+    /// so files that are still open keep working).
+    pub fn remove_in(&mut self, dir: usize, name: &str) -> Result<(), i64> {
+        let target = self.find_child(dir, name).ok_or(ENOENT)?;
+        if let Node::Dir { children, .. } = &self.nodes[target] {
+            if !children.is_empty() {
+                return Err(ENOTEMPTY);
+            }
+        }
+        if let Node::Dir { children, .. } = &mut self.nodes[dir] {
+            children.retain(|&c| c != target);
+        }
+        Ok(())
+    }
+}
+
+impl FileSystem for Fdfs {
+    fn name(&self) -> &'static str {
+        "memfs"
+    }
+
+    fn root(&self) -> Ino {
+        0
+    }
+
+    fn lookup(&mut self, dir: Ino, name: &str) -> FsResult<Ino> {
+        match self.nodes.get(dir as usize) {
+            Some(Node::Dir { .. }) => self.find_child(dir as usize, name).map(|i| i as Ino).ok_or(ENOENT),
+            Some(Node::File { .. }) => Err(ENOTDIR),
+            None => Err(ENOENT),
+        }
+    }
+
+    fn meta(&mut self, ino: Ino) -> FsResult<Meta> {
+        let (kind, size, perm, nlink) = match self.nodes.get(ino as usize).ok_or(ENOENT)? {
+            Node::File { data, .. } => (FileType::File, data.len() as u64, 0o644, 1),
+            Node::Dir { .. } => (FileType::Dir, 0, 0o755, 2),
+        };
+        Ok(Meta { ino, kind, size, perm, nlink, mtime: 0 })
+    }
+
+    fn read(&mut self, ino: Ino, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
+        self.read_at(ino as usize, offset as usize, buf).map_err(|_| EISDIR)
+    }
+
+    fn write(&mut self, ino: Ino, offset: u64, data: &[u8]) -> FsResult<usize> {
+        self.write_at(ino as usize, offset as usize, data).map_err(|_| EISDIR)
+    }
+
+    fn truncate(&mut self, ino: Ino, len: u64) -> FsResult<()> {
+        Fdfs::truncate(self, ino as usize, len as usize).map_err(|_| EISDIR)
+    }
+
+    fn readdir(&mut self, dir: Ino) -> FsResult<Vec<(String, Ino, FileType)>> {
+        let entries = self.dir_entries(dir as usize).map_err(|_| ENOTDIR)?;
+        Ok(entries
+            .into_iter()
+            .map(|(name, idx, is_dir)| (name, idx as Ino, if is_dir { FileType::Dir } else { FileType::File }))
+            .collect())
+    }
+
+    fn create(&mut self, dir: Ino, name: &str, kind: FileType) -> FsResult<Ino> {
+        self.create_in(dir as usize, name, kind == FileType::Dir).map(|i| i as Ino)
+    }
+
+    fn remove(&mut self, dir: Ino, name: &str, _is_dir: bool) -> FsResult<()> {
+        self.remove_in(dir as usize, name)
+    }
 }

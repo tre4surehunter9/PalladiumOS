@@ -382,7 +382,7 @@ struct Test<'a> {
 }
 
 const BINARY: &[&str] = &["=", "==", "!=", "-eq", "-ne", "-lt", "-le", "-gt", "-ge"];
-const UNARY: &[&str] = &["-e", "-f", "-d", "-s", "-r", "-w", "-x", "-z", "-n"];
+const UNARY: &[&str] = &["-e", "-f", "-d", "-c", "-s", "-r", "-w", "-x", "-z", "-n"];
 
 impl<'a> Test<'a> {
     fn peek(&self, n: usize) -> Option<&'a str> {
@@ -458,6 +458,7 @@ fn unary(op: &str, s: &str) -> bool {
             Ok(st) => match op {
                 "-f" => st.is_file(),
                 "-d" => st.is_dir(),
+                "-c" => st.st_mode & S_IFMT == S_IFCHR, // character device (/dev/null...)
                 "-s" => st.st_size > 0,
                 _ => true, // -e, and -r/-w/-x (there are no permissions yet)
             },

@@ -4,13 +4,10 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
 use lazy_static::lazy_static;
-use crate::fdfs::Fdfs;
+use crate::mounts::{self, FileType};
 
 lazy_static! {
-    /// The global FDFS instance.
-    pub static ref FS: Mutex<Fdfs> = Mutex::new(Fdfs::new());
-
-    /// The current working directory as an absolute path.
+    /// The kernel shell's working directory, as an absolute path.
     pub static ref CWD: Mutex<String> = Mutex::new("/".to_string());
 }
 
@@ -51,48 +48,103 @@ pub fn normalize(cwd: &str, path: &str) -> String {
     out
 }
 
-pub fn list_dir(path: &str) -> Vec<(String, bool)> {
-    FS.lock().list_dir(path).unwrap_or_default()
+/// Kernel-side file helpers (for the kernel shell, the editor, installing
+/// /bin and the tests). They go through the VFS like system calls do.
+/// Errors are short messages.
+fn message(errno: i64) -> &'static str {
+    use crate::syscall::*;
+    match errno {
+        ENOENT => "File not found",
+        ENOTDIR => "Not a directory",
+        EISDIR => "Is a directory",
+        EEXIST => "Already exists",
+        ENOTEMPTY => "Directory is not empty",
+        EBUSY => "Device or resource busy",
+        EINVAL => "Invalid path",
+        EFBIG => "File too large",
+        30 => "Read-only filesystem",
+        28 => "No space left on device",
+        _ => "I/O error",
+    }
 }
 
-pub fn read_file(path: &str) -> Result<String, &'static str> {
-    FS.lock().read_file(path)
+/// (name, is_dir) for each entry of a directory (empty if it can't be read).
+pub fn list_dir(path: &str) -> Vec<(String, bool)> {
+    let Ok(loc) = mounts::resolve(path) else { return Vec::new() };
+    mounts::with_fs(loc.mount, |fs| fs.readdir(loc.ino))
+        .map(|entries| entries.into_iter().map(|(n, _, k)| (n, k == FileType::Dir)).collect())
+        .unwrap_or_default()
 }
 
 /// Read a whole file as bytes (programs aren't UTF-8).
 pub fn read_bytes(path: &str) -> Result<Vec<u8>, &'static str> {
-    let fs = FS.lock();
-    let idx = fs.resolve(path).ok_or("File not found")?;
-    let size = fs.file_size(idx).ok_or("Is a directory")?;
-    let mut data = alloc::vec![0u8; size];
-    fs.read_at(idx, 0, &mut data)?;
+    let (loc, meta) = mounts::stat(path).map_err(message)?;
+    if meta.kind == FileType::Dir {
+        return Err("Is a directory");
+    }
+    let mut data = alloc::vec![0u8; meta.size as usize];
+    let n = mounts::with_fs(loc.mount, |fs| fs.read(loc.ino, 0, &mut data)).map_err(message)?;
+    data.truncate(n);
     Ok(data)
 }
 
+pub fn read_file(path: &str) -> Result<String, &'static str> {
+    String::from_utf8(read_bytes(path)?).map_err(|_| "File is not valid UTF-8")
+}
+
+/// Create or replace a file's contents.
+pub fn write_bytes(path: &str, contents: &[u8]) -> Result<(), &'static str> {
+    let loc = match mounts::stat(path) {
+        Ok((_, meta)) if meta.kind == FileType::Dir => return Err("Is a directory"),
+        Ok((loc, _)) => loc,
+        Err(crate::syscall::ENOENT) => mounts::create(path, FileType::File).map_err(message)?,
+        Err(e) => return Err(message(e)),
+    };
+    mounts::with_fs(loc.mount, |fs| {
+        fs.truncate(loc.ino, 0)?;
+        let mut done = 0;
+        while done < contents.len() {
+            done += fs.write(loc.ino, done as u64, &contents[done..])?;
+        }
+        Ok(())
+    })
+    .map_err(message)
+}
+
 pub fn write_file(path: &str, contents: &str) -> Result<(), &'static str> {
-    FS.lock().write_file(path, contents)
+    write_bytes(path, contents.as_bytes())
 }
 
 pub fn make_dir(path: &str) -> Result<(), &'static str> {
-    FS.lock().make_dir(path)
+    mounts::create(path, FileType::Dir).map(|_| ()).map_err(message)
 }
 
+/// Remove a file or an empty directory.
 pub fn remove(path: &str) -> Result<(), &'static str> {
-    FS.lock().remove(path)
+    let is_dir = mounts::is_dir(path);
+    mounts::remove(path, is_dir).map_err(message)
 }
 
 pub fn is_dir(path: &str) -> bool {
-    FS.lock().is_dir(path)
+    mounts::is_dir(path)
 }
 
+/// The files a fresh system starts with (only created if missing, so a
+/// disk keeps whatever the user changed).
 pub fn init_default_files() {
-    FS.lock().make_dir("/features").ok();
-    FS.lock().make_dir("/scripts").ok();
-    FS.lock().write_file("/scripts/test.psh",
-                         "# PalladiumOS Test Script\necho This is a test of the PalladiumOS Scripting.\n").ok();
-    FS.lock().write_file ("/features/features.txt",
-                          "Features:\n Text Editor\n Filesystem\n Scripting\n Shell\n").ok();
-    FS.lock().write_file ("/welcome.txt",
-                          "Welcome to PalladiumOS! This is my personal OS project!\nYou can find it at https://github.com/tre4surehunter9/PalladiumOS/\n").ok();
+    let _ = make_dir("/features");
+    let _ = make_dir("/scripts");
+    let defaults = [
+        ("/scripts/test.psh", "# PalladiumOS Test Script\necho This is a test of the PalladiumOS Scripting.\n"),
+        ("/features/features.txt", "Features:\n Text Editor\n Filesystem\n Scripting\n Shell\n"),
+        (
+            "/welcome.txt",
+            "Welcome to PalladiumOS! This is my personal OS project!\nYou can find it at https://github.com/tre4surehunter9/PalladiumOS/\n",
+        ),
+    ];
+    for (path, text) in defaults {
+        if mounts::resolve(path).is_err() {
+            let _ = write_file(path, text);
+        }
+    }
 }
-

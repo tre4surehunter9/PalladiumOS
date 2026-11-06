@@ -84,4 +84,60 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     fs::write(out_dir.join("user_programs.rs"), out).unwrap();
+
+    make_disk_images(&root, &out_dir);
+}
+
+/// Format an ext2 image with mke2fs (from e2fsprogs). `populate` fills it
+/// from a directory. Options: 1 KiB blocks, and no features the kernel's
+/// ext2 driver doesn't keep up to date (directory hashes, resize inode,
+/// extended attributes).
+fn mke2fs(image: &std::path::Path, size: &str, populate: Option<&std::path::Path>, extra: &[&str]) -> bool {
+    let mut cmd = Command::new("mke2fs");
+    cmd.args(["-q", "-t", "ext2", "-b", "1024", "-O", "^dir_index,^resize_inode,^ext_attr", "-L", "palladium", "-F"]);
+    cmd.args(extra);
+    if let Some(dir) = populate {
+        cmd.arg("-d").arg(dir);
+    }
+    cmd.arg(image).arg(size);
+    match cmd.status() {
+        Ok(s) if s.success() => true,
+        _ => {
+            println!("cargo:warning=mke2fs failed or is missing (install e2fsprogs); no disk image for {}", image.display());
+            false
+        }
+    }
+}
+
+fn make_disk_images(root: &std::path::Path, out_dir: &std::path::Path) {
+    let target = root.join("target");
+    fs::create_dir_all(&target).unwrap();
+
+    // The disk `cargo run` attaches. Created once: it keeps your files.
+    let disk = target.join("disk.img");
+    if !disk.exists() {
+        mke2fs(&disk, "32M", None, &[]);
+    }
+
+    // A scratch disk for the tests (recreated every build).
+    let test_disk = target.join("test-disk.img");
+    let _ = fs::remove_file(&test_disk);
+    mke2fs(&test_disk, "4M", None, &[]);
+
+    // A small prefilled image the ext2 tests load into a RAM disk.
+    let content = out_dir.join("ext2-test-content");
+    let _ = fs::remove_dir_all(&content);
+    fs::create_dir_all(content.join("dir/nested")).unwrap();
+    fs::write(content.join("hello.txt"), "Hello from ext2\n").unwrap();
+    fs::write(content.join("dir/nested/deep.txt"), "deep\n").unwrap();
+    fs::write(content.join("empty"), "").unwrap();
+    // 300 KiB: with 1 KiB blocks this needs the double-indirect block.
+    let big: Vec<u8> = (0..300 * 1024u32).map(|i| (i % 251) as u8).collect();
+    fs::write(content.join("big.bin"), big).unwrap();
+    let image = out_dir.join("ext2-test.img");
+    let _ = fs::remove_file(&image);
+    // More inodes than the default, for the "many files" test.
+    if !mke2fs(&image, "2M", Some(&content), &["-N", "1024"]) {
+        fs::write(&image, b"").unwrap();
+    }
 }
