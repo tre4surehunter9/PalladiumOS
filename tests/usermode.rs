@@ -1539,11 +1539,12 @@ fn ctrl_z_stops_the_foreground_job() {
 
 // ---- C programs (musl libc) ----
 
-/// The C programs are only built when musl is (tools/build-musl.sh).
+/// C programs and ports exist only when musl (tools/build-musl.sh) and
+/// the port (tools/ports/NAME.sh) were built.
 fn c_program(name: &str) -> Option<&'static [u8]> {
     let p = programs::find(name);
     if p.is_none() {
-        palladiumos::serial_print!("(skipped: no musl) ");
+        palladiumos::serial_print!("(skipped: {} not built) ", name);
     }
     p
 }
@@ -1573,4 +1574,20 @@ fn c_program_memory_is_freed() {
     let before = frames_in_use();
     assert_eq!(run(test_libc, &["test_libc"]), Ok(0));
     assert_eq!(frames_in_use(), before, "mmap/brk/stack pages all freed");
+}
+
+// ---- ported software (tools/ports) ----
+
+#[test_case]
+fn lua_port_works() {
+    let Some(_) = c_program("lua") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    filesystem::write_file("/tmp/check.lua", include_str!("ports/check.lua")).unwrap();
+    let status = sh("lua /tmp/check.lua > /tmp/check.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/check.out"));
+    assert_eq!(file("/tmp/check.out"), "lua checks passed\n");
+    assert_eq!(sh("lua -e 'print(6 * 7)' > /tmp/l42"), 0);
+    assert_eq!(file("/tmp/l42"), "42\n");
+    assert_eq!(sh("lua -e 'os.exit(9)'"), 9);
+    assert!(only_kernel_left(), "{:?}", process::list());
 }

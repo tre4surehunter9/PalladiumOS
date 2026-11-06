@@ -140,6 +140,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 35 | nanosleep | yes (55 ms timer resolution) |
 | 39 | getpid | yes |
 | 57 | fork | yes (copies the whole address space) |
+| 56 | clone | fork, and vfork-style `CLONE_VM \| CLONE_VFORK` (what `posix_spawn`, `system` and `popen` use); no threads yet |
 | 58 | vfork | yes (same as fork, which POSIX allows) |
 | 59 | execve | yes (static ELF executables) |
 | 60 | exit | yes |
@@ -179,6 +180,13 @@ cargo run                  # build.rs now compiles every userland-c/*.c into /bi
 ```
 
 Then run `chello` or `test_libc` (a test of stdio, malloc, files, mmap, fork/exec, signals, time...) in the shell. Add a program by putting `NAME.c` in `userland-c/`, or compile one yourself with `target/musl/bin/palladium-cc prog.c -o prog -lm`. Programs are static position-independent executables (static-PIE): PalladiumOS has no dynamic linker yet.
+
+### Ported Software
+Real-world programs are built from their original source by scripts in `tools/ports/` (after `tools/build-musl.sh`). Each downloads a pinned, checksum-verified release and installs into `target/ports/bin`, which goes into `/bin`:
+
+* `tools/ports/lua.sh`: Lua 5.4.7 (`lua` and `luac`). The REPL, scripts (also as `#!/bin/lua`), `io`, `os.execute`, `io.popen` and `os.clock` work.
+
+The binaries are ordinary Linux static executables too, so they can be run on a Linux host to compare behaviour.
 
 ## Processes
 Every program runs as a process with its own address space, kernel stack, open files and working directory.

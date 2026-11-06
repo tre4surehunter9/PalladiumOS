@@ -83,7 +83,7 @@ fn find_free(maps: &[(u64, u64)], hint: u64, len: u64) -> Option<u64> {
         }
         cur = page_up(e);
     }
-    (cur + len <= MMAP_END).then_some(cur)
+    (cur + len <= MMAP_END && in_user_space(cur, cur + len)).then_some(cur)
 }
 
 /// Unmap [start, end) and free its memory. Pages that aren't mapped are fine.

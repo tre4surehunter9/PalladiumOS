@@ -70,6 +70,8 @@ pub const SYS_PPOLL: u64 = 271;
 pub const SYS_SET_ROBUST_LIST: u64 = 273;
 pub const SYS_PRLIMIT64: u64 = 302;
 pub const SYS_GETRANDOM: u64 = 318;
+pub const SYS_CLONE: u64 = 56;
+pub const SYS_CLOCK_GETRES: u64 = 229;
 pub const SYS_PAUSE: u64 = 34;
 pub const SYS_GETITIMER: u64 = 36;
 pub const SYS_ALARM: u64 = 37;
@@ -514,6 +516,8 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
             None => -EFAULT,
         },
         SYS_CLOCK_NANOSLEEP => process::sys_clock_nanosleep(a1, a2, a3, a4),
+        SYS_CLOCK_GETRES => process::sys_clock_getres(a1, a2),
+        SYS_CLONE => process::sys_clone(frame, a1, a2),
         SYS_GETRANDOM => match unsafe { user_slice_mut(a1, a2.min(1 << 20)) } {
             Some(buf) => {
                 crate::random::fill(buf);

@@ -80,9 +80,11 @@ fn main() {
         assert!(path.exists(), "userland binary {} missing", path.display());
         writeln!(out, "    ({:?}, include_bytes!({:?})),", name, path.display().to_string()).unwrap();
     }
-    for (name, path) in build_c_programs(&root) {
-        assert!(!names.contains(&name), "C program {} has the same name as a Rust one", name);
+    let mut c_names = Vec::new();
+    for (name, path) in build_c_programs(&root).into_iter().chain(ported_programs(&root)) {
+        assert!(!names.contains(&name) && !c_names.contains(&name), "two programs are called {}", name);
         writeln!(out, "    ({:?}, include_bytes!({:?})),", name, path.display().to_string()).unwrap();
+        c_names.push(name);
     }
     out.push_str("];\n");
 
@@ -182,4 +184,20 @@ fn build_c_programs(root: &std::path::Path) -> Vec<(String, PathBuf)> {
         built.push((name, exe));
     }
     built
+}
+
+/// Ported software built by tools/ports/*.sh (lua, ...), in target/ports/bin.
+fn ported_programs(root: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let dir = root.join("target/ports/bin");
+    println!("cargo:rerun-if-changed=target/ports/bin");
+    let Ok(entries) = fs::read_dir(&dir) else { return Vec::new() };
+    let mut found: Vec<(String, PathBuf)> = entries
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            let name = path.file_name()?.to_str()?.to_string();
+            path.is_file().then_some((name, path))
+        })
+        .collect();
+    found.sort();
+    found
 }

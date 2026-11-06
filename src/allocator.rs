@@ -3,7 +3,9 @@ use alloc::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 8 * 1024 * 1024; // 8 MiB (each process needs a 16 KiB kernel stack)
+/// 32 MiB: each process needs a 16 KiB kernel stack, and /bin (an in-memory
+/// filesystem) holds every program, ported ones like lua included.
+pub const HEAP_SIZE: usize = 32 * 1024 * 1024;
 
 use x86_64::{
     structures::paging::{

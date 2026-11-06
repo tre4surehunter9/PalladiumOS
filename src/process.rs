@@ -125,6 +125,9 @@ pub struct Process {
     gs_base: u64,
     /// Memory mapped with mmap (start, end), sorted.
     pub maps: Vec<(u64, u64)>,
+    /// A vfork child using its parent's address space (until it calls
+    /// execve or exits; the parent waits meanwhile). It must not free `p4`.
+    borrowed_vm: bool,
 }
 
 /// Credentials: real, effective and saved user and group IDs, and the
@@ -240,6 +243,7 @@ pub fn init() {
         fs_base: 0,
         gs_base: 0,
         maps: Vec::new(),
+        borrowed_vm: false,
     }));
     CURRENT.store(0, Ordering::SeqCst);
 }
@@ -459,6 +463,9 @@ pub fn exit_current(reason: ExitReason) -> ! {
             }
         }
         signal_locked(&mut table, ppid, SIGCHLD);
+        if table.get(&cur).is_some_and(|p| p.borrowed_vm) {
+            wake(vfork_key(cur)); // a vfork child: the parent may go on
+        }
         // If an orphan already exited, the kernel may be waiting for it.
         if let Some(kernel) = table.get_mut(&0) {
             if kernel.state == State::Waiting {
@@ -477,7 +484,7 @@ pub fn kill_current(signal: i32) -> ! {
 
 /// Free a reaped process's memory. Its kernel stack is freed when it drops.
 fn free_process(p: Box<Process>) {
-    if p.kernel_stack.is_some() {
+    if p.kernel_stack.is_some() && !p.borrowed_vm {
         let mut alloc = FRAME_ALLOCATOR.lock();
         memory::free_address_space(p.p4, alloc.as_mut().unwrap());
     }
@@ -528,6 +535,52 @@ pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u64, ExitReason)>, i64> {
 /// fork(): duplicate the current process. Returns the child's pid to the
 /// parent; the child returns from the same syscall with 0.
 pub fn fork(frame: &SyscallFrame) -> i64 {
+    fork_with(frame, false, 0)
+}
+
+/// Key a vfork parent waits on until its child stops using its memory.
+fn vfork_key(child: u64) -> u64 {
+    0xF0F0_0000_0000_0000 | child
+}
+
+/// clone(flags, stack, parent_tid, child_tid, tls): fork, or a vfork
+/// (CLONE_VM | CLONE_VFORK, what posix_spawn uses): the child runs in the
+/// parent's memory, on `stack`, and the parent waits until it calls execve
+/// or exits. Threads (CLONE_VM without CLONE_VFORK, CLONE_THREAD...) aren't
+/// supported yet.
+pub fn sys_clone(frame: &SyscallFrame, flags: u64, stack: u64) -> i64 {
+    const CLONE_VM: u64 = 0x100;
+    const CLONE_VFORK: u64 = 0x4000;
+    let exit_signal = flags & 0xff;
+    let other = flags & !0xff & !(CLONE_VM | CLONE_VFORK);
+    if other != 0 || (exit_signal != 0 && exit_signal != SIGCHLD as u64) {
+        return -EINVAL;
+    }
+    let share = flags & CLONE_VM != 0;
+    if share && flags & CLONE_VFORK == 0 {
+        return -EINVAL; // a thread
+    }
+    let pid = fork_with(frame, share, stack);
+    if pid > 0 && share {
+        // Wait (uninterruptibly: the child is using our memory) until the
+        // child has its own address space or is gone.
+        loop {
+            {
+                let mut table = TABLE.lock();
+                if !table.get(&(pid as u64)).is_some_and(|c| c.borrowed_vm && !matches!(c.state, State::Zombie(_))) {
+                    break;
+                }
+                table.get_mut(&current_pid()).unwrap().state = State::Blocked(vfork_key(pid as u64));
+            }
+            schedule();
+        }
+    }
+    pid
+}
+
+/// fork, sharing the address space (vfork) or copying it, with the child
+/// on `stack` if it's not 0.
+fn fork_with(frame: &SyscallFrame, share: bool, stack: u64) -> i64 {
     // The child gets the FPU registers as they are now.
     let mut fpu = Box::new(crate::fpu::FpuState::initial());
     crate::fpu::save(&mut fpu);
@@ -540,7 +593,9 @@ pub fn fork(frame: &SyscallFrame) -> i64 {
         (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid, cur.brk, cur.pgid, (cur.actions.clone(), cur.blocked), cur.argv.clone(), cur.exe.clone(), cur.cred.clone(), (cur.fs_base, cur.gs_base, cur.maps.clone()))
     };
 
-    let child_p4 = {
+    let child_p4 = if share {
+        p4
+    } else {
         let mut alloc = FRAME_ALLOCATOR.lock();
         match memory::copy_address_space(p4, alloc.as_mut().unwrap()) {
             Ok(p4) => p4,
@@ -550,6 +605,9 @@ pub fn fork(frame: &SyscallFrame) -> i64 {
 
     let mut child_frame = *frame;
     child_frame.rax = 0; // fork returns 0 in the child
+    if stack != 0 {
+        child_frame.rsp = stack;
+    }
     let (kernel_stack, kernel_rsp) = new_kernel_stack(&child_frame);
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     let child = Process {
@@ -581,12 +639,15 @@ pub fn fork(frame: &SyscallFrame) -> i64 {
         fs_base,
         gs_base,
         maps,
+        borrowed_vm: share,
     };
     match add_process(child) {
         Ok(pid) => pid as i64,
         Err(e) => {
-            let mut alloc = FRAME_ALLOCATOR.lock();
-            memory::free_address_space(child_p4, alloc.as_mut().unwrap());
+            if !share {
+                let mut alloc = FRAME_ALLOCATOR.lock();
+                memory::free_address_space(child_p4, alloc.as_mut().unwrap());
+            }
             -e
         }
     }
@@ -717,6 +778,7 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
         p.maps.clear();
         p.fs_base = 0;
         p.gs_base = 0;
+        let borrowed = core::mem::replace(&mut p.borrowed_vm, false);
         // Handlers are gone with the old program: back to the default action
         // (ignored signals stay ignored; the mask and pending signals stay).
         for a in p.actions.iter_mut() {
@@ -724,14 +786,18 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
                 *a = SigAction::DEFAULT;
             }
         }
-        core::mem::replace(&mut p.p4, image.p4)
+        (core::mem::replace(&mut p.p4, image.p4), borrowed)
     };
+    let (old_p4, borrowed) = old_p4;
     apply_exec_ids(setuid, setgid);
     let (_, flags) = Cr3::read();
     unsafe { Cr3::write(image.p4, flags) };
     crate::fpu::reset();
     set_fs_gs(0, 0);
-    {
+    if borrowed {
+        // A vfork child: the old address space is the parent's. Let it go on.
+        wake(vfork_key(current_pid()));
+    } else {
         let mut alloc = FRAME_ALLOCATOR.lock();
         memory::free_address_space(old_p4, alloc.as_mut().unwrap());
     }
@@ -864,6 +930,7 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         fs_base: 0,
         gs_base: 0,
         maps: Vec::new(),
+        borrowed_vm: false,
     };
     add_process(process).map_err(|_| {
         let mut alloc = FRAME_ALLOCATOR.lock();
@@ -1677,12 +1744,16 @@ fn sleep_ns(total: u64, rem: u64) -> i64 {
 
 /// clock_gettime(clock, tp)
 pub fn sys_clock_gettime(clock: u64, tp: u64) -> i64 {
-    if !matches!(clock, 0 | 1 | 4 | 7) {
-        return -EINVAL; // REALTIME, MONOTONIC, MONOTONIC_RAW, BOOTTIME
-    }
+    // REALTIME(_COARSE) is the date (from the CMOS clock); PROCESS/THREAD_
+    // CPUTIME the CPU time used; MONOTONIC(_RAW/_COARSE) and BOOTTIME count
+    // from boot.
+    let ns = match clock {
+        0 | 5 => crate::rtc::now_ns(),
+        2 | 3 => cpu_time_ns(),
+        1 | 4 | 6 | 7 => ticks() * TICK_NS,
+        _ => return -EINVAL,
+    };
     let Some(out) = (unsafe { user_slice_mut(tp, 16) }) else { return -EFAULT };
-    // REALTIME is the date (from the CMOS clock); the others count from boot.
-    let ns = if clock == 0 { crate::rtc::now_ns() } else { ticks() * TICK_NS };
     out[0..8].copy_from_slice(&((ns / 1_000_000_000) as i64).to_le_bytes());
     out[8..16].copy_from_slice(&((ns % 1_000_000_000) as i64).to_le_bytes());
     0
@@ -2025,4 +2096,24 @@ pub fn with_current<T>(f: impl FnOnce(&mut Process) -> T) -> T {
 /// The current address space.
 pub fn current_p4() -> PhysFrame {
     TABLE.lock()[&current_pid()].p4
+}
+
+/// CPU time used by the current process, in nanoseconds.
+fn cpu_time_ns() -> u64 {
+    let table = TABLE.lock();
+    let p = &table[&current_pid()];
+    (p.cpu_ticks + ticks().saturating_sub(p.running_since)) * TICK_NS
+}
+
+/// clock_getres(clock, res): every clock ticks with the timer.
+pub fn sys_clock_getres(clock: u64, res: u64) -> i64 {
+    if clock > 7 {
+        return -EINVAL;
+    }
+    if res != 0 {
+        let Some(out) = (unsafe { user_slice_mut(res, 16) }) else { return -EFAULT };
+        out[0..8].copy_from_slice(&0i64.to_le_bytes());
+        out[8..16].copy_from_slice(&(TICK_NS as i64).to_le_bytes());
+    }
+    0
 }
