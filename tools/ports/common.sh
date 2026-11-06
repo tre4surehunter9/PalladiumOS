@@ -26,6 +26,7 @@ fetch() {
     dir=$1 url=$2 sum=$3
     case $url in
         *.tar.xz) tarball="$PORTS/src/$dir.tar.xz" ;;
+        *.tar.bz2) tarball="$PORTS/src/$dir.tar.bz2" ;;
         *) tarball="$PORTS/src/$dir.tar.gz" ;;
     esac
     if [ ! -f "$tarball" ]; then
@@ -61,3 +62,14 @@ fetch_git() {
 # The files that go on the system disk, mounted at /usr in PalladiumOS
 # (build.rs makes target/usr.img from it).
 SYSROOT="$ROOT/target/sysroot"
+
+# linux_headers: Linux's userspace headers (linux/, asm/, asm-generic/, mtd/,
+# drm/), which musl doesn't ship: the host's sanitized copy
+# (linux-api-headers), kept apart from musl's own headers. Prints the
+# directory to pass with -isystem.
+linux_headers() {
+    khdr="$PORTS/linux-headers"
+    rm -rf "$khdr" && mkdir -p "$khdr"
+    cp -r /usr/include/linux /usr/include/asm /usr/include/asm-generic /usr/include/drm /usr/include/mtd "$khdr/"
+    echo "$khdr"
+}

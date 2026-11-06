@@ -1724,3 +1724,35 @@ fn dmesg_shows_the_boot_log() {
     assert_eq!(sh("cat /proc/kmsg > /tmp/kmsg.out"), 0);
     assert!(file("/tmp/kmsg.out").contains("\x1b[1;32m  OK  \x1b[0m"), "the log itself has colors");
 }
+
+#[test_case]
+fn busybox_tools_work() {
+    if c_program("busybox").is_none() || !filesystem::is_dir("/usr/bin") {
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    let script = "cd /tmp && rm -rf bb && mkdir bb && cd bb && \
+        printf '%s=%d\\n' answer 42 > p && \
+        printf '3 c\\n1 a\\n2 b\\n' | sort -n | awk '{ s += $1; n = n $2 } END { print s, n }' > a && \
+        echo hello world | sed 's/world/palladium/' | tr a-z A-Z > s && \
+        echo a:b:c | cut -d: -f2 > c && seq 3 | xargs echo > x && expr 6 \\* 7 > e && \
+        mkdir -p t/d && echo data > t/d/f && tar czf t.tgz t && rm -r t && tar xzf t.tgz && \
+        find t -type f > f && md5sum t/d/f > m && cmp t/d/f t/d/f && \
+        printf 'x\\ny\\n' > d1 && printf 'x\\nz\\n' > d2 && ! diff d1 d2 > dd && \
+        basename /a/b/c.txt .txt > b && busybox sh -c 'echo ash $((1 + 2))' > ash";
+    let status = sh(&alloc::format!("{} 2> /tmp/bb.err", script));
+    assert_eq!(status, 0, "{}", file("/tmp/bb.err"));
+    let f = |name: &str| file(&alloc::format!("/tmp/bb/{}", name));
+    assert_eq!(f("p"), "answer=42\n");
+    assert_eq!(f("a"), "6 abc\n");
+    assert_eq!(f("s"), "HELLO PALLADIUM\n");
+    assert_eq!(f("c"), "b\n");
+    assert_eq!(f("x"), "1 2 3\n");
+    assert_eq!(f("e"), "42\n");
+    assert_eq!(f("f"), "t/d/f\n");
+    assert_eq!(f("m"), "6137cde4893c59f76f005a8123d8e8e6  t/d/f\n");
+    assert!(f("dd").contains("-y") && f("dd").contains("+z"), "{}", f("dd"));
+    assert_eq!(f("b"), "c\n");
+    assert_eq!(f("ash"), "ash 3\n");
+    assert!(only_kernel_left(), "{:?}", process::list());
+}

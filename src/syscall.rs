@@ -72,6 +72,7 @@ pub const SYS_PRLIMIT64: u64 = 302;
 pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_CLONE: u64 = 56;
 pub const SYS_SOCKET: u64 = 41;
+pub const SYS_SENDFILE: u64 = 40;
 pub const SYS_STATX: u64 = 332;
 pub const EAFNOSUPPORT: i64 = 97;
 pub const SYS_CLOCK_GETRES: u64 = 229;
@@ -522,6 +523,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_CLOCK_GETRES => process::sys_clock_getres(a1, a2),
         SYS_CLONE => process::sys_clone(frame, a1, a2),
         SYS_STATX => vfs::sys_statx(a1, a2, a3, a4, a5),
+        SYS_SENDFILE => sys_sendfile(a1, a2, a3, a4),
         // No networking yet: the honest answer for any address family.
         SYS_SOCKET => -EAFNOSUPPORT,
         SYS_GETRANDOM => match unsafe { user_slice_mut(a1, a2.min(1 << 20)) } {
@@ -556,6 +558,54 @@ fn report_unimplemented(num: u64) {
             crate::println!("[syscall {} not implemented, used by pid {}]", num, process::current_pid());
         }
     }
+}
+
+/// sendfile(out_fd, in_fd, offset, count): copy between files in the
+/// kernel. With `offset`, read from there (and update it) without moving
+/// in_fd's position.
+fn sys_sendfile(out_fd: u64, in_fd: u64, offset_ptr: u64, count: u64) -> i64 {
+    let mut offset = if offset_ptr != 0 {
+        match unsafe { user_slice(offset_ptr, 8) } {
+            Some(b) => Some(u64::from_le_bytes(b.try_into().unwrap())),
+            None => return -EFAULT,
+        }
+    } else {
+        None
+    };
+    let mut buf = alloc::vec![0u8; count.min(64 * 1024) as usize];
+    let mut total = 0u64;
+    while total < count {
+        let want = (count - total).min(buf.len() as u64) as usize;
+        let n = match offset {
+            Some(off) => vfs::sys_pread(in_fd, &mut buf[..want], off),
+            None => vfs::sys_read(in_fd, &mut buf[..want]),
+        };
+        if n < 0 {
+            return if total > 0 { total as i64 } else { n };
+        }
+        if n == 0 {
+            break; // end of the input
+        }
+        let mut done = 0usize;
+        while done < n as usize {
+            let w = vfs::sys_write(out_fd, &buf[done..n as usize]);
+            if w <= 0 {
+                return if total + (done as u64) > 0 { (total + done as u64) as i64 } else { w };
+            }
+            done += w as usize;
+        }
+        total += n as u64;
+        if let Some(off) = offset.as_mut() {
+            *off += n as u64;
+        }
+        if (n as usize) < want {
+            break;
+        }
+    }
+    if let (Some(off), Some(out)) = (offset, unsafe { user_slice_mut(offset_ptr, 8) }.filter(|_| offset_ptr != 0)) {
+        out.copy_from_slice(&off.to_le_bytes());
+    }
+    total as i64
 }
 
 /// readv/writev(fd, iov, iovcnt): one read/write per buffer, stopping at

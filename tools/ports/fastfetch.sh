@@ -16,12 +16,8 @@ for opt in VULKAN WAYLAND XCB_RANDR XRANDR DRM VADRM VAX11 VDPAU GIO DCONF EET D
     OPENCL FREETYPE ELF THREADS IMAGE_LOGO IMAGEMAGICK7 IMAGEMAGICK6 SIXEL CHAFA ZLIB LUA LIBZFS LTO; do
     OFF="$OFF -DENABLE_$opt=OFF"
 done
-# fastfetch includes Linux's userspace headers (linux/*.h), which musl
-# doesn't ship: use the host's sanitized copy (linux-api-headers), kept
-# apart from musl's own headers.
-KHDR="$PORTS/linux-headers"
-rm -rf "$KHDR" && mkdir -p "$KHDR"
-cp -r /usr/include/linux /usr/include/asm /usr/include/asm-generic /usr/include/drm "$KHDR/"
+# fastfetch includes Linux's userspace headers (linux/*.h).
+KHDR=$(linux_headers)
 # shellcheck disable=SC2086
 CFLAGS="-isystem $KHDR" cmake -S . -B build -G "Unix Makefiles" \
     -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_C_COMPILER="$PCC" -DCMAKE_BUILD_TYPE=Release \

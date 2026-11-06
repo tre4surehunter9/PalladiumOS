@@ -17,7 +17,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-ALL_PORTS="lua dash fastfetch tcc micropython"
+ALL_PORTS="lua dash fastfetch tcc micropython busybox"
 STAMPS=target/ports/stamps
 
 # What each port produces (relative to target/).
@@ -28,6 +28,7 @@ outputs() {
         fastfetch) echo "ports/bin/fastfetch" ;;
         tcc) echo "ports/bin/tcc sysroot/lib/tcc/libtcc1.a sysroot/src/tinycc/tcc.c" ;;
         micropython) echo "ports/bin/micropython" ;;
+        busybox) echo "ports/bin/busybox sysroot/bin/vi" ;;
     esac
 }
 
@@ -38,7 +39,8 @@ fingerprint() {
 
 up_to_date() {
     for f in $(outputs "$1"); do
-        [ -e "target/$f" ] || return 1
+        # (-L too: BusyBox's links point at /bin/busybox inside PalladiumOS)
+        [ -e "target/$f" ] || [ -L "target/$f" ] || return 1
     done
     [ -f "$STAMPS/$1" ] && [ "$(cat "$STAMPS/$1")" = "$(fingerprint "$1")" ]
 }

@@ -162,7 +162,8 @@ pub const HEAP_BASE: u64 = 0x1000_0000_0000;
 pub const HEAP_MAX: u64 = 256 * 1024 * 1024;
 
 /// Environment for programs started by the kernel.
-pub const DEFAULT_ENV: &[&str] = &["PATH=/bin", "HOME=/", "SHELL=/bin/sh", "TERM=vga"];
+/// /bin: PalladiumOS's programs; /usr/bin: BusyBox's tools (on the system disk).
+pub const DEFAULT_ENV: &[&str] = &["PATH=/bin:/usr/bin", "HOME=/", "SHELL=/bin/sh", "TERM=vga"];
 
 impl Process {
     fn kernel_stack_top(&self) -> Option<u64> {

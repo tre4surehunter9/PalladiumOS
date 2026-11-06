@@ -123,7 +123,7 @@ impl Shell {
                 vars.insert(k.to_string(), Var { value: v.to_string(), exported: true });
             }
         }
-        for (k, v) in [("PATH", "/bin"), ("HOME", "/")] {
+        for (k, v) in [("PATH", "/bin:/usr/bin"), ("HOME", "/")] {
             vars.entry(k.to_string()).or_insert(Var { value: v.to_string(), exported: true });
         }
         Shell {

@@ -339,7 +339,7 @@ pub fn login_env(user: &User) -> Vec<String> {
         format!("USER={}", user.name),
         format!("LOGNAME={}", user.name),
         format!("SHELL={}", user.shell),
-        String::from("PATH=/bin"),
+        String::from("PATH=/bin:/usr/bin"),
         String::from("TERM=vga"),
     ]
 }

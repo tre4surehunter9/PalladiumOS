@@ -2,7 +2,8 @@
 # Copyright (c) 2026 tre4surehunter9
 # Download, verify and build musl libc for PalladiumOS C programs.
 #
-#   tools/build-musl.sh
+#   tools/build-musl.sh                  build musl and palladium-cc
+#   tools/build-musl.sh --wrapper-only   just rewrite palladium-cc
 #
 # Installs into target/musl (headers, libc.a, crt files, and the musl-gcc
 # wrapper). build.rs uses target/musl/bin/musl-gcc to compile the programs
@@ -21,6 +22,11 @@ PREFIX="$ROOT/target/musl"
 WORK="$ROOT/target/musl-build"
 TARBALL="$WORK/musl-$VERSION.tar.gz"
 
+# --wrapper-only: just (re)write palladium-cc and its specs file.
+WRAPPER_ONLY=0
+[ "${1:-}" = "--wrapper-only" ] && WRAPPER_ONLY=1
+
+if [ "$WRAPPER_ONLY" = 0 ]; then
 mkdir -p "$WORK"
 if [ ! -f "$TARBALL" ]; then
     echo "Downloading $URL"
@@ -36,6 +42,7 @@ cd "$WORK/musl-$VERSION"
 CC=gcc ./configure --prefix="$PREFIX" --disable-shared --enable-static
 make -j"$(nproc)"
 make install
+fi
 
 # palladium-cc: gcc with musl, producing static position-independent
 # executables (PalladiumOS loads them at its user address and they
@@ -63,7 +70,7 @@ $PREFIX/lib/rcrt1.o $PREFIX/lib/crti.o crtbeginS.o%s
 crtendS.o%s $PREFIX/lib/crtn.o
 
 *link:
--nostdlib -static -pie --no-dynamic-linker -z text
+-nostdlib %{!r:%{!shared:-static -pie --no-dynamic-linker -z text}}
 SPECS
 cat > "$PREFIX/bin/palladium-cc" <<WRAPPER
 #!/bin/sh

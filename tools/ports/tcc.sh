@@ -28,7 +28,9 @@ make -C lib XFLAGS="-B$PWD -I$PWD -nostdinc -I$PWD/include -I$ROOT/target/musl/i
 install -m 755 tcc "$BIN/tcc"
 
 # The system disk's /usr: include/ and lib/ (musl), lib/tcc (tcc).
-rm -rf "$SYSROOT" && mkdir -p "$SYSROOT/lib/tcc"
+# (Only tcc's part of it: other ports put files there too.)
+rm -rf "$SYSROOT/include" "$SYSROOT/lib" "$SYSROOT/src/tinycc"
+mkdir -p "$SYSROOT/lib/tcc"
 cp -r "$ROOT/target/musl/include" "$SYSROOT/include"
 cp "$ROOT/target/musl/lib/"*.o "$ROOT/target/musl/lib/"*.a "$SYSROOT/lib/"
 cp -r include "$SYSROOT/lib/tcc/include"
