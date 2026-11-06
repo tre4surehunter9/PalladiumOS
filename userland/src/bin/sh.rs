@@ -811,7 +811,7 @@ impl Shell {
             "help" => {
                 println!("PalladiumOS sh. Builtins:");
                 print_wrapped(BUILTINS.iter().copied());
-                println!("Programs in /bin (run with: name [args...]):");
+                println!("Programs in /bin (type the name to run one, e.g. ls -l /bin):");
                 let fd = open("/bin", O_RDONLY | O_DIRECTORY);
                 if fd >= 0 {
                     let mut names: Vec<String> = Vec::new();
