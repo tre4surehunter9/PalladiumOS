@@ -1405,7 +1405,8 @@ fn login_as_user_then_su_and_passwd() {
     type_line("pw123");
     type_line("exit");
     type_line("exit");
-    assert_eq!(run(prog("login"), &["login"]), Ok(0));
+    ctrl_d(); // logged out: login asks again; Ctrl-D ends it (no root password)
+    assert_eq!(run(prog("login"), &["login"]), Ok(99));
     assert_eq!(file("/tmp/who1"), "user\n");
     assert!(file("/tmp/id1").starts_with("uid=1000(user) gid=1000(user)"), "{}", file("/tmp/id1"));
     assert!(file("/tmp/err1").contains("Permission denied"));
@@ -1421,7 +1422,8 @@ fn login_as_user_then_su_and_passwd() {
     type_line("pw123");
     type_line("whoami > /tmp/who3");
     type_line("exit");
-    assert_eq!(run(prog("login"), &["login"]), Ok(0));
+    ctrl_d();
+    assert_eq!(run(prog("login"), &["login"]), Ok(99));
     assert_eq!(file("/tmp/who3"), "user\n");
 
     // Put the account back the way it was.
@@ -1435,6 +1437,44 @@ fn login_ctrl_d_means_kernel_shell() {
     palladiumos::task::keyboard::init_queue();
     ctrl_d();
     assert_eq!(run(prog("login"), &["login"]), Ok(99));
+}
+
+#[test_case]
+fn only_login_can_open_the_kernel_shell() {
+    setup_users();
+    let _ = filesystem::make_dir("/tmp");
+    // Give root a password (as root, with passwd), keeping the old shadow.
+    let shadow = file("/etc/shadow");
+    palladiumos::task::keyboard::init_queue();
+    type_line("passwd root");
+    type_line("rootpw");
+    type_line("rootpw");
+    type_line("exit");
+    assert_eq!(run(prog("sh"), &["sh", "-i"]), Ok(0));
+    assert!(file("/etc/shadow").contains("root:$sha256$"));
+
+    palladiumos::task::keyboard::init_queue();
+    // A user's shell exiting with 99 is just a logout, not the kernel shell:
+    type_line("user");
+    type_line("exit 99");
+    // login asks again: log in once more to prove it.
+    type_line("user");
+    type_line("whoami > /tmp/again");
+    type_line("exit");
+    // Ctrl-D needs root's password now: a wrong one is refused...
+    ctrl_d();
+    type_line("wrong");
+    type_line("user");
+    type_line("echo still-login > /tmp/after-wrong");
+    type_line("exit");
+    // ...and the right one opens the kernel shell.
+    ctrl_d();
+    type_line("rootpw");
+    assert_eq!(run(prog("login"), &["login"]), Ok(99));
+    assert_eq!(file("/tmp/again"), "user\n");
+    assert_eq!(file("/tmp/after-wrong"), "still-login\n");
+    filesystem::write_file("/etc/shadow", &shadow).unwrap();
+    assert!(only_kernel_left(), "{:?}", process::list());
 }
 
 #[test_case]

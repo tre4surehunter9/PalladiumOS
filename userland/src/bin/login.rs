@@ -2,9 +2,10 @@
 //! login: ask for a user name and password, then start that user's shell.
 //!
 //! Started by the kernel at boot (as root). After a successful login it
-//! switches to the user and execs their shell; when the shell exits, the
-//! kernel starts login again. Ctrl-D at the prompt exits with status 99,
-//! which tells the kernel to open its built-in kernel shell instead.
+//! runs the user's shell as a child (as that user) and waits; when the
+//! shell exits, it asks again. Ctrl-D at the prompt (with root's password,
+//! if root has one) exits with status 99, which tells the kernel to open
+//! its built-in kernel shell. login is the only process that can do that.
 #![no_std]
 #![no_main]
 
@@ -35,20 +36,92 @@ fn read_name() -> Option<String> {
     }
 }
 
+/// Ctrl-D at the prompt: the kernel shell runs as root, so it needs root's
+/// password. (With no root password set, anyone can log in as root anyway.)
+fn kernel_shell_allowed() -> bool {
+    match shadow_hash("root") {
+        Some(hash) if !hash.is_empty() => {
+            let ok = read_password("Root password for the kernel shell: ").is_some_and(|p| check_password(&hash, &p));
+            if !ok {
+                sleep_ms(1000);
+                println!("Login incorrect");
+            }
+            ok
+        }
+        _ => true,
+    }
+}
+
+/// Run `user`'s shell as a child and wait for it. login stays root and
+/// keeps control: only login itself decides to open the kernel shell (an
+/// `exit 99` from the user's shell is just a logout).
+fn session(user: &userlib::users::User, saved_tty: Option<Termios>) {
+    let pid = fork();
+    if pid < 0 {
+        eprintln!("login: fork: {}", strerror(-pid));
+        return;
+    }
+    if pid == 0 {
+        // The session's own process group, owning the terminal; signals
+        // back to their defaults (login ignores them).
+        setpgid(0, 0);
+        tcsetpgrp(STDIN, getpid());
+        for sig in [SIGINT, SIGQUIT, SIGTSTP] {
+            set_signal(sig, SIG_DFL);
+        }
+        if let Err(e) = become_user(user) {
+            eprintln!("login: can't switch to {}: {}", user.name, strerror(-e));
+            exit(1);
+        }
+        if chdir(&user.home) < 0 {
+            println!("No home directory {}, using /", user.home);
+            chdir("/");
+        }
+        if let Some(motd) = userlib::io::read_text("/etc/motd") {
+            print!("{}", motd);
+        }
+        let env = login_env(user);
+        let envp: Vec<&str> = env.iter().map(String::as_str).collect();
+        let err = execve(&user.shell, &["sh"], &envp);
+        eprintln!("login: can't run {}: {}", user.shell, strerror(-err));
+        exit(1);
+    }
+    let mut status = 0;
+    while waitpid(pid as i32, &mut status, 0) == -EINTR as isize {}
+    // Logged out: the terminal is login's again, in its normal mode.
+    tcsetpgrp(STDIN, getpgrp());
+    if let Some(t) = saved_tty {
+        tcsetattr(STDIN, &t);
+    }
+}
+
 fn main(_args: Args) -> i32 {
     if geteuid() != 0 {
         eprintln!("login: must be run as root");
         return 1;
     }
+    // Ctrl-C and friends are for the session, not for login.
+    for sig in [SIGINT, SIGQUIT, SIGTSTP] {
+        set_signal(sig, SIG_IGN);
+    }
+    let saved_tty = tcgetattr(STDIN).ok();
+    let no_root_password = shadow_hash("root").is_none_or(|h| h.is_empty());
     println!();
     println!("PalladiumOS 0.4.0 (palladium)");
-    println!("Log in as 'user' or 'root' (no passwords yet: set them with passwd).");
-    println!("Ctrl-D here opens the kernel shell.");
+    if no_root_password {
+        println!("Log in as 'user' or 'root' (no passwords yet: set them with passwd).");
+        println!("Ctrl-D here opens the kernel shell.");
+    } else {
+        println!("Ctrl-D here opens the kernel shell (root's password needed).");
+    }
     loop {
         print!("\npalladium login: ");
         let Some(name) = read_name() else {
             println!();
-            return TO_KERNEL_SHELL;
+            if kernel_shell_allowed() {
+                return TO_KERNEL_SHELL;
+            }
+            continue;
         };
         if name.is_empty() {
             continue;
@@ -69,21 +142,6 @@ fn main(_args: Args) -> i32 {
             println!("Login incorrect");
             continue;
         };
-        if let Err(e) = become_user(&user) {
-            eprintln!("login: can't switch to {}: {}", user.name, strerror(-e));
-            continue;
-        }
-        if chdir(&user.home) < 0 {
-            println!("No home directory {}, using /", user.home);
-            chdir("/");
-        }
-        if let Some(motd) = userlib::io::read_text("/etc/motd") {
-            print!("{}", motd);
-        }
-        let env = login_env(&user);
-        let envp: Vec<&str> = env.iter().map(String::as_str).collect();
-        let err = execve(&user.shell, &["sh"], &envp);
-        eprintln!("login: can't run {}: {}", user.shell, strerror(-err));
-        return 1;
+        session(&user, saved_tty);
     }
 }
