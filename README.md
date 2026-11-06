@@ -105,6 +105,8 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 218 | set_tid_address | yes |
 | 230 | clock_nanosleep | yes (`TIMER_ABSTIME` too) |
 | 318 | getrandom | yes (RDRAND when available) |
+| 332 | statx | yes |
+| 41 | socket | `EAFNOSUPPORT` (no networking yet) |
 | 2 | open | yes (`O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`) |
 | 3 | close | yes |
 | 4 | stat | yes |
@@ -186,6 +188,7 @@ Real-world programs are built from their original source by scripts in `tools/po
 
 * `tools/ports/lua.sh`: Lua 5.4.7 (`lua` and `luac`). The REPL, scripts (also as `#!/bin/lua`), `io`, `os.execute`, `io.popen` and `os.clock` work.
 * `tools/ports/dash.sh`: dash 0.5.12, the Debian Almquist shell, a full POSIX shell (here-documents, `getopts`, `trap`, job control with Ctrl-Z/`fg`/`bg`). Run `dash`, or `dash script.sh`.
+* `tools/ports/fastfetch.sh`: fastfetch 2.71.0 (needs `cmake` on the host). Shows the system with a PalladiumOS logo (configured in `/etc/xdg/fastfetch/config.jsonc`; the OS name comes from `/etc/os-release`).
 
 The binaries are ordinary Linux static executables too, so they can be run on a Linux host to compare behaviour.
 

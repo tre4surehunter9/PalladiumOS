@@ -111,6 +111,21 @@ pub fn write_bytes(path: &str, contents: &[u8]) -> Result<(), &'static str> {
     .map_err(message)
 }
 
+/// The PalladiumOS logo (for fastfetch): element 46 of the periodic table.
+const PALLADIUM_LOGO: &str = "\
+$1+------------------+
+$1|$2 46               $1|
+$1|$2   ____      _    $1|
+$1|$2  |  _ \\  __| |   $1|
+$1|$2  | |_) |/ _` |   $1|
+$1|$2  |  __/| (_| |   $1|
+$1|$2  |_|    \\__,_|   $1|
+$1|$2                  $1|
+$1|$2    Palladium     $1|
+$1|$2     106.42       $1|
+$1+------------------+
+";
+
 pub fn write_file(path: &str, contents: &str) -> Result<(), &'static str> {
     write_bytes(path, contents.as_bytes())
 }
@@ -147,7 +162,27 @@ pub fn init_default_files() {
             "/welcome.txt",
             "Welcome to PalladiumOS! This is my personal OS project!\nYou can find it at https://github.com/tre4surehunter9/PalladiumOS/\n",
         ),
+        // Which OS this is, for programs like fastfetch (freedesktop format).
+        (
+            "/etc/os-release",
+            "NAME=\"PalladiumOS\"\nPRETTY_NAME=\"PalladiumOS 0.4.0\"\nID=palladiumos\nVERSION=\"0.4.0\"\nVERSION_ID=0.4.0\n\
+             HOME_URL=\"https://github.com/tre4surehunter9/PalladiumOS/\"\n",
+        ),
+        // fastfetch's system-wide config: PalladiumOS's logo, a periodic
+        // table tile for palladium.
+        (
+            "/etc/xdg/fastfetch/config.jsonc",
+            "{\n  \"logo\": { \"type\": \"file\", \"source\": \"/etc/xdg/fastfetch/palladium.txt\",\n            \
+             \"color\": { \"1\": \"cyan\", \"2\": \"white\" } },\n  \
+             \"modules\": [\"title\", \"separator\", \"os\", \"host\", \"kernel\", \"uptime\", \"shell\", \
+             \"terminal\", \"cpu\", \"memory\", \"swap\", \"disk\", \"locale\", \"break\", \"colors\"]\n}\n",
+        ),
+        ("/etc/xdg/fastfetch/palladium.txt", PALLADIUM_LOGO),
     ];
+    let _ = make_dir("/etc");
+    for dir in ["/etc/xdg", "/etc/xdg/fastfetch"] {
+        let _ = make_dir(dir);
+    }
     for (path, text) in defaults {
         if mounts::resolve(path).is_err() {
             let _ = write_file(path, text);

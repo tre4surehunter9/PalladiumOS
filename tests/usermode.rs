@@ -1614,3 +1614,19 @@ fn dash_port_works() {
     assert_eq!(file("/tmp/dj1"), "0\n");
     assert!(only_kernel_left(), "{:?}", process::list());
 }
+
+#[test_case]
+fn fastfetch_port_works() {
+    let Some(_) = c_program("fastfetch") else { return };
+    filesystem::init_default_files(); // /etc/os-release and fastfetch's config
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("fastfetch --logo none > /tmp/ff 2>&1"), 0);
+    let out = file("/tmp/ff");
+    for want in ["OS: PalladiumOS 0.4.0 x86_64", "Kernel: PalladiumOS 0.4.0", "Memory: ", "Disk (/): "] {
+        assert!(out.contains(want), "{:?} missing from:\n{}", want, out);
+    }
+    assert!(!out.contains("not implemented"), "{}", out);
+    // With the logo (from /etc/xdg/fastfetch/config.jsonc)
+    assert_eq!(sh("fastfetch > /tmp/ff2 2>&1"), 0);
+    assert!(file("/tmp/ff2").contains("Palladium"), "{}", file("/tmp/ff2"));
+}

@@ -836,6 +836,11 @@ pub fn sys_stat(path: u64, out: &mut [u8], follow: bool) -> i64 {
 
 /// newfstatat(dirfd, path, statbuf, flags)
 pub fn sys_fstatat(dirfd: u64, path: u64, out: &mut [u8], flags: u64) -> i64 {
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    // fstatat(fd, "", buf, AT_EMPTY_PATH) is fstat(fd).
+    if flags & AT_EMPTY_PATH != 0 && user_string(path).is_ok_and(|p| p.is_empty()) {
+        return sys_fstat(dirfd, out);
+    }
     let abs = match user_at_path(dirfd, path) {
         Ok(p) => p,
         Err(e) => return -e,
@@ -1324,4 +1329,38 @@ pub fn sys_truncate(path: u64, len: u64) -> i64 {
     let r = sys_ftruncate(fd as u64, len);
     sys_close(fd as u64);
     r
+}
+
+/// statx(dirfd, path, flags, mask, buf): stat with Linux's newer, larger
+/// struct (filled from the same information as stat).
+pub fn sys_statx(dirfd: u64, path: u64, flags: u64, _mask: u64, buf: u64) -> i64 {
+    let mut st = [0u8; STAT_SIZE as usize];
+    let r = sys_fstatat(dirfd, path, &mut st, flags);
+    if r < 0 {
+        return r;
+    }
+    let Some(out) = (unsafe { crate::syscall::user_slice_mut(buf, 256) }) else { return -crate::syscall::EFAULT };
+    let u64_at = |o: usize| u64::from_le_bytes(st[o..o + 8].try_into().unwrap());
+    let u32_at = |o: usize| u32::from_le_bytes(st[o..o + 4].try_into().unwrap());
+    out.fill(0);
+    let put32 = |out: &mut [u8], o: usize, v: u32| out[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    let put64 = |out: &mut [u8], o: usize, v: u64| out[o..o + 8].copy_from_slice(&v.to_le_bytes());
+    put32(out, 0, 0x7ff); // stx_mask: STATX_BASIC_STATS
+    put32(out, 4, u64_at(56) as u32); // blksize
+    put32(out, 16, u64_at(16) as u32); // nlink
+    put32(out, 20, u32_at(28)); // uid
+    put32(out, 24, u32_at(32)); // gid
+    out[28..30].copy_from_slice(&(u32_at(24) as u16).to_le_bytes()); // mode
+    put64(out, 32, u64_at(8)); // ino
+    put64(out, 40, u64_at(48)); // size
+    put64(out, 48, u64_at(64)); // blocks
+    for (stx, st_off) in [(64, 72), (96, 104), (112, 88)] {
+        // atime, ctime, mtime: { i64 sec, u32 nsec }
+        put64(out, stx, u64_at(st_off));
+        put32(out, stx + 8, u64_at(st_off + 8) as u32);
+    }
+    let dev = u64_at(0);
+    put32(out, 136, (dev >> 8) as u32); // dev major
+    put32(out, 140, (dev & 0xff) as u32); // dev minor
+    0
 }
