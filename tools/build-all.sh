@@ -1,31 +1,72 @@
 #!/bin/sh
 # Copyright (c) 2026 tre4surehunter9
-# Build musl (if needed) and every port in tools/ports, so their programs
+# Build musl (if needed) and the ports in tools/ports, so their programs
 # end up in /bin on the next kernel build.
 #
-#   tools/build-all.sh            musl (once), then lua, dash, fastfetch, tcc, micropython
-#   tools/build-all.sh --rebuild  rebuild musl too
-#   tools/build-all.sh --run      ...then `cargo run`
+#   tools/build-all.sh             build what's missing or out of date
+#   tools/build-all.sh tcc lua     (re)build just these ports
+#   tools/build-all.sh --rebuild   rebuild everything, musl included
+#   tools/build-all.sh --run       ...then `cargo run`
 #
+# A port is up to date when its outputs exist and nothing it was built
+# from changed: its script, tools/ports/common.sh, and musl's libc.a
+# (recorded in target/ports/stamps after each successful build).
 # A port that fails is reported at the end; the others still get built.
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
+ALL_PORTS="lua dash fastfetch tcc micropython"
+STAMPS=target/ports/stamps
+
+# What each port produces (relative to target/).
+outputs() {
+    case $1 in
+        lua) echo "ports/bin/lua ports/bin/luac" ;;
+        dash) echo "ports/bin/dash" ;;
+        fastfetch) echo "ports/bin/fastfetch" ;;
+        tcc) echo "ports/bin/tcc sysroot/lib/tcc/libtcc1.a sysroot/src/tinycc/tcc.c" ;;
+        micropython) echo "ports/bin/micropython" ;;
+    esac
+}
+
+# Fingerprint of everything a port is built from.
+fingerprint() {
+    cat "tools/ports/$1.sh" tools/ports/common.sh target/musl/lib/libc.a 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+
+up_to_date() {
+    for f in $(outputs "$1"); do
+        [ -e "target/$f" ] || return 1
+    done
+    [ -f "$STAMPS/$1" ] && [ "$(cat "$STAMPS/$1")" = "$(fingerprint "$1")" ]
+}
+
 REBUILD=0
 RUN=0
+CHOSEN=""
 for arg in "$@"; do
     case $arg in
         --rebuild) REBUILD=1 ;;
         --run) RUN=1 ;;
         -h | --help)
-            sed -n '3,10p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'
+            echo "Ports: $ALL_PORTS"
             exit 0
             ;;
-        *)
+        -*)
             echo "unknown option: $arg (try --help)" >&2
             exit 2
+            ;;
+        *)
+            case " $ALL_PORTS " in
+                *" $arg "*) CHOSEN="$CHOSEN $arg" ;;
+                *)
+                    echo "unknown port: $arg (ports: $ALL_PORTS)" >&2
+                    exit 2
+                    ;;
+            esac
             ;;
     esac
 done
@@ -35,21 +76,30 @@ if [ "$REBUILD" = 1 ] || [ ! -x target/musl/bin/palladium-cc ]; then
     echo "==> musl"
     tools/build-musl.sh || { echo "musl failed to build; stopping" >&2; exit 1; }
 else
-    echo "==> musl: already built (use --rebuild to build it again)"
+    echo "==> musl: up to date"
 fi
 
-# 2. the ports
+# 2. the ports: the ones named (always rebuilt), or all of them (when needed)
+mkdir -p "$STAMPS"
 built=""
+current=""
 skipped=""
 failed=""
-for port in lua dash fastfetch tcc micropython; do
+for port in ${CHOSEN:-$ALL_PORTS}; do
+    if [ -z "$CHOSEN" ] && [ "$REBUILD" = 0 ] && up_to_date "$port"; then
+        echo "==> $port: up to date"
+        current="$current $port"
+        continue
+    fi
     if [ "$port" = fastfetch ] && ! command -v cmake >/dev/null 2>&1; then
         echo "==> $port: skipped (needs cmake on the host)"
         skipped="$skipped $port"
         continue
     fi
     echo "==> $port"
+    rm -f "$STAMPS/$port"
     if tools/ports/$port.sh; then
+        fingerprint "$port" > "$STAMPS/$port"
         built="$built $port"
     else
         echo "==> $port FAILED" >&2
@@ -59,6 +109,7 @@ done
 
 echo
 echo "Built:${built:- nothing}"
+[ -n "$current" ] && echo "Up to date:$current"
 [ -n "$skipped" ] && echo "Skipped:$skipped"
 [ -n "$failed" ] && echo "Failed:$failed"
 echo "Programs in target/ports/bin: $(ls target/ports/bin 2>/dev/null | tr '\n' ' ')"
