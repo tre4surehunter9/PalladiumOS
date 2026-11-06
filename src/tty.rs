@@ -82,6 +82,16 @@ pub fn intercept_scancode(scancode: u8) -> bool {
     false
 }
 
+/// Forget which keys are held and any half-typed input: called when the
+/// kernel hands the keyboard to a program. Otherwise a key pressed in the
+/// kernel shell and released here (or the reverse, like the Ctrl of the
+/// Ctrl-D that left login) would look stuck, turning every letter into a
+/// control character.
+pub fn new_session() {
+    *TTY.lock() = None;
+    CTRL_HELD.store(false, Ordering::SeqCst);
+}
+
 /// Back to cooked mode with echo (e.g. after a program left the console raw).
 pub fn reset_mode() {
     set_mode(DEFAULT_MODE);

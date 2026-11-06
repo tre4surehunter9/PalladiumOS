@@ -119,6 +119,10 @@ pub async fn run_shell() {
                             erase_cursor();
                             println!();
                             shell::process_command(&input_buffer);
+                            // A program may have had the keyboard and seen
+                            // key presses whose releases we never got (or the
+                            // other way round): start with no keys held.
+                            keyboard = Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::MapLettersToUnicode);
                             input_buffer.clear();
                             print_prompt();
                             draw_cursor();

@@ -758,6 +758,7 @@ pub fn run_program(bytes: &[u8], argv: &[&str]) -> Result<i32, &'static str> {
 
 pub fn run_program_env(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<i32, &'static str> {
     assert_eq!(current_pid(), 0, "run_program must be called by the kernel");
+    crate::tty::new_session();
     let pid = spawn(bytes, argv, envp)?;
     // The program's group gets the keyboard (Ctrl-C goes to it).
     FOREGROUND.store(pid, Ordering::SeqCst);
