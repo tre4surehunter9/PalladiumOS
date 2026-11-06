@@ -18,9 +18,12 @@ use crate::memory::{self, BootInfoFrameAllocator, FRAME_ALLOCATOR};
 const FLAT_BASE: u64 = 0x_6666_6666_0000;
 const MAX_FLAT_SIZE: usize = 64 * 1024;
 
-/// The user stack: STACK_PAGES pages ending at STACK_TOP. The page below is
-/// left unmapped as a guard, so overflowing the stack is a segfault.
+/// The user stack ends at STACK_TOP and may grow down to STACK_MAX bytes.
+/// Only STACK_PAGES are mapped up front; the rest is mapped on demand when
+/// the program first touches it (see handle_stack_fault). Below the limit
+/// nothing is ever mapped, so overflowing the stack is a segfault.
 pub const STACK_TOP: u64 = 0x_7fff_ffff_0000;
+pub const STACK_MAX: u64 = 1024 * 1024;
 const STACK_PAGES: u64 = 16;
 
 pub const MAX_ARGS: usize = 64;
@@ -211,5 +214,63 @@ fn copy_to_user(mapper: &OffsetPageTable<'static>, addr: u64, data: &[u8]) {
             core::ptr::copy_nonoverlapping(data[done..].as_ptr(), memory::phys_ptr(phys), n);
         }
         done += n;
+    }
+}
+
+// ---- growing the stack on demand ----
+
+fn in_stack_window(addr: u64) -> bool {
+    (STACK_TOP - STACK_MAX..STACK_TOP).contains(&addr)
+}
+
+/// Map a zeroed page at `addr` in the current address space if it's in
+/// the stack window and not mapped yet. Returns false if it's not a stack
+/// address (or memory ran out).
+fn map_stack_page(addr: u64) -> bool {
+    use x86_64::registers::control::Cr3;
+    if !in_stack_window(addr) {
+        return false;
+    }
+    let (p4, _) = Cr3::read();
+    let mut mapper = memory::mapper_for(p4);
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
+    if mapper.translate_page(page).is_ok() {
+        return true;
+    }
+    let mut alloc_guard = FRAME_ALLOCATOR.lock();
+    let frames = alloc_guard.as_mut().unwrap();
+    let Some(frame) = frames.allocate_frame() else { return false };
+    memory::zero_frame(frame);
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    match unsafe { mapper.map_to(page, frame, flags, frames) } {
+        Ok(flush) => {
+            flush.flush();
+            true
+        }
+        Err(_) => {
+            unsafe { x86_64::structures::paging::FrameDeallocator::deallocate_frame(frames, frame) };
+            false
+        }
+    }
+}
+
+/// Called by the page fault handler for a fault in ring 3 on a page that
+/// isn't present. Returns true if it was the stack growing (the program
+/// then simply continues).
+pub fn handle_stack_fault(addr: u64) -> bool {
+    map_stack_page(addr)
+}
+
+/// Before a syscall uses user memory: map any untouched stack pages in
+/// [ptr, ptr + len), so a buffer on a not-yet-used part of the stack works.
+pub fn populate_stack(ptr: u64, len: u64) {
+    let Some(end) = ptr.checked_add(len) else { return };
+    if len == 0 || end <= STACK_TOP - STACK_MAX || ptr >= STACK_TOP {
+        return;
+    }
+    let mut page = ptr.max(STACK_TOP - STACK_MAX) & !0xfff;
+    while page < end.min(STACK_TOP) {
+        map_stack_page(page);
+        page += 4096;
     }
 }

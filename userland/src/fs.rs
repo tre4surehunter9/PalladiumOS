@@ -256,6 +256,7 @@ pub const F_DUPFD: u64 = 0;
 pub const F_GETFD: u64 = 1;
 pub const F_SETFD: u64 = 2;
 pub const F_GETFL: u64 = 3;
+pub const F_DUPFD_CLOEXEC: u64 = 1030;
 pub const FD_CLOEXEC: u64 = 1;
 
 /// fcntl(2)

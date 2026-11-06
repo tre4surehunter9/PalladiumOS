@@ -59,11 +59,15 @@ fn main() {
         panic!("building userland failed");
     }
 
-    // One entry per userland/src/bin/*.rs, sorted by name.
+    // One entry per program: userland/src/bin/NAME.rs, or a directory
+    // userland/src/bin/NAME/ with a main.rs (for multi-file programs).
     let mut names: Vec<String> = fs::read_dir(userland.join("src/bin"))
         .expect("userland/src/bin missing")
         .filter_map(|e| {
             let path = e.ok()?.path();
+            if path.is_dir() {
+                return path.join("main.rs").exists().then(|| path.file_name()?.to_str().map(String::from))?;
+            }
             (path.extension()? == "rs").then(|| path.file_stem()?.to_str().map(String::from))?
         })
         .collect();

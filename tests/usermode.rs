@@ -1034,3 +1034,217 @@ fn sort_uniq_tee_tools() {
     assert_eq!(sh("echo more | tee -a /t1.txt > /o.txt"), 0);
     assert_eq!(file("/t1.txt"), "teed\nmore\n");
 }
+
+// ---- shell scripting ----
+
+/// Run a script with sh and return what it wrote to /out.txt.
+fn script_output(script: &str) -> alloc::string::String {
+    let _ = filesystem::remove("/out.txt");
+    filesystem::write_file("/script.sh", script).unwrap();
+    let status = run(prog("sh"), &["sh", "/script.sh"]).unwrap();
+    assert_eq!(status, 0, "script failed:\n{}", script);
+    filesystem::read_file("/out.txt").unwrap_or_default()
+}
+
+#[test_case]
+fn sh_if_elif_else() {
+    let out = script_output(
+        "for n in 1 2 3; do\n\
+         if [ $n -eq 1 ]; then echo one\n\
+         elif [ $n = 2 ]; then echo two\n\
+         else echo many\n\
+         fi\n\
+         done > /out.txt\n",
+    );
+    assert_eq!(out, "one\ntwo\nmany\n");
+    assert_eq!(sh("if false; then exit 1; fi"), 0, "no branch taken: status 0");
+    assert_eq!(sh("if true; then false; fi"), 1);
+}
+
+#[test_case]
+fn sh_while_until_break_continue() {
+    let out = script_output(
+        "i=0\n\
+         while [ $i -lt 10 ]; do\n\
+           i=$((i + 1))\n\
+           if [ $i -eq 2 ]; then continue; fi\n\
+           if [ $i -eq 5 ]; then break; fi\n\
+           echo $i\n\
+         done > /out.txt\n\
+         until [ $i -eq 7 ]; do i=$((i+1)); done\n\
+         echo $i >> /out.txt\n",
+    );
+    assert_eq!(out, "1\n3\n4\n7\n");
+    // break 2 leaves both loops
+    let out = script_output(
+        "for a in 1 2; do for b in x y; do echo $a$b; break 2; done; done > /out.txt\n",
+    );
+    assert_eq!(out, "1x\n");
+    let out = script_output("for a in 1 2; do for b in x y; do continue 2; echo no; done; echo no; done; echo end > /out.txt\n");
+    assert_eq!(out, "end\n");
+}
+
+#[test_case]
+fn sh_for_loops_and_globs() {
+    filesystem::make_dir("/globtest").unwrap();
+    for f in ["a.txt", "b.txt", "c.rs", ".hidden.txt"] {
+        filesystem::write_file(&alloc::format!("/globtest/{}", f), "").unwrap();
+    }
+    assert_eq!(script_output("for f in /globtest/*.txt; do echo $f; done > /out.txt\n"), "/globtest/a.txt\n/globtest/b.txt\n");
+    assert_eq!(script_output("cd /globtest; echo *.* > /out.txt\n"), "a.txt b.txt c.rs\n", "hidden files are skipped");
+    assert_eq!(script_output("cd /globtest; echo .h* > /out.txt\n"), ".hidden.txt\n");
+    assert_eq!(script_output("cd /globtest; echo ?.rs [ab].txt [!a].txt > /out.txt\n"), "c.rs a.txt b.txt b.txt\n");
+    assert_eq!(script_output("cd /globtest; echo *.none > /out.txt\n"), "*.none\n", "no match: left as is");
+    assert_eq!(script_output("cd /globtest; echo '*' \"*.txt\" \\* > /out.txt\n"), "* *.txt *\n", "quoted: no glob");
+    assert_eq!(script_output("echo /glob*/a.txt > /out.txt\n"), "/globtest/a.txt\n", "glob in a directory part");
+    assert_eq!(script_output("set -- x y z; for a; do echo $a; done > /out.txt\n"), "x\ny\nz\n", "for without in = \"$@\"");
+}
+
+#[test_case]
+fn sh_case() {
+    let out = script_output(
+        "for f in main.rs notes.txt README Makefile; do\n\
+         case $f in\n\
+           *.rs) echo \"$f: rust\" ;;\n\
+           *.txt | *.md) echo \"$f: text\" ;;\n\
+           [A-Z]*) echo \"$f: capital\" ;;\n\
+         esac\n\
+         done > /out.txt\n\
+         case x in (y) echo no;; esac\n",
+    );
+    assert_eq!(out, "main.rs: rust\nnotes.txt: text\nREADME: capital\nMakefile: capital\n");
+    assert_eq!(sh("case abc in a*) exit 3;; *) exit 4;; esac"), 3);
+    assert_eq!(sh("case '*' in \\*) exit 5;; esac"), 5, "quoted pattern is literal");
+}
+
+#[test_case]
+fn sh_functions() {
+    let out = script_output(
+        "greet() { echo \"hi $1, $# args\"; }\n\
+         add() {\n\
+           echo $(( $1 + $2 ))\n\
+           return 7\n\
+           echo not reached\n\
+         }\n\
+         fact() { if [ $1 -le 1 ]; then echo 1; else echo $(( $1 * $(fact $(( $1 - 1 ))) )); fi; }\n\
+         { greet bob x y; add 2 3; echo status $?; fact 5; echo \"after: $1\"; } > /out.txt\n",
+    );
+    assert_eq!(out, "hi bob, 3 args\n5\nstatus 7\n120\nafter: \n");
+    assert_eq!(sh("f() { exit 9; }; f; exit 1"), 9, "exit in a function exits the shell");
+    assert_eq!(sh("return 3"), 1, "return outside a function is an error");
+    assert_eq!(sh("loop() { loop; }; loop"), 1, "runaway recursion is stopped");
+    assert_eq!(sh("f() { echo in f; }; type f > /out.txt; unset -f f; f"), 127);
+}
+
+#[test_case]
+fn sh_command_substitution() {
+    assert_eq!(script_output("x=$(echo hello); echo \"[$x]\" > /out.txt\n"), "[hello]\n");
+    assert_eq!(script_output("echo \"$(echo a; echo b)\" > /out.txt\n"), "a\nb\n", "inner newlines kept, trailing removed");
+    assert_eq!(script_output("echo $(echo a; echo b) > /out.txt\n"), "a b\n", "unquoted: split into words");
+    assert_eq!(script_output("echo `echo old style` > /out.txt\n"), "old style\n");
+    assert_eq!(script_output("n=$(ls /bin | grep -c '^sh$'); echo $n > /out.txt\n"), "1\n");
+    assert_eq!(script_output("echo $(echo $(echo nested)) > /out.txt\n"), "nested\n");
+    assert_eq!(sh("x=$(exit 4)"), 4, "status of an assignment with $(...)");
+}
+
+#[test_case]
+fn sh_arithmetic() {
+    assert_eq!(
+        script_output("echo $((1+2*3)) $(((1+2)*3)) $((7/2)) $((7%3)) $((-5+2)) $((2>1)) $((1==2)) $((!0)) > /out.txt\n"),
+        "7 9 3 1 -3 1 0 1\n"
+    );
+    assert_eq!(script_output("x=5; y=$((x * 2)); echo $((y + $x)) > /out.txt\n"), "15\n");
+    assert_eq!(script_output("i=1; : $((i += 4)); : $((i *= 2)); echo $i > /out.txt\n"), "10\n");
+    assert_eq!(script_output("echo $((3 > 2 && 1 < 2)) $((0 || 0)) > /out.txt\n"), "1 0\n");
+    assert_eq!(sh("echo $((1/0))"), 1, "division by zero is an error");
+}
+
+#[test_case]
+fn sh_parameter_expansion() {
+    assert_eq!(
+        script_output("unset u; e=; s=set; echo ${u:-d1} ${e:-d2} ${e-d3} ${s:+alt} ${u:+no}x ${#s} > /out.txt\n"),
+        "d1 d2 alt x 3\n"
+    );
+    assert_eq!(script_output("unset u; echo ${u:=assigned} $u > /out.txt\n"), "assigned assigned\n");
+    assert_eq!(sh("unset u; echo ${u:?is required}"), 1);
+    assert_eq!(script_output("x='a   b'; echo $x \"$x\" > /out.txt\n"), "a b a   b\n", "field splitting");
+    assert_eq!(script_output("set -- 'one two' three; for a in \"$@\"; do echo \"<$a>\"; done > /out.txt\n"), "<one two>\n<three>\n");
+    assert_eq!(script_output("set -- a b c; shift; echo $# $1 $* > /out.txt\n"), "2 b b c\n");
+    assert_eq!(script_output("e=''; for a in $e; do echo no; done; echo \"[$e]\" '' x > /out.txt\n"), "[]  x\n");
+}
+
+#[test_case]
+fn sh_test_builtin() {
+    filesystem::write_file("/tfile", "data").unwrap();
+    filesystem::write_file("/tempty", "").unwrap();
+    for (expr, expected) in [
+        ("-f /tfile", 0), ("-d /tfile", 1), ("-d /bin", 0), ("-e /nope", 1), ("-s /tfile", 0), ("-s /tempty", 1),
+        ("-z ''", 0), ("-n ''", 1), ("abc", 0), ("''", 1), ("a = a", 0), ("a != a", 1),
+        ("3 -lt 10", 0), ("10 -le 3", 1), ("5 -eq 5", 0), ("2 -gt 1 -a 1 -gt 0", 0), ("1 -gt 2 -o 2 -gt 1", 0),
+        ("! -f /nope", 0), ("'(' 1 -eq 1 ')'", 0),
+    ] {
+        assert_eq!(sh(&alloc::format!("test {}", expr)), expected, "test {}", expr);
+        assert_eq!(sh(&alloc::format!("[ {} ]", expr)), expected, "[ {} ]", expr);
+    }
+    assert_eq!(sh("[ 1 -eq 1"), 2, "missing ]");
+    assert_eq!(sh("[ x -eq 1 ]"), 2, "not a number");
+}
+
+#[test_case]
+fn sh_read_builtin() {
+    filesystem::write_file("/rin.txt", "first line\nsecond  part  rest\n").unwrap();
+    assert_eq!(
+        script_output("{ read a; read b c; } < /rin.txt; echo \"[$a] [$b] [$c]\" > /out.txt\n"),
+        "[first line] [second] [part  rest]\n"
+    );
+    assert_eq!(
+        script_output("n=0; while read line; do n=$((n+1)); done < /rin.txt; echo $n > /out.txt\n"),
+        "2\n"
+    );
+    assert_eq!(script_output("ls /bin | while read p; do case $p in sh) echo found $p;; esac; done > /out.txt\n"), "found sh\n");
+}
+
+#[test_case]
+fn sh_groups_subshells_negation() {
+    filesystem::write_file("/rin.txt", "first line\nsecond  part  rest\n").unwrap();
+    assert_eq!(script_output("{ echo a; echo b; } > /out.txt\n"), "a\nb\n");
+    assert_eq!(script_output("x=1; (x=2; cd /bin); echo $x $PWD > /out.txt\n"), "1 /\n", "subshell changes don't leak");
+    assert_eq!(script_output("x=1; { x=2; }; echo $x > /out.txt\n"), "2\n", "a group runs in the shell");
+    assert_eq!(sh("! true"), 1);
+    assert_eq!(sh("! false"), 0);
+    assert_eq!(sh("(exit 6)"), 6);
+    assert_eq!(script_output("while read l; do echo \"<$l>\"; done < /rin.txt > /out.txt\n"), "<first line>\n<second  part  rest>\n");
+    assert_eq!(script_output("eval 'echo evaluated' > /out.txt\n"), "evaluated\n");
+    assert_eq!(script_output("echo one \\\n two > /out.txt\n"), "one two\n", "line continuation");
+}
+
+#[test_case]
+fn sh_script_syntax_errors() {
+    for bad in ["if true; then echo", "while true; do", "for x in a b; echo", "case x in a) echo", "f() {", "{ echo", "(echo", "fi", "done", "echo $((1+)"] {
+        assert_eq!(sh(bad), 2, "{:?} should be a syntax error", bad);
+    }
+    assert_eq!(sh("if then fi"), 2);
+}
+
+#[test_case]
+fn sh_interactive_multiline() {
+    // An `if` typed over several lines (the shell prompts "> " for more).
+    palladiumos::task::keyboard::init_queue();
+    type_line("if true");
+    type_line("then");
+    type_line("echo multi > /ml.txt");
+    type_line("fi");
+    type_line("exit 0");
+    assert_eq!(run(prog("sh"), &["sh"]), Ok(0));
+    assert_eq!(file("/ml.txt"), "multi\n");
+}
+
+#[test_case]
+fn scripting_does_not_leak() {
+    let s = "i=0; while [ $i -lt 20 ]; do x=$(echo $i | cat); i=$((i+1)); done; for f in /bin/*; do :; done";
+    assert_eq!(sh(s), 0);
+    let before = frames_in_use();
+    assert_eq!(sh(s), 0);
+    assert_eq!(frames_in_use(), before);
+    assert!(only_kernel_left());
+}

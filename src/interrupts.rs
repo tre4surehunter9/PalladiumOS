@@ -91,6 +91,12 @@ extern "x86-interrupt" fn page_fault_handler(
     use x86_64::registers::control::Cr2;
 
     if crate::usermode::from_user(stack_frame.code_segment) {
+        // The stack growing into a page it hasn't used yet: map it, retry.
+        if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+            && crate::usermode::handle_stack_fault(Cr2::read().as_u64())
+        {
+            return;
+        }
         println!("Segmentation fault (address {:?}, rip {:?})",
                  Cr2::read(), stack_frame.instruction_pointer);
         crate::process::kill_current(SIGSEGV);

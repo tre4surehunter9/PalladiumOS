@@ -339,6 +339,7 @@ fn sys_uname(buf: u64) -> i64 {
 /// Borrow a user buffer for reading (pub: used by process.rs and vfs.rs), after checking that every page in it
 /// is mapped and user-accessible. Returns None for bad pointers.
 pub unsafe fn user_slice(ptr: u64, len: u64) -> Option<&'static [u8]> {
+    crate::usermode::populate_stack(ptr, len);
     if !crate::memory::is_user_range(ptr, len, false) {
         return None;
     }
@@ -350,6 +351,7 @@ pub unsafe fn user_slice(ptr: u64, len: u64) -> Option<&'static [u8]> {
 
 /// Same as `user_slice`, but the pages must also be writable.
 pub unsafe fn user_slice_mut(ptr: u64, len: u64) -> Option<&'static mut [u8]> {
+    crate::usermode::populate_stack(ptr, len);
     if !crate::memory::is_user_range(ptr, len, true) {
         return None;
     }
