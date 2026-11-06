@@ -14,10 +14,20 @@ pub struct ScancodeStream {
 
 impl ScancodeStream {
     pub fn new() -> Self {
-        SCANCODE_QUEUE.try_init_once(|| ArrayQueue::new(100))
-            .expect("ScancodeStream::new should only be called once");
+        init_queue();
         ScancodeStream { _private: () }
     }
+}
+
+/// Create the scancode queue if it doesn't exist yet. Safe to call repeatedly.
+pub fn init_queue() {
+    let _ = SCANCODE_QUEUE.try_init_once(|| ArrayQueue::new(100));
+}
+
+/// Take the next scancode without waiting (used by the TTY while a
+/// user program is running and the async executor isn't).
+pub fn pop_scancode() -> Option<u8> {
+    SCANCODE_QUEUE.try_get().ok()?.pop()
 }
 
 use core::{pin::Pin, task::{Poll, Context}};
@@ -49,7 +59,7 @@ impl Stream for ScancodeStream {
     }
 }
 
-pub(crate) fn add_scancode(scancode: u8) {
+pub fn add_scancode(scancode: u8) {
     if let Ok(queue) = SCANCODE_QUEUE.try_get() {
         if let Err(_) = queue.push(scancode) {
             println!("WARNING: scancode queue full; dropping keyboard input");

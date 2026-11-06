@@ -81,7 +81,7 @@ fn translate_addr_inner(addr: VirtAddr, physical_memory_offset: VirtAddr)
     Some(frame.start_address() + u64::from(addr.page_offset()))
 }
 
-use x86_64::structures::paging::{Page, PhysFrame, Mapper, Size4KiB, FrameAllocator, PageTableFlags};
+use x86_64::structures::paging::{Page, PhysFrame, Mapper, Size4KiB, FrameAllocator, FrameDeallocator, PageTableFlags};
 
 pub fn create_example_mapping(
     page: Page,
@@ -113,6 +113,10 @@ use bootloader::bootinfo::MemoryMap;
 pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,
     next: usize,
+    /// Physical address of the first freed frame. Each free frame stores the
+    /// address of the next one in its first 8 bytes (an intrusive linked list).
+    free_list: Option<u64>,
+    free_count: usize,
 }
 
 impl BootInfoFrameAllocator {
@@ -121,7 +125,14 @@ impl BootInfoFrameAllocator {
         BootInfoFrameAllocator {
             memory_map,
             next: 0,
+            free_list: None,
+            free_count: 0,
         }
+    }
+
+    /// Number of frames handed out and not yet freed.
+    pub fn frames_in_use(&self) -> usize {
+        self.next - self.free_count
     }
 }
 
@@ -140,59 +151,54 @@ impl BootInfoFrameAllocator {
     }
 }
 
+/// Pointer to a physical address through the bootloader's physical memory map.
+fn phys_to_virt(phys: u64) -> *mut u64 {
+    let offset = PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
+    assert!(offset != 0, "PHYS_MEM_OFFSET not set");
+    (offset + phys) as *mut u64
+}
+
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
+        if let Some(phys) = self.free_list {
+            self.free_list = match unsafe { phys_to_virt(phys).read() } {
+                u64::MAX => None,
+                next => Some(next),
+            };
+            self.free_count -= 1;
+            return Some(PhysFrame::containing_address(PhysAddr::new(phys)));
+        }
         let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
+        if frame.is_some() {
+            self.next += 1;
+        }
         frame
     }
 }
 
-
-
-pub fn map_user_page(
-    mapper: &mut impl Mapper<Size4KiB>,
-    frame_allocator: &mut impl x86_64::structures::paging::FrameAllocator<Size4KiB>,
-    page: Page<Size4KiB>,
-) {
-    // Already mapped from a previous run: reuse it. The frame allocator
-    // can't free frames yet, so remapping would just leak (and map_to errors).
-    if mapper.translate_page(page).is_ok() {
-        return;
-    }
-
-    let frame = frame_allocator.allocate_frame().expect("no frames left");
-    let flags = PageTableFlags::PRESENT
-    | PageTableFlags::WRITABLE
-    | PageTableFlags::USER_ACCESSIBLE;
-
-    unsafe {
-        mapper.map_to(page, frame, flags, frame_allocator)
-        .expect("map_to failed")
-        .flush();
+impl FrameDeallocator<Size4KiB> for BootInfoFrameAllocator {
+    unsafe fn deallocate_frame(&mut self, frame: PhysFrame) {
+        let phys = frame.start_address().as_u64();
+        let next = self.free_list.unwrap_or(u64::MAX);
+        unsafe { phys_to_virt(phys).write(next) };
+        self.free_list = Some(phys);
+        self.free_count += 1;
     }
 }
 
-const USER_PAYLOAD: [u8; 2] = [0xeb, 0xfe];
+/// Fill a physical frame with zeros (through the physical memory map).
+pub fn zero_frame(frame: PhysFrame) {
+    let ptr = phys_to_virt(frame.start_address().as_u64()) as *mut u8;
+    unsafe { core::ptr::write_bytes(ptr, 0, 4096) };
+}
 
-pub fn load_payload(target_addr: VirtAddr) {
-    unsafe {
-        let dest = target_addr.as_mut_ptr::<u8>();
-        core::ptr::copy_nonoverlapping(USER_PAYLOAD.as_ptr(), dest, USER_PAYLOAD.len());
-    }
+/// Kernel-virtual pointer to a physical address, for writing into user
+/// frames regardless of the user mapping's permissions.
+pub fn phys_ptr(phys: PhysAddr) -> *mut u8 {
+    phys_to_virt(phys.as_u64()) as *mut u8
 }
 
 
-pub fn load_payload_bytes(target_addr: VirtAddr, bytes: &[u8]) {
-    assert!(
-        bytes.len() <= 4096,
-            "payload does not fit in a single page — multi-page loading needed"
-    );
-    unsafe {
-        let dest = target_addr.as_mut_ptr::<u8>();
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dest, bytes.len());
-    }
-}
 
 pub fn map_user_vga(mapper: &mut impl Mapper<Size4KiB>) {
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(0xb8000));
@@ -229,7 +235,7 @@ pub fn ensure_user_accessible(addr: VirtAddr, physical_memory_offset: VirtAddr) 
 }
 
 /// Highest address (exclusive) of the lower, user half of the address space.
-const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+pub const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
 
 /// Check that `[ptr, ptr + len)` is entirely user memory: every page must be
 /// present and USER_ACCESSIBLE at every page-table level (and WRITABLE too

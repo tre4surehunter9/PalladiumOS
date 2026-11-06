@@ -28,16 +28,40 @@ i used AI for
 * Ring 3/Usermode
 
 ## Programs
-Ring 3 programs live in `src/user_progs` and are run with `run <name>`:
-* hello - prints a message and exits
+User programs run in ring 3 and are started with `run <name> [args...]` (`run` alone lists them):
+* hello - prints a greeting
+* echo - prints its arguments (`-n` for no newline)
+* cat - copies what you type to the screen until Ctrl-D
+* uname - prints system info (`-a`, `-s`, `-n`, `-r`, `-v`, `-m`)
 * crash - checks that bad pointers return EFAULT and that a segfault only kills the program
+
+### Writing a Program
+Programs are written in Rust in `userland/src/bin/` using `userlib` (syscalls, `print!`/`println!`, arguments).
+Every file there is built and bundled into the kernel automatically by `build.rs`:
+
+```rust
+#![no_std]
+#![no_main]
+
+use userlib::println;
+
+userlib::entry!(main);
+
+fn main(args: userlib::Args) -> i32 {
+    println!("Hello from {}", args.get(0).unwrap_or("?"));
+    0 // exit status
+}
+```
+
+Programs are static ELF executables loaded at `0x40000000`, with a 64 KiB stack (plus a guard page) and the standard System V startup stack (`argc`, `argv`, `envp`, `auxv`).
+Files named `test_*` are used by the test suite and hidden from `run`.
 
 ## Syscalls
 PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`, result in `rax`, negative errno on failure), entered with `int 0x80`.
 
 | # | Name | Status |
 |---|------|--------|
-| 0 | read | not yet (returns -ENOSYS) |
+| 0 | read | stdin only (line-buffered, Ctrl-D is end-of-file) |
 | 1 | write | stdout/stderr only |
 | 24 | sched_yield | yes |
 | 39 | getpid | yes (always 1) |

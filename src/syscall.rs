@@ -80,7 +80,7 @@ unsafe extern "C" {
 pub fn init_syscalls(idt: &mut InterruptDescriptorTable) {
     unsafe {
         idt[0x80]
-            .set_handler_addr(VirtAddr::new(syscall_entry as u64))
+            .set_handler_addr(VirtAddr::new(syscall_entry as *const () as u64))
             .set_privilege_level(PrivilegeLevel::Ring3);
     }
 }
@@ -95,11 +95,22 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_GETPID => 1, // only one process exists for now
         SYS_UNAME => sys_uname(a1),
         SYS_EXIT | SYS_EXIT_GROUP => crate::usermode::exit_current(a1 as i32),
-        SYS_READ => -ENOSYS, // TODO: needs a blocking keyboard / TTY layer
+        SYS_READ => sys_read(a1, a2, a3),
         _ => -ENOSYS,
     };
 
     frame.rax = ret as u64;
+}
+
+/// read(fd, buf, count): fd 0 reads a line from the console TTY.
+fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
+    if fd != 0 {
+        return -EBADF; // only stdin exists until there's an fd table
+    }
+    let Some(bytes) = (unsafe { user_slice_mut(buf, count) }) else {
+        return -EFAULT;
+    };
+    crate::tty::read(bytes) as i64
 }
 
 /// write(fd, buf, count)

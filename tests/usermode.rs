@@ -12,7 +12,10 @@ extern crate alloc;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use palladiumos::memory;
-use palladiumos::usermode::launch_program;
+use palladiumos::usermode::{launch_program, run};
+use palladiumos::{elf, programs};
+use alloc::vec;
+use alloc::vec::Vec;
 
 entry_point!(main);
 
@@ -40,20 +43,31 @@ fn panic(info: &PanicInfo) -> ! {
     palladiumos::test_panic_handler(info)
 }
 
-const HELLO: &[u8] = include_bytes!("../src/user_progs/hello.bin");
 const CRASH: &[u8] = include_bytes!("../src/user_progs/crash.bin");
+
+fn prog(name: &str) -> &'static [u8] {
+    programs::find(name).expect("program not bundled")
+}
+
+fn hello() -> &'static [u8] {
+    prog("hello")
+}
+
+fn frames_in_use() -> usize {
+    memory::FRAME_ALLOCATOR.lock().as_ref().unwrap().frames_in_use()
+}
 
 // ---- returning from ring 3 ----
 
 #[test_case]
 fn hello_exits_with_zero() {
-    assert_eq!(launch_program(HELLO), 0);
+    assert_eq!(launch_program(hello()), 0);
 }
 
 #[test_case]
 fn programs_can_run_repeatedly() {
     for _ in 0..5 {
-        assert_eq!(launch_program(HELLO), 0);
+        assert_eq!(launch_program(hello()), 0);
     }
 }
 
@@ -69,9 +83,201 @@ fn registers_preserved_across_syscall() {
 }
 
 #[test_case]
-fn too_large_program_is_rejected() {
-    let big = [0x90u8; 4097]; // nops
-    assert_eq!(launch_program(&big), -1);
+fn too_large_flat_program_is_rejected() {
+    let big = vec![0x90u8; 64 * 1024 + 1]; // nops
+    assert!(run(&big, &["big"]).is_err());
+    assert!(run(&[], &["empty"]).is_err());
+}
+
+#[test_case]
+fn memory_is_reclaimed_after_exit() {
+    assert_eq!(launch_program(hello()), 0);
+    let before = frames_in_use();
+    for _ in 0..50 {
+        assert_eq!(launch_program(hello()), 0);
+        assert_eq!(launch_program(CRASH), 139);
+    }
+    assert_eq!(frames_in_use(), before, "user frames leaked");
+}
+
+#[test_case]
+fn pages_are_unmapped_after_exit() {
+    assert_eq!(launch_program(hello()), 0);
+    assert!(!memory::is_user_range(0x4000_0000, 1, false), "program image still mapped");
+    assert!(!memory::is_user_range(0x7fff_fffe_f000, 1, false), "stack still mapped");
+    assert_eq!(launch_program(CRASH), 139);
+    assert!(!memory::is_user_range(0x6666_6666_0000, 1, false), "flat image still mapped");
+}
+
+// ---- Rust userland (ELF) ----
+
+#[test_case]
+fn bundled_programs_are_valid_elfs() {
+    for (name, bytes) in programs::USER_PROGRAMS {
+        let image = elf::parse(bytes).unwrap_or_else(|e| panic!("{}: {}", name, e));
+        assert!(image.entry >= 0x4000_0000, "{} entry {:#x}", name, image.entry);
+    }
+}
+
+#[test_case]
+fn argv_is_passed() {
+    assert_eq!(run(prog("test_args"), &["test_args", "one", "two words"]), Ok(0));
+    // wrong argument count -> 10 + argc
+    assert_eq!(run(prog("test_args"), &["test_args"]), Ok(11));
+}
+
+#[test_case]
+fn argument_list_too_long_is_rejected() {
+    let many = vec!["x"; 65];
+    assert!(run(hello(), &many).is_err());
+    assert_eq!(launch_program(hello()), 0, "kernel recovers after a failed load");
+}
+
+#[test_case]
+fn rust_panic_exits_101() {
+    assert_eq!(run(prog("test_panic"), &["test_panic"]), Ok(101));
+}
+
+#[test_case]
+fn stack_overflow_hits_guard_page() {
+    assert_eq!(run(prog("test_stack"), &["test_stack"]), Ok(139));
+}
+
+#[test_case]
+fn echo_and_uname_succeed() {
+    assert_eq!(run(prog("echo"), &["echo", "hello", "world"]), Ok(0));
+    assert_eq!(run(prog("uname"), &["uname", "-a"]), Ok(0));
+    assert_eq!(run(prog("uname"), &["uname", "-z"]), Ok(1));
+}
+
+// ---- stdin (TTY) ----
+// Keys are fed in as PS/2 set-1 scancodes (make code, then break = make | 0x80).
+
+fn press(scancode: u8) {
+    palladiumos::task::keyboard::add_scancode(scancode);
+    palladiumos::task::keyboard::add_scancode(scancode | 0x80);
+}
+
+const KEY_H: u8 = 0x23;
+const KEY_I: u8 = 0x17;
+const KEY_X: u8 = 0x2d;
+const KEY_D: u8 = 0x20;
+const KEY_ENTER: u8 = 0x1c;
+const KEY_BACKSPACE: u8 = 0x0e;
+const KEY_LCTRL: u8 = 0x1d;
+
+fn ctrl_d() {
+    palladiumos::task::keyboard::add_scancode(KEY_LCTRL);
+    press(KEY_D);
+    palladiumos::task::keyboard::add_scancode(KEY_LCTRL | 0x80);
+}
+
+#[test_case]
+fn read_returns_a_line_then_eof() {
+    palladiumos::task::keyboard::init_queue();
+    press(KEY_H);
+    press(KEY_I);
+    press(KEY_ENTER);
+    ctrl_d();
+    assert_eq!(run(prog("test_read"), &["test_read"]), Ok(0));
+}
+
+#[test_case]
+fn backspace_edits_the_line() {
+    palladiumos::task::keyboard::init_queue();
+    press(KEY_H);
+    press(KEY_X);
+    press(KEY_BACKSPACE);
+    press(KEY_I);
+    press(KEY_ENTER);
+    ctrl_d();
+    assert_eq!(run(prog("test_read"), &["test_read"]), Ok(0));
+}
+
+#[test_case]
+fn cat_copies_stdin_until_eof() {
+    palladiumos::task::keyboard::init_queue();
+    press(KEY_H);
+    press(KEY_ENTER);
+    ctrl_d();
+    assert_eq!(run(prog("cat"), &["cat"]), Ok(0));
+}
+
+// ---- malformed ELF files are rejected, not run ----
+
+/// Copy `bytes` and overwrite a u64 field of the first PT_LOAD program
+/// header that is NOT executable (so the entry point check still passes).
+fn patch_data_segment(bytes: &[u8], field: usize, value: u64) -> Vec<u8> {
+    let mut b = bytes.to_vec();
+    let phoff = u64::from_le_bytes(b[32..40].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes([b[56], b[57]]) as usize;
+    for i in 0..phnum {
+        let ph = phoff + i * 56;
+        let p_type = u32::from_le_bytes(b[ph..ph + 4].try_into().unwrap());
+        let p_flags = u32::from_le_bytes(b[ph + 4..ph + 8].try_into().unwrap());
+        if p_type == 1 && p_flags & elf::PF_X == 0 {
+            b[ph + field..ph + field + 8].copy_from_slice(&value.to_le_bytes());
+            return b;
+        }
+    }
+    panic!("no data segment to patch");
+}
+
+const P_VADDR: usize = 16;
+const P_MEMSZ: usize = 40;
+
+#[test_case]
+fn elf_header_checks() {
+    let good = hello();
+    assert!(elf::parse(good).is_ok());
+    assert!(elf::parse(&good[..40]).is_err(), "truncated header");
+    assert!(elf::parse(&good[..200]).is_err(), "truncated segments");
+
+    let mut b = good.to_vec();
+    b[4] = 1; // 32-bit
+    assert!(elf::parse(&b).is_err());
+
+    let mut b = good.to_vec();
+    b[16] = 3; // ET_DYN
+    assert!(elf::parse(&b).is_err());
+
+    let mut b = good.to_vec();
+    b[18] = 3; // EM_386
+    assert!(elf::parse(&b).is_err());
+
+    let mut b = good.to_vec();
+    b[24..32].copy_from_slice(&0x1234u64.to_le_bytes()); // entry outside code
+    assert!(elf::parse(&b).is_err());
+}
+
+#[test_case]
+fn elf_segment_in_kernel_half_is_rejected() {
+    let b = patch_data_segment(hello(), P_VADDR, 0xffff_8000_0000_0000);
+    assert!(elf::parse(&b).is_err());
+    assert!(run(&b, &["bad"]).is_err());
+}
+
+#[test_case]
+fn elf_segment_on_null_page_is_rejected() {
+    let b = patch_data_segment(hello(), P_VADDR, 0);
+    assert!(elf::parse(&b).is_err());
+}
+
+#[test_case]
+fn elf_huge_segment_is_rejected() {
+    let b = patch_data_segment(hello(), P_MEMSZ, 1 << 40);
+    assert!(elf::parse(&b).is_err());
+}
+
+#[test_case]
+fn elf_overlapping_kernel_memory_is_rejected() {
+    // 0x200000 is where the kernel itself is mapped.
+    let b = patch_data_segment(hello(), P_VADDR, 0x20_0000);
+    assert!(elf::parse(&b).is_ok(), "address is in the user half, so parsing passes");
+    let before = frames_in_use();
+    assert!(run(&b, &["bad"]).is_err(), "must refuse to map over the kernel");
+    assert_eq!(frames_in_use(), before, "failed load leaked frames");
+    assert_eq!(launch_program(hello()), 0);
 }
 
 // ---- syscalls ----
@@ -116,7 +322,7 @@ fn illegal_instruction_is_sigill() {
 #[test_case]
 fn kernel_still_works_after_crashes() {
     assert_eq!(launch_program(CRASH), 139);
-    assert_eq!(launch_program(HELLO), 0);
+    assert_eq!(launch_program(hello()), 0);
 }
 
 // ---- user pointer validation ----
@@ -131,11 +337,10 @@ fn user_range_rejects_kernel_and_unmapped() {
 }
 
 #[test_case]
-fn user_range_accepts_user_pages() {
-    launch_program(HELLO); // ensures the user code/stack pages are mapped
-    assert!(memory::is_user_range(0x6666_6666_0000, 4096, false));
-    assert!(memory::is_user_range(0x6666_6666_0000, 4096, true));
-    assert!(memory::is_user_range(0x5555_5555_0000, 4096, true));
-    assert!(!memory::is_user_range(0x6666_6666_0000, 4097, false), "runs past the page");
+fn user_range_accepts_valid_user_pointers() {
+    // hello and uname both pass pointers to their own memory to the kernel;
+    // if validation rejected them, write/uname would fail.
+    assert_eq!(launch_program(hello()), 0);
+    assert_eq!(launch_program(include_bytes!("user_progs/uname.bin")), 0);
     assert!(memory::is_user_range(0, 0, false), "empty range is always fine");
 }

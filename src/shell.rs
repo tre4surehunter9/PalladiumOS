@@ -53,7 +53,7 @@ fn cmd_help() {
     println!("  rm <file>           - Remove file or empty directory");
     println!("  cd <dir>            - Change directory");
     println!("  pwd                 - Print working directory");
-    println!("  run <program>       - Run a Ring 3 program (run alone lists them)");
+    println!("  run <prog> [args]   - Run a Ring 3 program (run alone lists them)");
 }
 
 
@@ -224,30 +224,32 @@ fn cmd_script(args: &str) -> bool {
     true
 }
 
-/// Built-in ring-3 programs (flat binaries from src/user_progs).
-static PROGRAMS: &[(&str, &[u8])] = &[
-    ("hello", include_bytes!("user_progs/hello.bin")),
-    ("crash", include_bytes!("user_progs/crash.bin")),
-];
-
 fn cmd_run(args: &str) -> bool {
-    if args.is_empty() {
-        println!("Usage: run <program>");
+    let mut words = args.split_whitespace();
+    let Some(name) = words.next() else {
+        println!("Usage: run <program> [args...]");
         println!("Programs:");
-        for (name, _) in PROGRAMS {
+        for name in crate::programs::names() {
             println!("  {}", name);
         }
         return false;
-    }
+    };
 
-    let Some(&(_, bytes)) = PROGRAMS.iter().find(|(name, _)| *name == args) else {
-        println!("run: no such program '{}'", args);
+    let Some(bytes) = crate::programs::find(name) else {
+        println!("run: no such program '{}'", name);
         return false;
     };
 
-    let status = crate::usermode::launch_program(bytes);
-    if status != 0 {
-        println!("[{} exited with status {}]", args, status);
+    let argv: Vec<&str> = core::iter::once(name).chain(words).collect();
+    match crate::usermode::run(bytes, &argv) {
+        Ok(0) => true,
+        Ok(status) => {
+            println!("[{} exited with status {}]", name, status);
+            false
+        }
+        Err(e) => {
+            println!("run: {}: {}", name, e);
+            false
+        }
     }
-    status == 0
 }

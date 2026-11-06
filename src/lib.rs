@@ -109,6 +109,9 @@ pub mod filesystem;
 pub mod editor;
 pub mod usermode;
 pub mod syscall;
+pub mod elf;
+pub mod tty;
+pub mod programs;
 
 
 extern crate alloc;

@@ -1,0 +1,20 @@
+# PalladiumOS userland: `userlib` (syscall wrappers, I/O, program entry) plus
+# one binary per program in src/bin. The kernel's build.rs builds this
+# package and bundles every binary into the kernel image.
+[package]
+name = "userland"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "userlib"
+path = "src/lib.rs"
+test = false
+bench = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
