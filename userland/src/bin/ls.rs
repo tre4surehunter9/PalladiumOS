@@ -101,7 +101,6 @@ fn list(path: &str, opts: &Options) -> i32 {
             entries.push((entry.name.to_string(), entry.d_type == DT_DIR));
         }
     });
-    close(fd);
     entries.sort();
     for (name, is_dir) in &entries {
         if opts.long {
@@ -135,6 +134,7 @@ fn list(path: &str, opts: &Options) -> i32 {
             println!("{}", name);
         }
     }
+    close(fd); // closed only now: /proc/self/fd lists this one too
     match result {
         Ok(()) => 0,
         Err(e) => {

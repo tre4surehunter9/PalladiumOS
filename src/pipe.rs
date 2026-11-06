@@ -37,6 +37,12 @@ impl Pipe {
     }
 }
 
+/// A number identifying a pipe (shown as pipe:[N] in /proc/PID/fd).
+pub fn id(pipe: &Arc<Pipe>) -> u64 {
+    // Heap addresses are unique while the pipe exists; make them short.
+    (Arc::as_ptr(pipe) as u64 >> 4) & 0xFFFFF
+}
+
 /// Create a pipe, returning its read and write ends.
 pub fn new_pipe() -> (PipeReader, PipeWriter) {
     let pipe = Arc::new(Pipe {

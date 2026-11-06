@@ -78,7 +78,7 @@ const DT_LNK: u8 = 10;
 enum Kind {
     /// The console: reads come from the TTY, writes go to the screen.
     Console,
-    File { loc: Loc, readable: bool, writable: bool, append: bool },
+    File { loc: Loc, path: String, readable: bool, writable: bool, append: bool },
     Dir { loc: Loc, path: String },
     /// /dev/null: reads are end-of-file, writes are discarded.
     Null,
@@ -106,10 +106,32 @@ impl Drop for Description {
     }
 }
 
-type Handle = Arc<Mutex<Description>>;
+/// An open file: its description, plus a label that never changes (what
+/// /proc/PID/fd shows). The label is outside the lock so /proc can read it
+/// even while a syscall on this very file holds the lock.
+struct OpenFile {
+    label: String,
+    desc: Mutex<Description>,
+}
+
+impl OpenFile {
+    fn lock(&self) -> spin::MutexGuard<'_, Description> {
+        self.desc.lock()
+    }
+}
+
+type Handle = Arc<OpenFile>;
 
 fn handle(kind: Kind) -> Handle {
-    Arc::new(Mutex::new(Description { kind, offset: 0 }))
+    let label = match &kind {
+        Kind::Console => "/dev/tty".to_string(),
+        Kind::Null => "/dev/null".to_string(),
+        Kind::Zero => "/dev/zero".to_string(),
+        Kind::File { path, .. } | Kind::Dir { path, .. } => path.clone(),
+        Kind::PipeRead(r) => alloc::format!("pipe:[{}]", pipe::id(&r.pipe())),
+        Kind::PipeWrite(w) => alloc::format!("pipe:[{}]", pipe::id(&w.pipe())),
+    };
+    Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0 }) })
 }
 
 #[derive(Clone)]
@@ -143,6 +165,15 @@ impl Files {
     /// A table with nothing open (for exiting processes).
     pub fn empty() -> Self {
         Files { fds: vec![None; MAX_FDS], cwd: "/".to_string(), umask: 0o022 }
+    }
+
+    /// (fd, what it is) for each open fd: a path, /dev/tty, or pipe:[id].
+    pub fn describe(&self) -> Vec<(usize, String)> {
+        self.fds
+            .iter()
+            .enumerate()
+            .filter_map(|(fd, slot)| Some((fd, slot.as_ref()?.handle.label.clone())))
+            .collect()
     }
 
     /// Close the close-on-exec fds (done by execve).
@@ -290,7 +321,7 @@ fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
                     return -e;
                 }
             }
-            Kind::File { loc, readable, writable, append: flags & O_APPEND != 0 }
+            Kind::File { loc, path: abs.to_string(), readable, writable, append: flags & O_APPEND != 0 }
         }
     };
     if let Kind::File { loc, .. } | Kind::Dir { loc, .. } = &kind {
@@ -376,18 +407,19 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
             out[4..8].copy_from_slice(&1u32.to_le_bytes()); // c_oflag: OPOST
             out[8..12].copy_from_slice(&0o277u32.to_le_bytes()); // c_cflag: CS8|CREAD|B38400
             out[12..16].copy_from_slice(&mode.lflag.to_le_bytes()); // c_lflag
-            // c_cc: VINTR ^C, VERASE DEL, VKILL ^U, VEOF ^D, VMIN 1
+            // c_cc (from byte 17): VINTR ^C, VERASE DEL, VKILL ^U, VEOF ^D, VTIME, VMIN
             out[17] = 3;
             out[19] = 0x7f;
             out[20] = 0x15;
             out[21] = 4;
-            out[23] = 1;
+            out[22] = mode.vtime;
+            out[23] = mode.vmin;
             0
         }
         TCSETS | TCSETSW | TCSETSF => {
             let Some(input) = (unsafe { user_slice(arg, TERMIOS_SIZE) }) else { return -EFAULT };
             let word = |i: usize| u32::from_le_bytes(input[i..i + 4].try_into().unwrap());
-            crate::tty::set_mode(crate::tty::Mode { iflag: word(0), lflag: word(12) });
+            crate::tty::set_mode(crate::tty::Mode { iflag: word(0), lflag: word(12), vtime: input[22], vmin: input[23] });
             0
         }
         TIOCGPGRP => {

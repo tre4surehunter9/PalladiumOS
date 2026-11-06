@@ -131,12 +131,13 @@ fn mount_filesystems() {
         }
     };
     mounts::mount("/", root);
-    for dir in ["/bin", "/tmp", "/dev"] {
+    for dir in ["/bin", "/tmp", "/dev", "/proc"] {
         let _ = palladiumos::filesystem::make_dir(dir); // mount points
     }
     mounts::mount("/bin", Box::new(Fdfs::new()));
     mounts::mount("/tmp", Box::new(Fdfs::new()));
     mounts::mount("/dev", Box::new(DevFs));
+    mounts::mount("/proc", Box::new(palladiumos::procfs::ProcFs));
 }
 
 #[cfg(not(test))]

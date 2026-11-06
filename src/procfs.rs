@@ -1,0 +1,323 @@
+// Copyright (c) 2026 tre4surehunter9
+//! /proc: information about processes and the system, as files.
+//!
+//! Nothing is stored: each file's text is generated when it's read, so
+//! it's always current. Per process (like Linux):
+//!   /proc/PID/status   Name, State, Pid, PPid, memory, ...
+//!   /proc/PID/stat     the one-line format ps and top read
+//!   /proc/PID/cmdline  the arguments, separated by NUL bytes
+//!   /proc/PID/cwd      symlink to the working directory
+//!   /proc/PID/exe      symlink to the program
+//!   /proc/PID/fd/N     symlink to what fd N is (a path, /dev/tty, pipe:[id])
+//!   /proc/self         symlink to the reading process's directory
+//! System: meminfo, uptime, loadavg, mounts, version, cpuinfo.
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use crate::mounts::{FileSystem, FileType, FsResult, Ino, Meta};
+use crate::process::{self, ProcInfo};
+use crate::syscall::{EACCES, EINVAL, ENOENT, ENOTDIR, EPERM};
+
+const ROOT: Ino = 1;
+const SELF: Ino = 2;
+/// System files: (name, inode).
+const SYSTEM: &[(&str, Ino)] = &[("cpuinfo", 3), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("uptime", 7), ("version", 8)];
+
+// Files in /proc/PID: (name, number).
+const P_DIR: u64 = 0;
+const P_FILES: &[(&str, u64)] = &[("cmdline", 1), ("cwd", 2), ("exe", 3), ("fd", 4), ("stat", 5), ("status", 6)];
+const P_FD_DIR: u64 = 4;
+const P_FD_BASE: u64 = 0x100;
+
+fn pid_ino(pid: u64, file: u64) -> Ino {
+    ((pid + 1) << 16) | file
+}
+
+/// (pid, file number) of a per-process inode.
+fn split(ino: Ino) -> Option<(u64, u64)> {
+    let pid1 = ino >> 16;
+    if pid1 == 0 {
+        return None;
+    }
+    Some((pid1 - 1, ino & 0xFFFF))
+}
+
+fn proc_info(pid: u64) -> FsResult<ProcInfo> {
+    process::snapshot(Some(pid)).into_iter().find(|p| !p.kernel).ok_or(ENOENT)
+}
+
+pub struct ProcFs;
+
+impl ProcFs {
+    /// The text of a regular file.
+    fn content(&self, ino: Ino) -> FsResult<String> {
+        if let Some((pid, file)) = split(ino) {
+            let p = proc_info(pid)?;
+            return Ok(match file {
+                1 => {
+                    let mut s = p.argv.join("\0");
+                    s.push('\0');
+                    s
+                }
+                5 => stat_line(&p),
+                6 => status(&p),
+                _ => return Err(EINVAL),
+            });
+        }
+        Ok(match ino {
+            3 => cpuinfo(),
+            4 => {
+                let (total, ready) = process::counts();
+                // No load average yet: show 0, with running/total and the last pid.
+                format!("0.00 0.00 0.00 {}/{} {}\n", ready, total, process::last_pid())
+            }
+            5 => meminfo(),
+            6 => {
+                let mut s = String::new();
+                for (path, fs) in crate::mounts::list_unlocked() {
+                    let device = if fs == "ext2" { "/dev/hda" } else { fs };
+                    s.push_str(&format!("{} {} {} rw 0 0\n", device, path, fs));
+                }
+                s
+            }
+            7 => {
+                let ns = process::ticks() * process::TICK_NS;
+                format!("{}.{:02} 0.00\n", ns / 1_000_000_000, ns / 10_000_000 % 100)
+            }
+            8 => format!("PalladiumOS version 0.4.0 (rustc nightly) #1 x86_64\n"),
+            _ => return Err(EINVAL),
+        })
+    }
+}
+
+fn kib(pages: u64) -> u64 {
+    pages * 4
+}
+
+fn status(p: &ProcInfo) -> String {
+    let state = match p.state {
+        'R' => "R (running)",
+        'Z' => "Z (zombie)",
+        _ => "S (sleeping)",
+    };
+    format!(
+        "Name:\t{}\nState:\t{}\nPid:\t{}\nPPid:\t{}\nPGid:\t{}\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n\
+         FDSize:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} kB\nThreads:\t1\n",
+        p.name,
+        state,
+        p.pid,
+        p.ppid,
+        p.pgid,
+        p.fds.len(),
+        kib(p.pages),
+        kib(p.pages),
+        p.heap / 1024,
+    )
+}
+
+/// Linux's /proc/PID/stat line (the fields ps and top use are filled in;
+/// times are in clock ticks of 100 Hz, as Linux reports them).
+fn stat_line(p: &ProcInfo) -> String {
+    let to_hz = |ticks: u64| ticks * process::TICK_NS / 10_000_000;
+    format!(
+        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} 0 0 0 20 0 1 0 {} {} {} 0\n",
+        p.pid,
+        p.name,
+        p.state,
+        p.ppid,
+        p.pgid,
+        p.pgid, // session
+        to_hz(p.cpu_ticks), // utime
+        to_hz(p.start_tick), // starttime
+        p.pages * 4096, // vsize
+        p.pages, // rss (pages)
+    )
+}
+
+fn meminfo() -> String {
+    let (total, used) = {
+        let mut alloc = crate::memory::FRAME_ALLOCATOR.lock();
+        match alloc.as_mut() {
+            Some(a) => (a.total_frames() as u64, a.frames_in_use() as u64),
+            None => (0, 0),
+        }
+    };
+    let free = total.saturating_sub(used);
+    let heap = crate::allocator::HEAP_SIZE as u64 / 1024;
+    format!(
+        "MemTotal:       {:8} kB\nMemFree:        {:8} kB\nMemAvailable:   {:8} kB\n\
+         Buffers:        {:8} kB\nCached:         {:8} kB\nKernelHeap:     {:8} kB\n",
+        kib(total),
+        kib(free),
+        kib(free),
+        0,
+        0,
+        heap
+    )
+}
+
+fn cpuinfo() -> String {
+    use core::arch::x86_64::__cpuid;
+    let vendor = {
+        let r = __cpuid(0);
+        let mut v = Vec::new();
+        for reg in [r.ebx, r.edx, r.ecx] {
+            v.extend_from_slice(&reg.to_le_bytes());
+        }
+        String::from_utf8_lossy(&v).into_owned()
+    };
+    let model = {
+        if __cpuid(0x8000_0000).eax >= 0x8000_0004 {
+            let mut v = Vec::new();
+            for leaf in 0x8000_0002u32..=0x8000_0004 {
+                let r = __cpuid(leaf);
+                for reg in [r.eax, r.ebx, r.ecx, r.edx] {
+                    v.extend_from_slice(&reg.to_le_bytes());
+                }
+            }
+            String::from_utf8_lossy(&v).trim_matches(|c: char| c == '\0' || c == ' ').to_string()
+        } else {
+            "unknown".to_string()
+        }
+    };
+    format!("processor\t: 0\nvendor_id\t: {}\nmodel name\t: {}\ncpu cores\t: 1\n", vendor, model)
+}
+
+impl FileSystem for ProcFs {
+    fn name(&self) -> &'static str {
+        "proc"
+    }
+
+    fn root(&self) -> Ino {
+        ROOT
+    }
+
+    fn lookup(&mut self, dir: Ino, name: &str) -> FsResult<Ino> {
+        if dir == ROOT {
+            if name == "self" {
+                return Ok(SELF);
+            }
+            if let Some(&(_, ino)) = SYSTEM.iter().find(|(n, _)| *n == name) {
+                return Ok(ino);
+            }
+            let pid: u64 = name.parse().map_err(|_| ENOENT)?;
+            proc_info(pid)?;
+            return Ok(pid_ino(pid, P_DIR));
+        }
+        match split(dir) {
+            Some((pid, P_DIR)) => {
+                proc_info(pid)?;
+                P_FILES.iter().find(|(n, _)| *n == name).map(|&(_, f)| pid_ino(pid, f)).ok_or(ENOENT)
+            }
+            Some((pid, P_FD_DIR)) => {
+                let fd: usize = name.parse().map_err(|_| ENOENT)?;
+                let p = proc_info(pid)?;
+                p.fds.iter().find(|(n, _)| *n == fd).map(|_| pid_ino(pid, P_FD_BASE + fd as u64)).ok_or(ENOENT)
+            }
+            _ => Err(ENOTDIR),
+        }
+    }
+
+    fn meta(&mut self, ino: Ino) -> FsResult<Meta> {
+        let (kind, perm) = if ino == ROOT {
+            (FileType::Dir, 0o555)
+        } else if ino == SELF {
+            (FileType::Symlink, 0o777)
+        } else if SYSTEM.iter().any(|&(_, i)| i == ino) {
+            (FileType::File, 0o444)
+        } else {
+            let (pid, file) = split(ino).ok_or(ENOENT)?;
+            let p = proc_info(pid)?;
+            match file {
+                P_DIR | P_FD_DIR => (FileType::Dir, 0o555),
+                2 | 3 => (FileType::Symlink, 0o777),
+                f if f >= P_FD_BASE => {
+                    if !p.fds.iter().any(|(n, _)| *n as u64 == f - P_FD_BASE) {
+                        return Err(ENOENT);
+                    }
+                    (FileType::Symlink, 0o700)
+                }
+                _ => (FileType::File, 0o444),
+            }
+        };
+        let mtime = crate::rtc::now();
+        // Like Linux, files report size 0: read them to see the contents.
+        Ok(Meta { ino, kind, size: 0, perm, nlink: 1, mtime })
+    }
+
+    fn read(&mut self, ino: Ino, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
+        let text = self.content(ino)?;
+        let bytes = text.as_bytes();
+        let start = (offset as usize).min(bytes.len());
+        let n = buf.len().min(bytes.len() - start);
+        buf[..n].copy_from_slice(&bytes[start..start + n]);
+        Ok(n)
+    }
+
+    fn write(&mut self, _ino: Ino, _offset: u64, _data: &[u8]) -> FsResult<usize> {
+        Err(EACCES)
+    }
+
+    fn truncate(&mut self, _ino: Ino, _len: u64) -> FsResult<()> {
+        Err(EACCES)
+    }
+
+    fn readdir(&mut self, dir: Ino) -> FsResult<Vec<(String, Ino, FileType)>> {
+        if dir == ROOT {
+            let mut out: Vec<(String, Ino, FileType)> =
+                SYSTEM.iter().map(|&(n, i)| (n.to_string(), i, FileType::File)).collect();
+            out.push(("self".to_string(), SELF, FileType::Symlink));
+            for p in process::snapshot(None).into_iter().filter(|p| !p.kernel) {
+                out.push((p.pid.to_string(), pid_ino(p.pid, P_DIR), FileType::Dir));
+            }
+            return Ok(out);
+        }
+        match split(dir) {
+            Some((pid, P_DIR)) => {
+                proc_info(pid)?;
+                Ok(P_FILES
+                    .iter()
+                    .map(|&(n, f)| {
+                        let kind = match f {
+                            P_FD_DIR => FileType::Dir,
+                            2 | 3 => FileType::Symlink,
+                            _ => FileType::File,
+                        };
+                        (n.to_string(), pid_ino(pid, f), kind)
+                    })
+                    .collect())
+            }
+            Some((pid, P_FD_DIR)) => {
+                let p = proc_info(pid)?;
+                Ok(p.fds.iter().map(|(fd, _)| (fd.to_string(), pid_ino(pid, P_FD_BASE + *fd as u64), FileType::Symlink)).collect())
+            }
+            _ => Err(ENOTDIR),
+        }
+    }
+
+    fn readlink(&mut self, ino: Ino) -> FsResult<String> {
+        if ino == SELF {
+            return Ok(process::current_pid().to_string());
+        }
+        let (pid, file) = split(ino).ok_or(EINVAL)?;
+        let p = proc_info(pid)?;
+        match file {
+            2 => Ok(p.cwd),
+            3 => Ok(p.exe),
+            f if f >= P_FD_BASE => {
+                p.fds.into_iter().find(|(n, _)| *n as u64 == f - P_FD_BASE).map(|(_, what)| what).ok_or(ENOENT)
+            }
+            _ => Err(EINVAL),
+        }
+    }
+
+    fn create(&mut self, _dir: Ino, _name: &str, _kind: FileType, _perm: u32) -> FsResult<Ino> {
+        Err(EPERM)
+    }
+
+    fn remove(&mut self, _dir: Ino, _name: &str, _is_dir: bool) -> FsResult<()> {
+        Err(EPERM)
+    }
+}

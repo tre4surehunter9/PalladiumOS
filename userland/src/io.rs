@@ -155,3 +155,14 @@ pub fn count_option<'a>(args: &[&'a str], default: usize) -> Result<(usize, Vec<
     }
     Ok((count, rest))
 }
+
+/// The whole contents of a (small) file as text, or None.
+pub fn read_text(path: &str) -> Option<alloc::string::String> {
+    let fd = open(path, O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
+    let data = read_to_end(fd as i32);
+    close(fd as i32);
+    Some(alloc::string::String::from_utf8_lossy(&data.ok()?).into_owned())
+}

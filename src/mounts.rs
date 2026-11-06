@@ -116,6 +116,15 @@ struct Mount {
 }
 
 static MOUNTS: Mutex<Vec<Mount>> = Mutex::new(Vec::new());
+/// (path, filesystem name) of each mount, kept separately so code running
+/// inside a filesystem (like /proc/mounts) can read it without the
+/// MOUNTS lock, which is held during every filesystem call.
+static MOUNT_LIST: Mutex<Vec<(String, &'static str)>> = Mutex::new(Vec::new());
+
+fn update_list(mounts: &[Mount]) {
+    *MOUNT_LIST.lock() =
+        mounts.iter().filter(|m| m.path.starts_with('/')).map(|m| (m.path.clone(), m.fs.name())).collect();
+}
 
 /// Mount `fs` at `path` (an absolute, normalized path).
 pub fn mount(path: &str, fs: Box<dyn FileSystem>) {
@@ -127,13 +136,15 @@ pub fn mount(path: &str, fs: Box<dyn FileSystem>) {
 pub fn swap(path: &str, fs: Box<dyn FileSystem>) -> Option<Box<dyn FileSystem>> {
     ensure_root();
     let mut mounts = MOUNTS.lock();
-    match mounts.iter_mut().find(|m| m.path == path) {
+    let old = match mounts.iter_mut().find(|m| m.path == path) {
         Some(m) => Some(core::mem::replace(&mut m.fs, fs)),
         None => {
             mounts.push(Mount { path: path.to_string(), fs });
             None
         }
-    }
+    };
+    update_list(&mounts);
+    old
 }
 
 /// Remove the mount at `path` (not "/"). Its slot is kept but unused, so
@@ -145,13 +156,21 @@ pub fn unmount(path: &str) -> FsResult<Box<dyn FileSystem>> {
     let mut mounts = MOUNTS.lock();
     let m = mounts.iter_mut().find(|m| m.path == path).ok_or(EINVAL)?;
     m.path = alloc::format!("\0unmounted:{}", path); // never matches a path
-    Ok(core::mem::replace(&mut m.fs, Box::new(crate::fdfs::Fdfs::new())))
+    let old = core::mem::replace(&mut m.fs, Box::new(crate::fdfs::Fdfs::new()));
+    update_list(&mounts);
+    Ok(old)
 }
 
 /// (mount path, filesystem name) for each mount, like /proc/mounts.
 pub fn list() -> Vec<(String, &'static str)> {
     ensure_root();
-    MOUNTS.lock().iter().filter(|m| m.path.starts_with('/')).map(|m| (m.path.clone(), m.fs.name())).collect()
+    MOUNT_LIST.lock().clone()
+}
+
+/// The mount list without touching the MOUNTS lock (for /proc/mounts,
+/// which is generated while it's held).
+pub fn list_unlocked() -> Vec<(String, &'static str)> {
+    MOUNT_LIST.lock().clone()
 }
 
 /// If nothing is mounted at "/" yet, use an empty in-memory filesystem
@@ -160,6 +179,7 @@ fn ensure_root() {
     let mut mounts = MOUNTS.lock();
     if !mounts.iter().any(|m| m.path == "/") {
         mounts.push(Mount { path: "/".to_string(), fs: Box::new(crate::fdfs::Fdfs::new()) });
+        update_list(&mounts);
     }
 }
 

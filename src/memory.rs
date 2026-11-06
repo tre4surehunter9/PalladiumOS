@@ -117,6 +117,7 @@ pub struct BootInfoFrameAllocator {
     /// address of the next one in its first 8 bytes (an intrusive linked list).
     free_list: Option<u64>,
     free_count: usize,
+    total: usize,
 }
 
 impl BootInfoFrameAllocator {
@@ -127,12 +128,21 @@ impl BootInfoFrameAllocator {
             next: 0,
             free_list: None,
             free_count: 0,
+            total: 0,
         }
     }
 
     /// Number of frames handed out and not yet freed.
     pub fn frames_in_use(&self) -> usize {
         self.next - self.free_count
+    }
+
+    /// Number of usable frames in the machine (counted once, then cached).
+    pub fn total_frames(&mut self) -> usize {
+        if self.total == 0 {
+            self.total = self.usable_frames().count();
+        }
+        self.total
     }
 }
 
@@ -409,6 +419,16 @@ pub fn copy_address_space(src: PhysFrame, frames: &mut BootInfoFrameAllocator) -
             Err(e)
         }
     }
+}
+
+/// How many user pages are mapped in an address space.
+pub fn count_user_pages(p4: PhysFrame) -> u64 {
+    let mut n = 0;
+    let _ = for_each_user_page(p4, |_, _, _| {
+        n += 1;
+        Ok(())
+    });
+    n
 }
 
 /// Level-4 index of a virtual address.

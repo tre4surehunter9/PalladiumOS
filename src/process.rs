@@ -95,6 +95,15 @@ pub struct Process {
     ignored: u64,
     /// Timer tick to wake up at, while Sleeping.
     wake_at: u64,
+    /// The program's arguments and path (for /proc and ps).
+    pub argv: Vec<String>,
+    pub exe: String,
+    /// Timer tick when the process was created.
+    pub start_tick: u64,
+    /// CPU time used, in ticks (not counting the current run).
+    cpu_ticks: u64,
+    /// Tick when it last started running.
+    running_since: u64,
 }
 
 /// The brk heap starts here: level-4 slot 32, unused by the kernel.
@@ -168,6 +177,11 @@ pub fn init() {
         pending: 0,
         ignored: 0,
         wake_at: 0,
+        argv: vec!["kernel".to_string()],
+        exe: String::new(),
+        start_tick: 0,
+        cpu_ticks: 0,
+        running_since: 0,
     }));
     CURRENT.store(0, Ordering::SeqCst);
 }
@@ -192,10 +206,19 @@ pub fn list() -> Vec<(u64, u64, String, State)> {
     TABLE.lock().values().map(|p| (p.pid, p.ppid, p.name.clone(), p.state)).collect()
 }
 
-/// Is any process other than the current one ready to run?
+/// Is any process other than the current one ready to run, or about to
+/// be: a sleep that has ended, or a pending wake-up (e.g. a pipe got data)?
+/// Those only become Ready when the scheduler runs, so the timer must call
+/// it for them even while a busy process has the CPU.
 pub fn others_ready() -> bool {
     let cur = current_pid();
-    TABLE.lock().values().any(|p| p.pid != cur && p.state == State::Ready)
+    if !WAKE_QUEUE.lock().is_empty() {
+        return true;
+    }
+    let now = ticks();
+    TABLE.lock().values().any(|p| {
+        p.pid != cur && (p.state == State::Ready || (p.state == State::Sleeping && now >= p.wake_at))
+    })
 }
 
 /// Create a kernel stack for a new process whose first run "returns" to
@@ -237,6 +260,8 @@ fn basename(path: &str) -> String {
 /// is still runnable and nothing else is ready, return immediately; if it
 /// can't run (waiting or exited) and nothing is ready, halt until something is.
 pub fn schedule() {
+    // Did we halt while waiting? Then the wait isn't CPU time.
+    let mut idled = false;
     interrupts::without_interrupts(|| loop {
         let switch = {
             let mut table = TABLE.lock();
@@ -264,7 +289,15 @@ pub fn schedule() {
                     if let Some(p) = table.get_mut(&cur) {
                         if matches!(p.state, State::Running | State::Ready) {
                             p.state = State::Running;
+                            if idled {
+                                p.running_since = now;
+                            }
                             return;
+                        }
+                        if !idled {
+                            // About to halt: bill the time so far, not the wait.
+                            p.cpu_ticks += now.saturating_sub(p.running_since);
+                            idled = true;
                         }
                     }
                     None
@@ -274,10 +307,14 @@ pub fn schedule() {
                     if current.state == State::Running {
                         current.state = State::Ready;
                     }
+                    if !idled {
+                        current.cpu_ticks += now.saturating_sub(current.running_since);
+                    }
                     let save: *mut u64 = &mut current.kernel_rsp;
 
                     let target = table.get_mut(&next).unwrap();
                     target.state = State::Running;
+                    target.running_since = now;
                     if let Some(top) = target.kernel_stack_top() {
                         crate::gdt::set_kernel_stack(VirtAddr::new(top));
                     }
@@ -304,6 +341,23 @@ pub fn schedule() {
             }
         }
     })
+}
+
+/// Halt until the next interrupt (waiting for a key), without counting the
+/// wait as the current process's CPU time.
+pub fn idle_halt() {
+    {
+        let mut table = TABLE.lock();
+        if let Some(p) = table.get_mut(&current_pid()) {
+            p.cpu_ticks += ticks().saturating_sub(p.running_since);
+        }
+    }
+    interrupts::enable_and_hlt();
+    interrupts::disable();
+    let mut table = TABLE.lock();
+    if let Some(p) = table.get_mut(&current_pid()) {
+        p.running_since = ticks();
+    }
 }
 
 /// Let other ready processes run (sched_yield).
@@ -407,13 +461,13 @@ pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u64, ExitReason)>, i64> {
 /// fork(): duplicate the current process. Returns the child's pid to the
 /// parent; the child returns from the same syscall with 0.
 pub fn fork(frame: &SyscallFrame) -> i64 {
-    let (p4, files, name, ppid, brk, pgid, ignored) = {
+    let (p4, files, name, ppid, brk, pgid, ignored, argv, exe) = {
         let table = TABLE.lock();
         if table.len() >= MAX_PROCESSES {
             return -EAGAIN;
         }
         let cur = table.get(&current_pid()).unwrap();
-        (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid, cur.brk, cur.pgid, cur.ignored)
+        (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid, cur.brk, cur.pgid, cur.ignored, cur.argv.clone(), cur.exe.clone())
     };
 
     let child_p4 = {
@@ -442,6 +496,11 @@ pub fn fork(frame: &SyscallFrame) -> i64 {
         pending: 0,
         ignored,
         wake_at: 0,
+        argv,
+        exe,
+        start_tick: ticks(),
+        cpu_ticks: 0,
+        running_since: 0,
     };
     match add_process(child) {
         Ok(pid) => pid as i64,
@@ -564,6 +623,8 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
         let p = table.get_mut(&current_pid()).unwrap();
         p.files.close_on_exec();
         p.name = basename(&path);
+        p.argv = argv.clone();
+        p.exe = crate::filesystem::normalize(&p.files.cwd, &path);
         p.brk = HEAP_BASE; // the new program starts with an empty heap
         core::mem::replace(&mut p.p4, image.p4)
     };
@@ -605,6 +666,15 @@ pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> i64 {
 
 // ---- used by the kernel shell ----
 
+/// The kernel starts programs by name ("sh"): their path is /bin/NAME.
+fn program_path(name: &str) -> String {
+    if name.starts_with('/') {
+        name.to_string()
+    } else {
+        alloc::format!("/bin/{}", name)
+    }
+}
+
 /// Start a program as a child of the kernel, with the kernel shell's
 /// working directory. Returns its pid.
 pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static str> {
@@ -628,6 +698,11 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         pending: 0,
         ignored: 0,
         wake_at: 0,
+        argv: argv.iter().map(|a| a.to_string()).collect(),
+        exe: program_path(argv.first().copied().unwrap_or("")),
+        start_tick: ticks(),
+        cpu_ticks: 0,
+        running_since: 0,
     };
     add_process(process).map_err(|_| {
         let mut alloc = FRAME_ALLOCATOR.lock();
@@ -1026,4 +1101,78 @@ pub fn raise(sig: i32) {
     let mut table = TABLE.lock();
     let cur = current_pid();
     signal_locked(&mut table, cur, sig);
+}
+
+// ---- information for /proc ----
+
+/// A snapshot of one process, for /proc.
+pub struct ProcInfo {
+    pub pid: u64,
+    pub ppid: u64,
+    pub pgid: u64,
+    pub name: String,
+    pub argv: Vec<String>,
+    pub exe: String,
+    pub cwd: String,
+    /// 'R' running/ready, 'S' sleeping or waiting, 'Z' zombie.
+    pub state: char,
+    pub start_tick: u64,
+    pub cpu_ticks: u64,
+    /// Pages of user memory mapped.
+    pub pages: u64,
+    /// Bytes in the brk heap.
+    pub heap: u64,
+    /// (fd, description) of each open fd.
+    pub fds: Vec<(usize, String)>,
+    pub kernel: bool,
+}
+
+fn state_letter(s: State) -> char {
+    match s {
+        State::Running | State::Ready => 'R',
+        State::Waiting | State::Sleeping | State::Blocked(_) => 'S',
+        State::Zombie(_) => 'Z',
+    }
+}
+
+/// Information about every process (or just `only`).
+pub fn snapshot(only: Option<u64>) -> Vec<ProcInfo> {
+    let now = ticks();
+    let cur = current_pid();
+    let table = TABLE.lock();
+    table
+        .values()
+        .filter(|p| only.is_none_or(|o| o == p.pid))
+        .map(|p| {
+            let running = if p.pid == cur { now.saturating_sub(p.running_since) } else { 0 };
+            let zombie = matches!(p.state, State::Zombie(_));
+            ProcInfo {
+                pid: p.pid,
+                ppid: p.ppid,
+                pgid: p.pgid,
+                name: p.name.clone(),
+                argv: p.argv.clone(),
+                exe: p.exe.clone(),
+                cwd: p.files.cwd.clone(),
+                state: state_letter(p.state),
+                start_tick: p.start_tick,
+                cpu_ticks: p.cpu_ticks + running,
+                pages: if p.kernel_stack.is_some() && !zombie { memory::count_user_pages(p.p4) } else { 0 },
+                heap: p.brk.saturating_sub(HEAP_BASE),
+                fds: p.files.describe(),
+                kernel: p.kernel_stack.is_none(),
+            }
+        })
+        .collect()
+}
+
+/// (processes, ready to run) for /proc/loadavg.
+pub fn counts() -> (usize, usize) {
+    let table = TABLE.lock();
+    let ready = table.values().filter(|p| matches!(p.state, State::Running | State::Ready)).count();
+    (table.len(), ready)
+}
+
+pub fn last_pid() -> u64 {
+    NEXT_PID.load(Ordering::SeqCst).saturating_sub(1)
 }

@@ -117,6 +117,7 @@ pub use tty::*;
 pub mod signal;
 pub use signal::*;
 pub mod io;
+pub mod procinfo;
 
 pub const STDIN: i32 = 0;
 pub const STDOUT: i32 = 1;

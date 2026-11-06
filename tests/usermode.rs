@@ -35,6 +35,11 @@ fn main(boot_info: &'static BootInfo) -> ! {
     *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
     palladiumos::process::init();
     palladiumos::programs::install();
+    for dir in ["/proc", "/dev"] {
+        palladiumos::filesystem::make_dir(dir).unwrap();
+    }
+    palladiumos::mounts::mount("/proc", alloc::boxed::Box::new(palladiumos::procfs::ProcFs));
+    palladiumos::mounts::mount("/dev", alloc::boxed::Box::new(palladiumos::devfs::DevFs));
 
     test_main();
     palladiumos::hlt_loop();
@@ -1299,4 +1304,49 @@ fn sh_errexit_and_xtrace() {
     assert_eq!(file("/xt.txt"), "+ x=1\n+ echo hi 1\n");
     assert_eq!(file("/xt-out.txt"), "hi 1\n");
     assert_eq!(sh("set -q"), 2, "unknown option");
+}
+
+// ---- /proc and process tools ----
+
+#[test_case]
+fn procfs_files() {
+    assert_eq!(run(prog("test_procfs"), &["test_procfs", "all"]), Ok(0));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn terminal_read_timeout() {
+    assert_eq!(run(prog("test_procfs"), &["test_procfs", "timeout"]), Ok(0));
+}
+
+#[test_case]
+fn ps_free_mount_pgrep_pkill() {
+    let script = "sleep 30 & sleep 0.2; ps > /ps.txt; free > /free.txt; mount > /mount.txt; \
+                  pgrep -l sleep > /pgrep.txt; pkill -x sleep; wait; pgrep -x sleep; echo $? > /pg2.txt";
+    assert_eq!(sh(script), 0);
+    let ps = file("/ps.txt");
+    assert!(ps.starts_with("  PID  PPID S"), "{}", ps);
+    assert!(ps.contains("sleep 30") && ps.contains(" ps\n"), "{}", ps);
+    assert!(file("/free.txt").contains("Mem:"));
+    assert!(file("/mount.txt").contains("proc on /proc type proc"));
+    assert!(file("/pgrep.txt").contains(" sleep"));
+    assert_eq!(file("/pg2.txt"), "1\n", "no sleep left after pkill");
+    assert!(only_kernel_left());
+}
+
+#[test_case]
+fn cpu_time_is_counted() {
+    // A busy child gets CPU time; a sleeping one doesn't.
+    let script = "test_proc spin 1000000 & sleep 2 & sleep 1.5; ps > /cpu.txt; pkill -x test_proc; wait";
+    assert_eq!(sh(script), 0);
+    let ps = file("/cpu.txt");
+    let time_of = |cmd: &str| -> u64 {
+        let line = ps.lines().find(|l| l.ends_with(cmd)).unwrap_or_else(|| panic!("{} not in\n{}", cmd, ps));
+        let t = line.split_whitespace().nth(3).unwrap(); // M:SS
+        let (m, s) = t.split_once(':').unwrap();
+        m.parse::<u64>().unwrap() * 60 + s.parse::<u64>().unwrap()
+    };
+    assert_eq!(time_of("sleep 2"), 0, "a sleeping process uses no CPU:\n{}", ps);
+    assert!(time_of("test_proc spin 1000000") >= 1, "the busy one does:\n{}", ps);
+    assert!(only_kernel_left());
 }

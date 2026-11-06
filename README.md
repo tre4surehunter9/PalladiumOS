@@ -53,6 +53,10 @@ User programs run in ring 3 and are started with `run <name> [args...]` (`run` a
 * chmod - permissions, octal (`755`) or symbolic (`u+x,go-w`)
 * df / du - free disk space, and space used by files (`-h` for K/M/G, `du -s` totals)
 * stat - a file's type, size, inode, links, permissions and time
+* ps - list processes (PID, parent, state, CPU time, memory, command)
+* top - live process view, refreshed every second (`q` quits)
+* free - memory use (`-h` for M/G); mount - what's mounted where
+* pgrep / pkill - find or signal processes by name (`-l`, `-x`, `pkill -9 name`)
 * sync - writes cached data to the disk
 * grep - prints matching lines (`-i -v -n -c -q -F`; `.` `*` `^` `$` patterns)
 * wc - counts lines, words and bytes (`-l -w -c`)
@@ -177,8 +181,11 @@ The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh
 | `/bin` | memory | the bundled programs, refreshed every boot |
 | `/tmp` | memory | cleared on reboot |
 | `/dev` | devfs | `null`, `zero`, `tty`, `console` |
+| `/proc` | procfs | live process and system information (below) |
 
 The kernel has a small VFS layer: every filesystem implements one interface, and paths are resolved through the mount table. The ext2 driver reads and writes files (including indirect blocks), creates and removes files and directories, and frees a file deleted while open only when it's closed. Linux tools can check and read the disk: `e2fsck -f target/disk.img`, `debugfs -R "ls -l /" target/disk.img`. Run `sync` (or `poweroff`/`reboot`, which sync first) before closing QEMU.
+
+`/proc` works like Linux's: `/proc/PID/` has `status`, `stat`, `cmdline`, and symlinks `cwd`, `exe` and `fd/N` (what each open file is: a path, `/dev/tty` or `pipe:[...]`); `/proc/self` is the reading process. System files: `meminfo`, `uptime`, `loadavg`, `mounts`, `version`, `cpuinfo`. The contents are generated when read, so they're always current.
 
 The date comes from the PC's real-time clock, so file times and `date` are real.
 

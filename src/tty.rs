@@ -30,22 +30,34 @@ pub const ICRNL: u32 = 0o400;
 pub struct Mode {
     pub iflag: u32,
     pub lflag: u32,
+    /// Raw mode: a read returns once VMIN bytes are there; with VMIN 0 it
+    /// waits at most VTIME tenths of a second (0: doesn't wait at all).
+    pub vmin: u8,
+    pub vtime: u8,
 }
 
-pub const DEFAULT_MODE: Mode = Mode { iflag: ICRNL, lflag: ISIG | ICANON | ECHO };
+pub const DEFAULT_MODE: Mode = Mode { iflag: ICRNL, lflag: ISIG | ICANON | ECHO, vmin: 1, vtime: 0 };
 
 // Atomics, not a lock: the keyboard interrupt reads them (intercept_scancode).
 static IFLAG: AtomicU32 = AtomicU32::new(DEFAULT_MODE.iflag);
 static LFLAG: AtomicU32 = AtomicU32::new(DEFAULT_MODE.lflag);
+static VMIN_VTIME: AtomicU32 = AtomicU32::new(1);
 static CTRL_HELD: AtomicBool = AtomicBool::new(false);
 
 pub fn mode() -> Mode {
-    Mode { iflag: IFLAG.load(Ordering::SeqCst), lflag: LFLAG.load(Ordering::SeqCst) }
+    let mv = VMIN_VTIME.load(Ordering::SeqCst);
+    Mode {
+        iflag: IFLAG.load(Ordering::SeqCst),
+        lflag: LFLAG.load(Ordering::SeqCst),
+        vmin: mv as u8,
+        vtime: (mv >> 8) as u8,
+    }
 }
 
 pub fn set_mode(mode: Mode) {
     IFLAG.store(mode.iflag, Ordering::SeqCst);
     LFLAG.store(mode.lflag, Ordering::SeqCst);
+    VMIN_VTIME.store(mode.vmin as u32 | (mode.vtime as u32) << 8, Ordering::SeqCst);
 }
 
 /// Called by the keyboard interrupt for every scancode. Returns true if it
@@ -101,12 +113,17 @@ const MAX_LINE: usize = 1024;
 /// the CPU halts until the next interrupt (e.g. a key press).
 pub fn read(buf: &mut [u8]) -> i64 {
     use crate::vga_buffer::{draw_cursor, erase_cursor};
-    use x86_64::instructions::interrupts;
 
     if buf.is_empty() {
         return 0;
     }
     crate::task::keyboard::init_queue();
+    // Raw mode with VMIN 0: a timeout of VTIME tenths of a second.
+    let m = mode();
+    let timeout = (m.lflag & ICANON == 0 && m.vmin == 0).then(|| {
+        let ticks = (m.vtime as u64 * 100_000_000).div_ceil(crate::process::TICK_NS);
+        crate::process::ticks() + ticks
+    });
 
     loop {
         {
@@ -137,6 +154,12 @@ pub fn read(buf: &mut [u8]) -> i64 {
             }
         } // TTY lock released before waiting
 
+        if let Some(deadline) = timeout {
+            if crate::process::ticks() >= deadline {
+                return 0; // nothing typed in time
+            }
+        }
+
         if crate::process::signal_pending() {
             return -crate::syscall::EINTR;
         }
@@ -149,8 +172,7 @@ pub fn read(buf: &mut [u8]) -> i64 {
             draw_cursor();
             // sti; hlt is atomic with respect to interrupts, so a key pressed
             // between the check above and the hlt still wakes us up.
-            interrupts::enable_and_hlt();
-            interrupts::disable();
+            crate::process::idle_halt();
         }
     }
 }
