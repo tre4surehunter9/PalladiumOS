@@ -48,6 +48,11 @@ User programs run in ring 3 and are started with `run <name> [args...]` (`run` a
 * kill - sends a signal (`kill -9 PID`, `kill -l`)
 * uptime - time since boot
 * date - the date and time (`date +%s` for seconds since 1970)
+* mv / cp - move and copy files (`cp -r` for directories; `mv` works across filesystems)
+* ln - hard links, or symbolic links with `-s`; readlink shows where a link points
+* chmod - permissions, octal (`755`) or symbolic (`u+x,go-w`)
+* df / du - free disk space, and space used by files (`-h` for K/M/G, `du -s` totals)
+* stat - a file's type, size, inode, links, permissions and time
 * sync - writes cached data to the disk
 * grep - prints matching lines (`-i -v -n -c -q -F`; `.` `*` `^` `$` patterns)
 * wc - counts lines, words and bytes (`-l -w -c`)
@@ -92,6 +97,16 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 5 | fstat | yes |
 | 6 | lstat | yes (same as stat, no symlinks) |
 | 8 | lseek | yes |
+| 21 | access | yes |
+| 82 | rename | yes (also renameat, renameat2 without flags) |
+| 86 | link | yes (also linkat; not on in-memory filesystems) |
+| 88 | symlink | yes (also symlinkat) |
+| 89 | readlink | yes (also readlinkat) |
+| 90 | chmod | yes (also fchmod, fchmodat) |
+| 95 | umask | yes |
+| 137 | statfs | yes (also fstatfs) |
+| 258-263 | mkdirat, newfstatat, unlinkat | yes |
+| 280 | utimensat | modification time |
 | 22 | pipe | yes |
 | 12 | brk | yes (the heap behind `userlib`'s allocator) |
 | 13 | rt_sigaction | `SIG_DFL` and `SIG_IGN` only (no handlers yet) |
@@ -134,6 +149,8 @@ The scheduler is preemptive round-robin: the timer switches between processes ru
 Programs can start other programs with `fork` + `execve` and wait for them with `wait4` (`userlib::spawn` wraps this).
 The kernel shell is task 0: `run` starts a program as its child and waits for it (and anything it started) to finish.
 Orphaned processes are handed to the kernel, which reaps them. Up to 32 processes can exist at once.
+
+Paths follow symbolic links (up to 40 per lookup, then `ELOOP`). Files have permission bits (`chmod`, and `umask` for new files) and `execve` needs an execute bit; it also runs `#!` scripts. Every process runs as root for now, so read and write permissions aren't enforced yet (root bypasses them on Unix too).
 
 Open files work like POSIX: an fd refers to a shared open file description, so after `fork` or `dup` both fds share one file offset. Pipes hold 16 KiB; readers wait for data and get end-of-file when every writer has closed, writers wait for room and get SIGPIPE/`EPIPE` when no reader is left. `O_CLOEXEC` fds are closed by `execve`.
 
@@ -182,10 +199,12 @@ PalladiumOS boots into `/bin/sh`, a POSIX-style shell that runs in userland as a
 * Lists: `cmd1; cmd2`, `cmd1 && cmd2`, `cmd1 || cmd2`, background jobs with `cmd &`
 * Redirection: `> file`, `>> file`, `< file`, `2> file`, `2>&1`
 * Scripts: `sh script.sh args...`, `sh -c 'commands'`, `. file` / `source file`
+* Scripts can be run directly: `chmod +x script.sh; ./script.sh` (with a `#!/bin/sh` line, or without one)
+* Options: `sh -e` / `set -e` (stop at the first failing command), `sh -x` / `set -x` (print commands as they run)
 * Builtins: `cd`, `pwd`, `exit`, `export`, `unset`, `set`, `wait`, `jobs`, `kill` (understands `%1`), `.`, `source`, `help`, `true`, `false`, and `run`/`script` like the kernel shell
 * Keys: Up/Down for history, Left/Right/Home/End to edit the line, Tab completes commands and file names, Ctrl-C interrupts the running program (or clears the line), Ctrl-D exits, Ctrl-L clears the screen
 
-Not yet: wildcards, `if`/`while`/`for`, functions, `( subshells )`.
+Not yet: here-documents (`<<EOF`), aliases, `local`.
 
 ### Kernel Shell
 Typing `exit` in `sh` (or Ctrl-D) drops to the built-in kernel shell, which is kept as a fallback (background jobs are sent SIGHUP). Type `run sh` to go back. Kernel shell commands:

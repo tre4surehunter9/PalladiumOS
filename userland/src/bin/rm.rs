@@ -4,7 +4,7 @@
 #![no_std]
 #![no_main]
 
-use userlib::{close, eprintln, for_each_entry, open, rmdir, stat, strerror, unlink, ENOENT, O_DIRECTORY, O_RDONLY};
+use userlib::{close, eprintln, for_each_entry, lstat, open, rmdir, strerror, unlink, ENOENT, O_DIRECTORY, O_RDONLY};
 
 userlib::entry!(main);
 
@@ -12,7 +12,8 @@ const MAX_NAME: usize = 255;
 
 /// Remove `path` and everything under it.
 fn remove_tree(path: &str) -> isize {
-    let st = match stat(path) {
+    // lstat: a symlink is removed itself, never followed into.
+    let st = match lstat(path) {
         Ok(st) => st,
         Err(e) => return e,
     };

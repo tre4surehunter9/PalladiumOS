@@ -128,8 +128,8 @@ fn create_write_read_remove() {
     let mut fs = fresh();
     let (free_blocks, free_inodes) = fs.free_counts();
     let root = fs.root();
-    let f = fs.create(root, "new.txt", FileType::File).unwrap();
-    assert_eq!(fs.create(root, "new.txt", FileType::File), Err(EEXIST));
+    let f = fs.create(root, "new.txt", FileType::File, 0o644).unwrap();
+    assert_eq!(fs.create(root, "new.txt", FileType::File, 0o644), Err(EEXIST));
     assert_eq!(fs.write(f, 0, b"hello").unwrap(), 5);
     assert_eq!(fs.write(f, 5, b" world").unwrap(), 6);
     assert_eq!(read_all(&mut fs, f), b"hello world");
@@ -137,8 +137,8 @@ fn create_write_read_remove() {
     assert_eq!(read_all(&mut fs, f), b"Jello world");
     assert_eq!(fs.free_counts().1, free_inodes - 1);
 
-    let d = fs.create(root, "sub", FileType::Dir).unwrap();
-    let inner = fs.create(d, "inner", FileType::File).unwrap();
+    let d = fs.create(root, "sub", FileType::Dir, 0o755).unwrap();
+    let inner = fs.create(d, "inner", FileType::File, 0o644).unwrap();
     fs.write(inner, 0, b"x").unwrap();
     assert_eq!(fs.meta(d).unwrap().nlink, 2);
     assert_eq!(fs.remove(root, "sub", true), Err(ENOTEMPTY));
@@ -154,7 +154,7 @@ fn big_file_round_trip_and_free() {
     let mut fs = fresh();
     let before = fs.free_counts();
     let root = fs.root();
-    let f = fs.create(root, "big2", FileType::File).unwrap();
+    let f = fs.create(root, "big2", FileType::File, 0o644).unwrap();
     let data: Vec<u8> = (0..400 * 1024u32).map(|i| (i * 7 % 256) as u8).collect();
     let mut done = 0;
     while done < data.len() {
@@ -170,7 +170,7 @@ fn big_file_round_trip_and_free() {
 fn holes_and_truncate() {
     let mut fs = fresh();
     let root = fs.root();
-    let f = fs.create(root, "sparse", FileType::File).unwrap();
+    let f = fs.create(root, "sparse", FileType::File, 0o644).unwrap();
     fs.write(f, 100_000, b"end").unwrap();
     assert_eq!(fs.meta(f).unwrap().size, 100_003);
     let mut buf = vec![0xffu8; 100];
@@ -190,10 +190,10 @@ fn directories_grow_past_one_block() {
     let mut fs = fresh();
     let root = fs.root();
     let before = fs.free_counts();
-    let d = fs.create(root, "many", FileType::Dir).unwrap();
+    let d = fs.create(root, "many", FileType::Dir, 0o755).unwrap();
     for i in 0..300 {
         let name = format!("file-with-a-longish-name-{}", i);
-        let f = fs.create(d, &name, FileType::File).unwrap();
+        let f = fs.create(d, &name, FileType::File, 0o644).unwrap();
         fs.write(f, 0, name.as_bytes()).unwrap();
     }
     assert!(fs.meta(d).unwrap().size > 1024, "the directory needed more blocks");
@@ -208,7 +208,7 @@ fn directories_grow_past_one_block() {
     }
     assert_eq!(fs.readdir(d).unwrap().len(), 0);
     // entries can be reused after removal
-    fs.create(d, "again", FileType::File).unwrap();
+    fs.create(d, "again", FileType::File, 0o644).unwrap();
     fs.remove(d, "again", false).unwrap();
     fs.remove(root, "many", true).unwrap();
     assert_eq!(fs.free_counts(), before);
@@ -219,7 +219,7 @@ fn deleted_while_open_is_freed_on_close() {
     let mut fs = fresh();
     let root = fs.root();
     let before = fs.free_counts();
-    let f = fs.create(root, "open-file", FileType::File).unwrap();
+    let f = fs.create(root, "open-file", FileType::File, 0o644).unwrap();
     fs.write(f, 0, &[7u8; 5000]).unwrap();
     fs.open_inode(f);
     fs.remove(root, "open-file", false).unwrap();
@@ -235,7 +235,7 @@ fn filling_the_disk() {
     let mut fs = fresh();
     let root = fs.root();
     let before = fs.free_counts();
-    let f = fs.create(root, "filler", FileType::File).unwrap();
+    let f = fs.create(root, "filler", FileType::File, 0o644).unwrap();
     let chunk = [0x5au8; 8192];
     let mut offset = 0u64;
     let err = loop {
@@ -247,7 +247,7 @@ fn filling_the_disk() {
     };
     assert_eq!(err, 28, "ENOSPC");
     assert_eq!(fs.free_counts().0, 0);
-    assert!(fs.create(root, "x", FileType::Dir).is_err(), "no room for a directory block");
+    assert!(fs.create(root, "x", FileType::Dir, 0o755).is_err(), "no room for a directory block");
     fs.remove(root, "filler", false).unwrap();
     assert_eq!(fs.free_counts(), before);
 }
@@ -265,12 +265,15 @@ fn with_ext2_root(f: impl FnOnce()) {
     let old = mounts::swap("/", Box::new(fresh())).unwrap();
     filesystem::make_dir("/bin").unwrap();
     filesystem::make_dir("/dev").unwrap();
+    filesystem::make_dir("/tmp").unwrap();
     mounts::mount("/bin", Box::new(palladiumos::fdfs::Fdfs::new()));
+    mounts::mount("/tmp", Box::new(palladiumos::fdfs::Fdfs::new()));
     mounts::mount("/dev", Box::new(palladiumos::devfs::DevFs));
     programs::install();
     f();
     mounts::unmount("/bin").unwrap();
     mounts::unmount("/dev").unwrap();
+    mounts::unmount("/tmp").unwrap();
     mounts::swap("/", old);
 }
 
@@ -290,6 +293,7 @@ fn userland_test_programs_on_ext2() {
         assert_eq!(run("test_pipe", &["test_pipe", "all"]), 0, "shared offsets, cloexec");
         assert_eq!(run("test_misc", &["test_misc", "dup"]), 0);
         assert_eq!(run("test_proc", &["test_proc", "all"]), 0, "exec from /bin, files across fork");
+        assert_eq!(run("test_links", &["test_links"]), 0, "rename, links, symlinks, chmod on ext2");
     });
 }
 
@@ -357,7 +361,7 @@ fn ata_disk() {
     let root = fs.root();
     let f = match fs.lookup(root, "ata-test.txt") {
         Ok(f) => f,
-        Err(_) => fs.create(root, "ata-test.txt", FileType::File).unwrap(),
+        Err(_) => fs.create(root, "ata-test.txt", FileType::File, 0o644).unwrap(),
     };
     fs.truncate(f, 0).unwrap();
     fs.write(f, 0, b"written through ATA").unwrap();
@@ -370,4 +374,65 @@ fn real_time_clock() {
     let now = palladiumos::rtc::now();
     assert!(now > 1_577_836_800, "after 2020: {}", now); // 2020-01-01
     assert!(now < 4_102_444_800, "before 2100: {}", now);
+}
+
+// ---- links, symlinks, rename, chmod at the driver level ----
+
+#[test_case]
+fn ext2_links_and_rename() {
+    let mut fs = fresh();
+    let root = fs.root();
+    let before = fs.free_counts();
+    let f = fs.create(root, "f", FileType::File, 0o640).unwrap();
+    fs.write(f, 0, &[1u8; 3000]).unwrap();
+    assert_eq!(fs.meta(f).unwrap().perm, 0o640);
+    fs.link(root, "f2", f).unwrap();
+    assert_eq!(fs.meta(f).unwrap().nlink, 2);
+    fs.remove(root, "f", false).unwrap();
+    assert_eq!(fs.meta(f).unwrap().nlink, 1, "still linked as f2");
+    assert_eq!(read_all(&mut fs, f).len(), 3000);
+
+    let d = fs.create(root, "d", FileType::Dir, 0o755).unwrap();
+    let e = fs.create(root, "e", FileType::Dir, 0o755).unwrap();
+    let root_links = fs.meta(root).unwrap().nlink;
+    fs.rename(root, "d", e, "moved").unwrap();
+    assert_eq!(fs.lookup(e, "moved"), Ok(d));
+    assert_eq!(fs.meta(root).unwrap().nlink, root_links - 1, "d's .. no longer points at /");
+    assert_eq!(fs.meta(e).unwrap().nlink, 3, "e has its own .. plus moved's");
+    fs.rename(root, "f2", e, "file").unwrap();
+    assert_eq!(fs.lookup(root, "f2"), Err(ENOENT));
+
+    let s = fs.symlink(root, "short", "e/file").unwrap();
+    assert_eq!(fs.meta(s).unwrap().kind, FileType::Symlink);
+    assert_eq!(fs.readlink(s).unwrap(), "e/file");
+    let target: String = core::iter::repeat("x/").take(60).collect();
+    let l = fs.symlink(root, "long", &target).unwrap();
+    assert_eq!(fs.readlink(l).unwrap(), target, "a long target lives in a block");
+    fs.chmod(l, 0o777).unwrap();
+
+    // remove everything: the counts must come back exactly
+    fs.remove(root, "short", false).unwrap();
+    fs.remove(root, "long", false).unwrap();
+    fs.remove(e, "file", false).unwrap();
+    fs.remove(e, "moved", true).unwrap();
+    fs.remove(root, "e", true).unwrap();
+    // root_links was counted with d and e both in /: both are gone now
+    assert_eq!(fs.meta(root).unwrap().nlink, root_links - 2, "back to the original count");
+    assert_eq!(fs.free_counts(), before);
+}
+
+#[test_case]
+fn ext2_rename_replaces_and_frees() {
+    let mut fs = fresh();
+    let root = fs.root();
+    let before = fs.free_counts();
+    let a = fs.create(root, "a", FileType::File, 0o644).unwrap();
+    fs.write(a, 0, b"new").unwrap();
+    let b = fs.create(root, "b", FileType::File, 0o644).unwrap();
+    fs.write(b, 0, &[9u8; 20_000]).unwrap();
+    fs.rename(root, "a", root, "b").unwrap();
+    assert_eq!(fs.lookup(root, "b"), Ok(a));
+    assert_eq!(read_all(&mut fs, a), b"new");
+    fs.remove(root, "b", false).unwrap();
+    assert_eq!(fs.free_counts(), before, "the replaced file's blocks were freed");
 }

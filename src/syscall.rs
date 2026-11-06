@@ -50,6 +50,28 @@ pub const SYS_GETCWD: u64 = 79;
 pub const SYS_CHDIR: u64 = 80;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
+pub const SYS_RENAME: u64 = 82;
+pub const SYS_LINK: u64 = 86;
+pub const SYS_SYMLINK: u64 = 88;
+pub const SYS_READLINK: u64 = 89;
+pub const SYS_CHMOD: u64 = 90;
+pub const SYS_FCHMOD: u64 = 91;
+pub const SYS_UMASK: u64 = 95;
+pub const SYS_ACCESS: u64 = 21;
+pub const SYS_STATFS: u64 = 137;
+pub const SYS_FSTATFS: u64 = 138;
+pub const SYS_MKDIRAT: u64 = 258;
+pub const SYS_NEWFSTATAT: u64 = 262;
+pub const SYS_UNLINKAT: u64 = 263;
+pub const SYS_RENAMEAT: u64 = 264;
+pub const SYS_LINKAT: u64 = 265;
+pub const SYS_SYMLINKAT: u64 = 266;
+pub const SYS_READLINKAT: u64 = 267;
+pub const SYS_FCHMODAT: u64 = 268;
+pub const SYS_FACCESSAT: u64 = 269;
+pub const SYS_UTIMENSAT: u64 = 280;
+pub const SYS_RENAMEAT2: u64 = 316;
+pub const SYS_FACCESSAT2: u64 = 439;
 pub const SYS_UNLINK: u64 = 87;
 pub const SYS_SYNC: u64 = 162;
 pub const SYS_REBOOT: u64 = 169;
@@ -202,7 +224,8 @@ pub fn init_syscalls(idt: &mut InterruptDescriptorTable) {
 
 #[unsafe(no_mangle)]
 extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
-    let (a1, a2, a3) = (frame.rdi, frame.rsi, frame.rdx);
+    let (a1, a2, a3, a4, a5) = (frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8);
+    const FDCWD: u64 = -100i64 as u64;
 
     let ret: i64 = match frame.rax {
         SYS_READ => match unsafe { user_slice_mut(a2, a3) } {
@@ -213,12 +236,16 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
             Some(buf) => vfs::sys_write(a1, buf),
             None => -EFAULT,
         },
-        SYS_OPEN => vfs::sys_open(a1, a2),
-        SYS_OPENAT => vfs::sys_openat(a1, a2, a3),
+        SYS_OPEN => vfs::sys_open(a1, a2, a3),
+        SYS_OPENAT => vfs::sys_openat(a1, a2, a3, a4),
         SYS_CLOSE => vfs::sys_close(a1),
         SYS_LSEEK => vfs::sys_lseek(a1, a2, a3),
         SYS_STAT | SYS_LSTAT => match unsafe { user_slice_mut(a2, vfs::STAT_SIZE) } {
-            Some(buf) => vfs::sys_stat(a1, buf),
+            Some(buf) => vfs::sys_stat(a1, buf, frame.rax == SYS_STAT),
+            None => -EFAULT,
+        },
+        SYS_NEWFSTATAT => match unsafe { user_slice_mut(a3, vfs::STAT_SIZE) } {
+            Some(buf) => vfs::sys_fstatat(a1, a2, buf, a4),
             None => -EFAULT,
         },
         SYS_FSTAT => match unsafe { user_slice_mut(a2, vfs::STAT_SIZE) } {
@@ -234,7 +261,39 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
             None => -EFAULT,
         },
         SYS_CHDIR => vfs::sys_chdir(a1),
-        SYS_MKDIR => vfs::sys_mkdir(a1),
+        SYS_MKDIR => vfs::sys_mkdirat(FDCWD, a1, a2),
+        SYS_MKDIRAT => vfs::sys_mkdirat(a1, a2, a3),
+        SYS_UNLINKAT => vfs::sys_unlinkat(a1, a2, a3),
+        SYS_RENAME => vfs::sys_renameat(FDCWD, a1, FDCWD, a2, 0),
+        SYS_RENAMEAT => vfs::sys_renameat(a1, a2, a3, a4, 0),
+        SYS_RENAMEAT2 => vfs::sys_renameat(a1, a2, a3, a4, a5),
+        SYS_LINK => vfs::sys_linkat(FDCWD, a1, FDCWD, a2, 0),
+        SYS_LINKAT => vfs::sys_linkat(a1, a2, a3, a4, a5),
+        SYS_SYMLINK => vfs::sys_symlinkat(a1, FDCWD, a2),
+        SYS_SYMLINKAT => vfs::sys_symlinkat(a1, a2, a3),
+        SYS_READLINK => match unsafe { user_slice_mut(a2, a3) } {
+            Some(buf) => vfs::sys_readlinkat(FDCWD, a1, buf),
+            None => -EFAULT,
+        },
+        SYS_READLINKAT => match unsafe { user_slice_mut(a3, a4) } {
+            Some(buf) => vfs::sys_readlinkat(a1, a2, buf),
+            None => -EFAULT,
+        },
+        SYS_CHMOD => vfs::sys_fchmodat(FDCWD, a1, a2),
+        SYS_FCHMODAT => vfs::sys_fchmodat(a1, a2, a3),
+        SYS_FCHMOD => vfs::sys_fchmod(a1, a2),
+        SYS_ACCESS => vfs::sys_faccessat(FDCWD, a1, a2),
+        SYS_FACCESSAT | SYS_FACCESSAT2 => vfs::sys_faccessat(a1, a2, a3),
+        SYS_UMASK => vfs::sys_umask(a1),
+        SYS_STATFS => match unsafe { user_slice_mut(a2, vfs::STATFS_SIZE) } {
+            Some(buf) => vfs::sys_statfs(Some(a1), 0, buf),
+            None => -EFAULT,
+        },
+        SYS_FSTATFS => match unsafe { user_slice_mut(a2, vfs::STATFS_SIZE) } {
+            Some(buf) => vfs::sys_statfs(None, a1, buf),
+            None => -EFAULT,
+        },
+        SYS_UTIMENSAT => vfs::sys_utimensat(a1, a2, a3, a4),
         SYS_RMDIR => vfs::sys_remove(a1, true),
         SYS_UNLINK => vfs::sys_remove(a1, false),
         SYS_IOCTL => vfs::sys_ioctl(a1, a2, a3),

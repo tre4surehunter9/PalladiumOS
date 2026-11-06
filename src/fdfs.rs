@@ -39,6 +39,12 @@ impl Node {
 /// Node 0 is always the root directory.
 pub struct Fdfs {
     nodes: Vec<Node>,
+    /// Permission bits that differ from the default (0o644 / 0o755).
+    perms: alloc::collections::BTreeMap<usize, u32>,
+    /// Modification times (seconds since 1970).
+    mtimes: alloc::collections::BTreeMap<usize, u64>,
+    /// File nodes that are symlinks (their data is the target).
+    symlinks: alloc::collections::BTreeSet<usize>,
 }
 
 impl Fdfs {
@@ -48,7 +54,12 @@ impl Fdfs {
             name: "/".to_string(),
             children: Vec::new(),
         };
-        Fdfs { nodes: vec![root] }
+        Fdfs {
+            nodes: vec![root],
+            perms: Default::default(),
+            mtimes: Default::default(),
+            symlinks: Default::default(),
+        }
     }
 
     /// Resolve an absolute path like "/documents/hello.txt" to a node index.
@@ -327,8 +338,8 @@ fn split_path(path: &str) -> Result<(&str, &str), &'static str> {
 
 // ---- as a VFS filesystem (the in-memory one: /bin, /tmp, and / without a disk) ----
 
-use crate::mounts::{FileSystem, FileType, FsResult, Ino, Meta};
-use crate::syscall::{EEXIST, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY};
+use crate::mounts::{FileSystem, FileType, FsResult, FsStats, Ino, Meta};
+use crate::syscall::{EEXIST, EINVAL, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY};
 
 impl Fdfs {
     /// Create `name` in directory `dir`.
@@ -385,11 +396,15 @@ impl FileSystem for Fdfs {
     }
 
     fn meta(&mut self, ino: Ino) -> FsResult<Meta> {
-        let (kind, size, perm, nlink) = match self.nodes.get(ino as usize).ok_or(ENOENT)? {
+        let i = ino as usize;
+        let (kind, size, perm, nlink) = match self.nodes.get(i).ok_or(ENOENT)? {
+            Node::File { data, .. } if self.symlinks.contains(&i) => (FileType::Symlink, data.len() as u64, 0o777, 1),
             Node::File { data, .. } => (FileType::File, data.len() as u64, 0o644, 1),
             Node::Dir { .. } => (FileType::Dir, 0, 0o755, 2),
         };
-        Ok(Meta { ino, kind, size, perm, nlink, mtime: 0 })
+        let perm = self.perms.get(&i).copied().unwrap_or(perm);
+        let mtime = self.mtimes.get(&i).copied().unwrap_or(0);
+        Ok(Meta { ino, kind, size, perm, nlink, mtime })
     }
 
     fn read(&mut self, ino: Ino, offset: u64, buf: &mut [u8]) -> FsResult<usize> {
@@ -397,23 +412,103 @@ impl FileSystem for Fdfs {
     }
 
     fn write(&mut self, ino: Ino, offset: u64, data: &[u8]) -> FsResult<usize> {
-        self.write_at(ino as usize, offset as usize, data).map_err(|_| EISDIR)
+        let n = self.write_at(ino as usize, offset as usize, data).map_err(|_| EISDIR)?;
+        self.mtimes.insert(ino as usize, crate::rtc::now());
+        Ok(n)
     }
 
     fn truncate(&mut self, ino: Ino, len: u64) -> FsResult<()> {
-        Fdfs::truncate(self, ino as usize, len as usize).map_err(|_| EISDIR)
+        Fdfs::truncate(self, ino as usize, len as usize).map_err(|_| EISDIR)?;
+        self.mtimes.insert(ino as usize, crate::rtc::now());
+        Ok(())
     }
 
     fn readdir(&mut self, dir: Ino) -> FsResult<Vec<(String, Ino, FileType)>> {
         let entries = self.dir_entries(dir as usize).map_err(|_| ENOTDIR)?;
         Ok(entries
             .into_iter()
-            .map(|(name, idx, is_dir)| (name, idx as Ino, if is_dir { FileType::Dir } else { FileType::File }))
+            .map(|(name, idx, is_dir)| {
+                let kind = if is_dir {
+                    FileType::Dir
+                } else if self.symlinks.contains(&idx) {
+                    FileType::Symlink
+                } else {
+                    FileType::File
+                };
+                (name, idx as Ino, kind)
+            })
             .collect())
     }
 
-    fn create(&mut self, dir: Ino, name: &str, kind: FileType) -> FsResult<Ino> {
-        self.create_in(dir as usize, name, kind == FileType::Dir).map(|i| i as Ino)
+    fn create(&mut self, dir: Ino, name: &str, kind: FileType, perm: u32) -> FsResult<Ino> {
+        let idx = self.create_in(dir as usize, name, kind == FileType::Dir)?;
+        self.perms.insert(idx, perm & 0o7777);
+        self.mtimes.insert(idx, crate::rtc::now());
+        Ok(idx as Ino)
+    }
+
+    fn symlink(&mut self, dir: Ino, name: &str, target: &str) -> FsResult<Ino> {
+        let idx = self.create_in(dir as usize, name, false)?;
+        self.write_at(idx, 0, target.as_bytes()).map_err(|_| EISDIR)?;
+        self.symlinks.insert(idx);
+        self.mtimes.insert(idx, crate::rtc::now());
+        Ok(idx as Ino)
+    }
+
+    fn readlink(&mut self, ino: Ino) -> FsResult<String> {
+        let i = ino as usize;
+        match self.nodes.get(i) {
+            Some(Node::File { data, .. }) if self.symlinks.contains(&i) => Ok(String::from_utf8_lossy(data).into_owned()),
+            Some(_) => Err(EINVAL),
+            None => Err(ENOENT),
+        }
+    }
+
+    fn chmod(&mut self, ino: Ino, perm: u32) -> FsResult<()> {
+        if self.nodes.get(ino as usize).is_none() {
+            return Err(ENOENT);
+        }
+        self.perms.insert(ino as usize, perm & 0o7777);
+        Ok(())
+    }
+
+    fn set_mtime(&mut self, ino: Ino, mtime: u64) -> FsResult<()> {
+        self.mtimes.insert(ino as usize, mtime);
+        Ok(())
+    }
+
+    fn rename(&mut self, old_dir: Ino, old_name: &str, new_dir: Ino, new_name: &str) -> FsResult<()> {
+        let (old_dir, new_dir) = (old_dir as usize, new_dir as usize);
+        let src = self.find_child(old_dir, old_name).ok_or(ENOENT)?;
+        if let Some(existing) = self.find_child(new_dir, new_name) {
+            if existing == src {
+                return Ok(());
+            }
+            self.remove_in(new_dir, new_name)?; // ENOTEMPTY for a non-empty directory
+        }
+        if let Node::Dir { children, .. } = &mut self.nodes[old_dir] {
+            children.retain(|&c| c != src);
+        }
+        match &mut self.nodes[src] {
+            Node::File { name, .. } | Node::Dir { name, .. } => *name = new_name.to_string(),
+        }
+        if let Node::Dir { children, .. } = &mut self.nodes[new_dir] {
+            children.push(src);
+        }
+        Ok(())
+    }
+
+    fn statfs(&mut self) -> FsStats {
+        let used: u64 = self
+            .nodes
+            .iter()
+            .map(|n| match n {
+                Node::File { data, .. } => data.len().div_ceil(4096) as u64,
+                Node::Dir { .. } => 1,
+            })
+            .sum();
+        // Memory-backed: report the space as what's in use (no fixed size).
+        FsStats { block_size: 4096, blocks: used, free_blocks: 0, files: self.nodes.len() as u64, free_files: 0 }
     }
 
     fn remove(&mut self, dir: Ino, name: &str, _is_dir: bool) -> FsResult<()> {

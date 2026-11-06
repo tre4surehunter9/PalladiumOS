@@ -25,8 +25,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::block::{BlockDevice, SECTOR_SIZE};
-use crate::mounts::{FileSystem, FileType, FsResult, Ino, Meta};
-use crate::syscall::{EEXIST, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY};
+use crate::mounts::{FileSystem, FileType, FsResult, FsStats, Ino, Meta};
+use crate::syscall::{EEXIST, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EPERM};
 
 const EROFS: i64 = 30;
 const ENOSPC: i64 = 28;
@@ -42,10 +42,14 @@ const RO_COMPAT_LARGE_FILE: u32 = 0x0002;
 const S_IFMT: u16 = 0xF000;
 const S_IFDIR: u16 = 0x4000;
 const S_IFREG: u16 = 0x8000;
+const S_IFLNK: u16 = 0xA000;
+/// Symlink targets shorter than this live in the inode itself.
+const FAST_SYMLINK_MAX: usize = 60;
 const INDEX_FL: u32 = 0x1000;
 
 const FT_REG: u8 = 1;
 const FT_DIR: u8 = 2;
+const FT_SYMLINK: u8 = 7;
 
 const CACHE_BLOCKS: usize = 256;
 
@@ -83,6 +87,16 @@ impl Inode {
     }
     fn is_dir(&self) -> bool {
         self.mode() & S_IFMT == S_IFDIR
+    }
+    fn is_symlink(&self) -> bool {
+        self.mode() & S_IFMT == S_IFLNK
+    }
+    fn sectors(&self) -> u32 {
+        rd32(&self.raw, 28)
+    }
+    /// A symlink whose target is stored in the block pointers (no blocks).
+    fn is_fast_symlink(&self) -> bool {
+        self.is_symlink() && self.sectors() == 0
     }
     fn size(&self) -> u64 {
         let high = if self.mode() & S_IFMT == S_IFREG { rd32(&self.raw, 108) as u64 } else { 0 };
@@ -484,6 +498,13 @@ impl Ext2 {
     /// Free blocks from file block `from` on. Whole indirect trees are freed
     /// when the cut is at 0; otherwise just the data blocks past it.
     fn free_blocks_from(&mut self, inode: &mut Inode, from: u64) -> FsResult<()> {
+        if inode.is_fast_symlink() {
+            // The "block pointers" are the target text, not blocks.
+            if from == 0 {
+                inode.raw[40..100].fill(0);
+            }
+            return Ok(());
+        }
         let sectors = (self.block_size / SECTOR_SIZE) as i64;
         if from == 0 {
             for i in 0..15 {
@@ -575,7 +596,29 @@ impl Ext2 {
         if !self.filetype {
             return 0;
         }
-        if kind == FileType::Dir { FT_DIR } else { FT_REG }
+        match kind {
+            FileType::Dir => FT_DIR,
+            FileType::Symlink => FT_SYMLINK,
+            _ => FT_REG,
+        }
+    }
+
+    fn kind_of(inode: &Inode) -> FileType {
+        match inode.mode() & S_IFMT {
+            S_IFDIR => FileType::Dir,
+            S_IFLNK => FileType::Symlink,
+            _ => FileType::File,
+        }
+    }
+
+    /// Point a directory's ".." at `parent`.
+    fn set_dotdot(&mut self, dir_ino: Ino, parent: Ino) -> FsResult<()> {
+        let mut dir = self.inode(dir_ino)?;
+        let (_, _, _, fb, off) = self.entries(&mut dir)?.into_iter().find(|e| e.0 == "..").ok_or(EIO)?;
+        let phys = self.bmap(&mut dir, fb, false)?;
+        let mut data = self.read_block(phys as u64)?;
+        wr32(&mut data, off, parent as u32);
+        self.write_block(phys as u64, &data)
     }
 
     fn add_entry(&mut self, dir_ino: Ino, name: &str, ino: Ino, ftype: u8) -> FsResult<()> {
@@ -696,7 +739,7 @@ impl FileSystem for Ext2 {
 
     fn meta(&mut self, ino: Ino) -> FsResult<Meta> {
         let inode = self.inode(ino)?;
-        let kind = if inode.is_dir() { FileType::Dir } else { FileType::File };
+        let kind = Self::kind_of(&inode);
         Ok(Meta {
             ino,
             kind,
@@ -817,6 +860,7 @@ impl FileSystem for Ext2 {
             let kind = match ftype {
                 FT_DIR => FileType::Dir,
                 FT_REG => FileType::File,
+                FT_SYMLINK => FileType::Symlink,
                 _ => self.meta(ino).map(|m| m.kind).unwrap_or(FileType::File),
             };
             out.push((name, ino, kind));
@@ -824,7 +868,7 @@ impl FileSystem for Ext2 {
         Ok(out)
     }
 
-    fn create(&mut self, dir: Ino, name: &str, kind: FileType) -> FsResult<Ino> {
+    fn create(&mut self, dir: Ino, name: &str, kind: FileType, perm: u32) -> FsResult<Ino> {
         if self.read_only {
             return Err(EROFS);
         }
@@ -843,7 +887,7 @@ impl FileSystem for Ext2 {
         }
         let is_dir = kind == FileType::Dir;
         let ino = self.alloc_inode(is_dir)?;
-        match self.init_new_inode(dir, name, kind, ino) {
+        match self.init_new_inode(dir, name, kind, ino, perm & 0o7777, None) {
             Ok(()) => Ok(ino),
             Err(e) => {
                 // Out of space partway: give back what was allocated.
@@ -861,6 +905,134 @@ impl FileSystem for Ext2 {
 
     fn remove(&mut self, dir: Ino, name: &str, is_dir: bool) -> FsResult<()> {
         self.remove_impl(dir, name, is_dir)
+    }
+
+    fn symlink(&mut self, dir: Ino, name: &str, target: &str) -> FsResult<Ino> {
+        if self.read_only {
+            return Err(EROFS);
+        }
+        if target.len() >= self.block_size {
+            return Err(ENAMETOOLONG);
+        }
+        let mut parent = self.inode(dir)?;
+        if self.entries(&mut parent)?.iter().any(|e| e.0 == name) {
+            return Err(EEXIST);
+        }
+        let ino = self.alloc_inode(false)?;
+        match self.init_new_inode(dir, name, FileType::Symlink, ino, 0o777, Some(target)) {
+            Ok(()) => Ok(ino),
+            Err(e) => {
+                if let Ok(mut inode) = self.inode(ino) {
+                    let _ = self.free_blocks_from(&mut inode, 0);
+                    inode.set_links(0);
+                    let _ = self.write_inode(ino, &inode);
+                }
+                let _ = self.free_inode(ino, false);
+                Err(e)
+            }
+        }
+    }
+
+    fn readlink(&mut self, ino: Ino) -> FsResult<String> {
+        let mut inode = self.inode(ino)?;
+        if !inode.is_symlink() {
+            return Err(EINVAL);
+        }
+        let size = inode.size() as usize;
+        if inode.is_fast_symlink() {
+            return Ok(String::from_utf8_lossy(&inode.raw[40..40 + size.min(FAST_SYMLINK_MAX)]).into_owned());
+        }
+        let phys = self.bmap(&mut inode, 0, false)?;
+        let data = self.read_block(phys as u64)?;
+        Ok(String::from_utf8_lossy(&data[..size.min(self.block_size)]).into_owned())
+    }
+
+    fn link(&mut self, dir: Ino, name: &str, target: Ino) -> FsResult<()> {
+        if self.read_only {
+            return Err(EROFS);
+        }
+        let mut inode = self.inode(target)?;
+        if inode.is_dir() {
+            return Err(EPERM);
+        }
+        if inode.links() == u16::MAX {
+            return Err(31); // EMLINK
+        }
+        let mut parent = self.inode(dir)?;
+        if self.entries(&mut parent)?.iter().any(|e| e.0 == name) {
+            return Err(EEXIST);
+        }
+        let ft = self.file_type_byte(Self::kind_of(&inode));
+        self.add_entry(dir, name, target, ft)?;
+        let mut inode = self.inode(target)?;
+        inode.set_links(inode.links() + 1);
+        wr32(&mut inode.raw, 12, crate::rtc::now() as u32); // ctime
+        self.write_inode(target, &inode)
+    }
+
+    fn rename(&mut self, old_dir: Ino, old_name: &str, new_dir: Ino, new_name: &str) -> FsResult<()> {
+        if self.read_only {
+            return Err(EROFS);
+        }
+        if new_name.len() > 255 {
+            return Err(ENAMETOOLONG);
+        }
+        let src = self.lookup(old_dir, old_name)?;
+        let src_inode = self.inode(src)?;
+        let is_dir = src_inode.is_dir();
+        if let Ok(dst) = self.lookup(new_dir, new_name) {
+            if dst == src {
+                return Ok(());
+            }
+            let dst_is_dir = self.inode(dst)?.is_dir();
+            self.remove_impl(new_dir, new_name, dst_is_dir)?; // ENOTEMPTY if a non-empty dir
+        }
+        let ft = self.file_type_byte(Self::kind_of(&src_inode));
+        self.add_entry(new_dir, new_name, src, ft)?;
+        self.remove_entry(old_dir, old_name)?;
+        if is_dir && old_dir != new_dir {
+            self.set_dotdot(src, new_dir)?;
+            let mut old = self.inode(old_dir)?;
+            old.set_links(old.links().saturating_sub(1));
+            self.write_inode(old_dir, &old)?;
+            let mut new = self.inode(new_dir)?;
+            new.set_links(new.links() + 1);
+            self.write_inode(new_dir, &new)?;
+        }
+        let mut inode = self.inode(src)?;
+        wr32(&mut inode.raw, 12, crate::rtc::now() as u32); // ctime
+        self.write_inode(src, &inode)
+    }
+
+    fn chmod(&mut self, ino: Ino, perm: u32) -> FsResult<()> {
+        if self.read_only {
+            return Err(EROFS);
+        }
+        let mut inode = self.inode(ino)?;
+        let mode = (inode.mode() & S_IFMT) | (perm & 0o7777) as u16;
+        wr16(&mut inode.raw, 0, mode);
+        wr32(&mut inode.raw, 12, crate::rtc::now() as u32);
+        self.write_inode(ino, &inode)
+    }
+
+    fn set_mtime(&mut self, ino: Ino, mtime: u64) -> FsResult<()> {
+        if self.read_only {
+            return Err(EROFS);
+        }
+        let mut inode = self.inode(ino)?;
+        wr32(&mut inode.raw, 8, mtime as u32); // atime
+        wr32(&mut inode.raw, 16, mtime as u32); // mtime
+        self.write_inode(ino, &inode)
+    }
+
+    fn statfs(&mut self) -> FsStats {
+        FsStats {
+            block_size: self.block_size as u64,
+            blocks: self.blocks_count as u64,
+            free_blocks: rd32(&self.sb, 12) as u64,
+            files: rd32(&self.sb, 0) as u64,
+            free_files: rd32(&self.sb, 16) as u64,
+        }
     }
 
     fn open_inode(&mut self, ino: Ino) {
@@ -885,7 +1057,7 @@ impl FileSystem for Ext2 {
 
 impl Ext2 {
     /// Fill in a freshly allocated inode and link it into `dir`.
-    fn init_new_inode(&mut self, dir: Ino, name: &str, kind: FileType, ino: Ino) -> FsResult<()> {
+    fn init_new_inode(&mut self, dir: Ino, name: &str, kind: FileType, ino: Ino, perm: u32, target: Option<&str>) -> FsResult<()> {
         let is_dir = kind == FileType::Dir;
         let mut inode = Inode { raw: vec![0u8; self.inode_size] };
         if self.inode_size > 128 {
@@ -896,16 +1068,39 @@ impl Ext2 {
         let now = crate::rtc::now() as u32;
         wr32(&mut inode.raw, 8, now); // atime
         inode.touch();
-        if is_dir {
-            wr16(&mut inode.raw, 0, S_IFDIR | 0o755);
-            inode.set_links(2);
-        } else {
-            wr16(&mut inode.raw, 0, S_IFREG | 0o644);
-            inode.set_links(1);
+        let perm = perm as u16;
+        match kind {
+            FileType::Dir => {
+                wr16(&mut inode.raw, 0, S_IFDIR | perm);
+                inode.set_links(2);
+            }
+            FileType::Symlink => {
+                wr16(&mut inode.raw, 0, S_IFLNK | 0o777);
+                inode.set_links(1);
+                let t = target.unwrap_or("");
+                inode.set_size(t.len() as u64);
+                if t.len() < FAST_SYMLINK_MAX {
+                    inode.raw[40..40 + t.len()].copy_from_slice(t.as_bytes());
+                }
+            }
+            _ => {
+                wr16(&mut inode.raw, 0, S_IFREG | perm);
+                inode.set_links(1);
+            }
         }
         // Write the inode before anything can fail, so the cleanup in
         // create() sees (and frees) its blocks.
         self.write_inode(ino, &inode)?;
+        if let Some(t) = target.filter(|t| t.len() >= FAST_SYMLINK_MAX) {
+            // A long symlink target goes in a data block.
+            let block = self.alloc_block()?;
+            inode.set_block(0, block);
+            inode.add_sectors((self.block_size / SECTOR_SIZE) as i64);
+            self.write_inode(ino, &inode)?;
+            let mut data = vec![0u8; self.block_size];
+            data[..t.len()].copy_from_slice(t.as_bytes());
+            self.write_block(block as u64, &data)?;
+        }
         if is_dir {
             // The directory's first block: "." and "..".
             let block = self.alloc_block()?;

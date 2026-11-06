@@ -18,6 +18,7 @@ pub fn install() {
     for (name, bytes) in USER_PROGRAMS.iter().chain(FLAT_PROGRAMS) {
         let path = alloc::format!("/bin/{}", name);
         crate::filesystem::write_bytes(&path, bytes).expect("can't write /bin entry");
+        let _ = crate::filesystem::chmod(&path, 0o755); // executable
     }
 }
 

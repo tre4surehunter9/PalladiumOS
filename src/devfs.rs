@@ -61,7 +61,7 @@ impl FileSystem for DevFs {
         Ok(DEVICES.iter().enumerate().map(|(i, (n, d))| (n.to_string(), i as Ino + 2, FileType::CharDevice(*d))).collect())
     }
 
-    fn create(&mut self, _dir: Ino, _name: &str, _kind: FileType) -> FsResult<Ino> {
+    fn create(&mut self, _dir: Ino, _name: &str, _kind: FileType, _perm: u32) -> FsResult<Ino> {
         Err(EPERM)
     }
 

@@ -490,6 +490,50 @@ fn load_error_errno(e: &str) -> i64 {
     }
 }
 
+/// Read an executable for execve. A `#!` script runs its interpreter
+/// instead: `#!/bin/sh -x` in /s.sh with argv [s.sh, a] becomes
+/// /bin/sh with argv [/bin/sh, -x, /s.sh, a]. Returns (program path,
+/// ELF bytes, argv).
+fn load_executable(path: &str, argv: Vec<String>) -> Result<(String, Vec<u8>, Vec<String>), i64> {
+    let check = |path: &str| -> Result<Vec<u8>, i64> {
+        let abs = crate::filesystem::normalize(&with_current_files(|f| f.cwd.clone()), path);
+        let (_, meta) = crate::mounts::stat(&abs)?;
+        if meta.kind == crate::mounts::FileType::Dir || meta.perm & 0o111 == 0 {
+            return Err(EACCES); // not executable
+        }
+        vfs::read_whole_file(path)
+    };
+    let bytes = check(path)?;
+    if crate::elf::is_elf(&bytes) {
+        return Ok((path.to_string(), bytes, argv));
+    }
+    if !bytes.starts_with(b"#!") {
+        // Not an executable format: a text file must not be run as raw code.
+        // (Flat binaries can only be started by the kernel shell, for tests.)
+        return Err(ENOEXEC);
+    }
+    let line_end = bytes.iter().position(|&b| b == b'\n').unwrap_or(bytes.len()).min(256);
+    let line = core::str::from_utf8(&bytes[2..line_end]).map_err(|_| ENOEXEC)?.trim();
+    let (interp, arg) = match line.split_once(|c: char| c == ' ' || c == '\t') {
+        Some((i, a)) => (i, Some(a.trim())),
+        None => (line, None),
+    };
+    if interp.is_empty() {
+        return Err(ENOEXEC);
+    }
+    let interp_bytes = check(interp)?;
+    if !crate::elf::is_elf(&interp_bytes) {
+        return Err(ENOEXEC); // an interpreter that's a script itself isn't supported
+    }
+    let mut new_argv = vec![interp.to_string()];
+    if let Some(a) = arg.filter(|a| !a.is_empty()) {
+        new_argv.push(a.to_string());
+    }
+    new_argv.push(path.to_string());
+    new_argv.extend(argv.into_iter().skip(1));
+    Ok((interp.to_string(), interp_bytes, new_argv))
+}
+
 /// execve(path, argv, envp): replace the current program. On success it
 /// doesn't return: the syscall "returns" into the new program's entry point.
 pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 {
@@ -502,15 +546,10 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
         (Ok(a), Ok(e)) => (a, e),
         (Err(e), _) | (_, Err(e)) => return -e,
     };
-    let bytes = match vfs::read_whole_file(&path) {
-        Ok(b) => b,
+    let (path, bytes, argv) = match load_executable(&path, argv) {
+        Ok(found) => found,
         Err(e) => return -e,
     };
-    // Only real executables: a text file must not be run as raw code.
-    // (Flat binaries can only be started by the kernel shell, for tests.)
-    if !crate::elf::is_elf(&bytes) {
-        return -ENOEXEC;
-    }
 
     let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     let envp_refs: Vec<&str> = envp.iter().map(String::as_str).collect();

@@ -18,7 +18,8 @@
 //!   builtins: see BUILTINS (cd exit export read test [ break continue ...)
 //!   interactive line editing: arrows, Home/End, history (Up/Down), Tab
 //!   completion, Ctrl-A/E/U/K/L/C; incomplete commands continue with "> "
-//! Not yet: here-documents (<<), aliases, `local`, set -e/-x.
+//!   options: -e (exit on failure), -x (print commands), also via `set`
+//! Not yet: here-documents (<<), aliases, `local`.
 #![no_std]
 #![no_main]
 
@@ -111,7 +112,32 @@ pub fn read_line() -> Option<String> {
 }
 
 fn main(args: Args) -> i32 {
-    let argv: Vec<String> = args.map(String::from).collect();
+    let mut argv: Vec<String> = args.map(String::from).collect();
+
+    // Options before the script: -e, -x (also combined: -ex), as from a
+    // "#!/bin/sh -e" line.
+    let (mut errexit, mut xtrace) = (false, false);
+    while argv.len() > 1 && argv[1].len() > 1 && argv[1].starts_with('-') && argv[1] != "-c" && argv[1] != "--" {
+        for c in argv[1][1..].chars() {
+            match c {
+                'e' => errexit = true,
+                'x' => xtrace = true,
+                'u' | 'v' | 'f' | 'i' | 's' => {} // accepted, not implemented
+                _ => {
+                    eprintln!("sh: -{}: invalid option", c);
+                    return 2;
+                }
+            }
+        }
+        argv.remove(1);
+    }
+    if argv.get(1).map(String::as_str) == Some("--") {
+        argv.remove(1);
+    }
+    let setup = |sh: &mut Shell| {
+        sh.errexit = errexit;
+        sh.xtrace = xtrace;
+    };
 
     match argv.get(1).map(String::as_str) {
         Some("-c") => {
@@ -123,6 +149,7 @@ fn main(args: Args) -> i32 {
             let params = argv[3..].to_vec();
             let params = if params.is_empty() { vec![argv[0].clone()] } else { params };
             let mut sh = Shell::new(params, false);
+            setup(&mut sh);
             sh.run_text(script);
             sh.exit_status()
         }
@@ -135,6 +162,7 @@ fn main(args: Args) -> i32 {
                 }
             };
             let mut sh = Shell::new(argv[1..].to_vec(), false);
+            setup(&mut sh);
             sh.run_text(&text);
             sh.exit_status()
         }

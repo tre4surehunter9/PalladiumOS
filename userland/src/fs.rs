@@ -22,6 +22,7 @@ pub const SEEK_CUR: u64 = 1;
 pub const SEEK_END: u64 = 2;
 
 // errno values
+pub const EPERM: isize = 1;
 pub const ENOENT: isize = 2;
 pub const ESRCH: isize = 3;
 pub const EINTR: isize = 4;
@@ -36,6 +37,7 @@ pub const EACCES: isize = 13;
 pub const EFAULT: isize = 14;
 pub const EBUSY: isize = 16;
 pub const EEXIST: isize = 17;
+pub const EXDEV: isize = 18;
 pub const ENOTDIR: isize = 20;
 pub const EISDIR: isize = 21;
 pub const EINVAL: isize = 22;
@@ -48,10 +50,15 @@ pub const ERANGE: isize = 34;
 pub const ENAMETOOLONG: isize = 36;
 pub const ENOSYS: isize = 38;
 pub const ENOTEMPTY: isize = 39;
+pub const ELOOP: isize = 40;
+pub const EROFS: isize = 30;
+pub const ENOSPC: isize = 28;
+pub const EMLINK: isize = 31;
 
 /// Human-readable message for a (positive) errno, like strerror().
 pub fn strerror(errno: isize) -> &'static str {
     match errno {
+        EPERM => "Operation not permitted",
         ENOENT => "No such file or directory",
         ESRCH => "No such process",
         EINTR => "Interrupted system call",
@@ -78,6 +85,11 @@ pub fn strerror(errno: isize) -> &'static str {
         ENAMETOOLONG => "File name too long",
         ENOSYS => "Function not implemented",
         ENOTEMPTY => "Directory not empty",
+        EXDEV => "Invalid cross-device link",
+        ELOOP => "Too many levels of symbolic links",
+        EROFS => "Read-only file system",
+        ENOSPC => "No space left on device",
+        EMLINK => "Too many links",
         _ => "Unknown error",
     }
 }
@@ -100,7 +112,7 @@ pub fn open(path: &str, flags: u64) -> isize {
 }
 
 pub fn openat(dirfd: i32, path: &str, flags: u64) -> isize {
-    with_cstr(path, |p| unsafe { syscall3(sys::OPENAT, dirfd as i64 as u64, p, flags) })
+    with_cstr(path, |p| unsafe { sys::syscall4(sys::OPENAT, dirfd as i64 as u64, p, flags, 0o644) })
 }
 
 pub fn close(fd: i32) -> isize {
@@ -142,6 +154,8 @@ pub const S_IFMT: u32 = 0o170000;
 pub const S_IFCHR: u32 = 0o020000;
 pub const S_IFDIR: u32 = 0o040000;
 pub const S_IFREG: u32 = 0o100000;
+pub const S_IFLNK: u32 = 0o120000;
+pub const S_IFIFO: u32 = 0o010000;
 
 /// struct stat (Linux x86_64 layout).
 #[repr(C)]
@@ -174,12 +188,100 @@ impl Stat {
     pub fn is_file(&self) -> bool {
         self.st_mode & S_IFMT == S_IFREG
     }
+    pub fn is_symlink(&self) -> bool {
+        self.st_mode & S_IFMT == S_IFLNK
+    }
 }
 
 pub fn stat(path: &str) -> Result<Stat, isize> {
     let mut st = Stat::default();
     let r = with_cstr(path, |p| unsafe { syscall3(sys::STAT, p, &mut st as *mut Stat as u64, 0) });
     if r < 0 { Err(r) } else { Ok(st) }
+}
+
+/// lstat(2): like stat, but a symlink itself rather than its target.
+pub fn lstat(path: &str) -> Result<Stat, isize> {
+    let mut st = Stat::default();
+    let r = with_cstr(path, |p| unsafe { syscall3(sys::LSTAT, p, &mut st as *mut Stat as u64, 0) });
+    if r < 0 { Err(r) } else { Ok(st) }
+}
+
+/// Run `f` with two NUL-terminated paths.
+fn with_cstr2(a: &str, b: &str, f: impl FnOnce(u64, u64) -> i64) -> isize {
+    with_cstr(a, |pa| with_cstr(b, |pb| f(pa, pb)) as i64)
+}
+
+pub fn rename(old: &str, new: &str) -> isize {
+    with_cstr2(old, new, |a, b| unsafe { syscall3(sys::RENAME, a, b, 0) })
+}
+
+/// link(2): a hard link `new` to the file `existing`.
+pub fn link(existing: &str, new: &str) -> isize {
+    with_cstr2(existing, new, |a, b| unsafe { syscall3(sys::LINK, a, b, 0) })
+}
+
+/// symlink(2): `linkpath` becomes a symbolic link to `target`.
+pub fn symlink(target: &str, linkpath: &str) -> isize {
+    with_cstr2(target, linkpath, |a, b| unsafe { syscall3(sys::SYMLINK, a, b, 0) })
+}
+
+/// readlink(2) into `buf`; returns the target.
+pub fn readlink<'a>(path: &str, buf: &'a mut [u8]) -> Result<&'a str, isize> {
+    let (ptr, len) = (buf.as_mut_ptr() as u64, buf.len() as u64);
+    let r = with_cstr(path, |p| unsafe { syscall3(sys::READLINK, p, ptr, len) });
+    if r < 0 {
+        return Err(r);
+    }
+    core::str::from_utf8(&buf[..r as usize]).map_err(|_| -EINVAL)
+}
+
+pub fn chmod(path: &str, mode: u32) -> isize {
+    with_cstr(path, |p| unsafe { syscall3(sys::CHMOD, p, mode as u64, 0) })
+}
+
+pub const F_OK: u64 = 0;
+pub const X_OK: u64 = 1;
+pub const W_OK: u64 = 2;
+pub const R_OK: u64 = 4;
+
+/// access(2): 0 if allowed, else -errno.
+pub fn access(path: &str, mode: u64) -> isize {
+    with_cstr(path, |p| unsafe { syscall3(sys::ACCESS, p, mode, 0) })
+}
+
+/// umask(2): set the file creation mask; returns the old one.
+pub fn umask(mask: u32) -> u32 {
+    unsafe { syscall3(sys::UMASK, mask as u64, 0, 0) as u32 }
+}
+
+/// struct statfs (Linux x86_64).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct StatFs {
+    pub f_type: i64,
+    pub f_bsize: i64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_fsid: [i32; 2],
+    pub f_namelen: i64,
+    pub f_frsize: i64,
+    pub f_flags: i64,
+    _spare: [i64; 4],
+}
+
+pub fn statfs(path: &str) -> Result<StatFs, isize> {
+    let mut st = StatFs::default();
+    let r = with_cstr(path, |p| unsafe { syscall3(sys::STATFS, p, &mut st as *mut StatFs as u64, 0) });
+    if r < 0 { Err(r) } else { Ok(st) }
+}
+
+/// Set a file's modification time to now (like touch on an existing file).
+pub fn touch_now(path: &str) -> isize {
+    // utimensat(AT_FDCWD, path, NULL, 0)
+    with_cstr(path, |p| unsafe { sys::syscall4(sys::UTIMENSAT, -100i64 as u64, p, 0, 0) })
 }
 
 pub fn fstat(fd: i32) -> Result<Stat, isize> {
@@ -192,6 +294,7 @@ pub fn fstat(fd: i32) -> Result<Stat, isize> {
 
 pub const DT_DIR: u8 = 4;
 pub const DT_REG: u8 = 8;
+pub const DT_LNK: u8 = 10;
 
 pub fn getdents64(fd: i32, buf: &mut [u8]) -> isize {
     unsafe { syscall3(sys::GETDENTS64, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) as isize }

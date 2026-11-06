@@ -28,7 +28,17 @@ pub mod sys {
     pub const CLOSE: u64 = 3;
     pub const STAT: u64 = 4;
     pub const FSTAT: u64 = 5;
+    pub const LSTAT: u64 = 6;
     pub const LSEEK: u64 = 8;
+    pub const ACCESS: u64 = 21;
+    pub const RENAME: u64 = 82;
+    pub const LINK: u64 = 86;
+    pub const SYMLINK: u64 = 88;
+    pub const READLINK: u64 = 89;
+    pub const CHMOD: u64 = 90;
+    pub const UMASK: u64 = 95;
+    pub const STATFS: u64 = 137;
+    pub const UTIMENSAT: u64 = 280;
     pub const PIPE: u64 = 22;
     pub const BRK: u64 = 12;
     pub const RT_SIGACTION: u64 = 13;
@@ -59,6 +69,24 @@ pub mod sys {
     pub const GETDENTS64: u64 = 217;
     pub const OPENAT: u64 = 257;
     pub const PIPE2: u64 = 293;
+
+    /// Invoke syscall `n` with four arguments (the 4th goes in r10).
+    #[inline(always)]
+    pub unsafe fn syscall4(n: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+        let ret: i64;
+        unsafe {
+            asm!(
+                "int 0x80",
+                inlateout("rax") n as i64 => ret,
+                in("rdi") a1,
+                in("rsi") a2,
+                in("rdx") a3,
+                in("r10") a4,
+                options(nostack),
+            );
+        }
+        ret
+    }
 
     /// Invoke syscall `n` with up to three arguments. The kernel preserves
     /// every register except rax, which holds the result (-errno on failure).

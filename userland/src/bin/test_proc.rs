@@ -132,6 +132,10 @@ fn all() -> i32 {
     let fd = open("/not_a_program.txt", O_CREAT | O_WRONLY | O_TRUNC) as i32;
     write(fd, b"echo this is text, not machine code");
     close(fd);
+    // Not executable: refused before looking at the contents.
+    check!(execve("/not_a_program.txt", &["x"], &[]) == -EACCES);
+    // Executable but not a program (no ELF header, no #!): ENOEXEC.
+    chmod("/not_a_program.txt", 0o755);
     check!(execve("/not_a_program.txt", &["x"], &[]) == -ENOEXEC);
     unlink("/not_a_program.txt");
     // spawn of a missing program: the child exits 127

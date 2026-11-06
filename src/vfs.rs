@@ -40,6 +40,12 @@ pub const O_TRUNC: u64 = 0o1000;
 pub const O_APPEND: u64 = 0o2000;
 pub const O_DIRECTORY: u64 = 0o200000;
 pub const O_CLOEXEC: u64 = 0o2000000;
+pub const O_NOFOLLOW: u64 = 0o400000;
+
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+const AT_REMOVEDIR: u64 = 0x200;
+const AT_SYMLINK_FOLLOW: u64 = 0x400;
+const ELOOP: i64 = 40;
 
 pub const AT_FDCWD: i64 = -100;
 
@@ -61,11 +67,13 @@ const S_IFIFO: u32 = 0o010000;
 const S_IFCHR: u32 = 0o020000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
+const S_IFLNK: u32 = 0o120000;
 
 // d_type values for getdents64
 const DT_CHR: u8 = 2;
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
+const DT_LNK: u8 = 10;
 
 enum Kind {
     /// The console: reads come from the TTY, writes go to the screen.
@@ -117,6 +125,8 @@ struct Slot {
 pub struct Files {
     fds: Vec<Option<Slot>>,
     pub cwd: String,
+    /// File creation mask: these permission bits are removed from new files.
+    pub umask: u32,
 }
 
 impl Files {
@@ -127,12 +137,12 @@ impl Files {
         for slot in &mut fds[..3] {
             *slot = Some(Slot { handle: console.clone(), cloexec: false });
         }
-        Files { fds, cwd: cwd.to_string() }
+        Files { fds, cwd: cwd.to_string(), umask: 0o022 }
     }
 
     /// A table with nothing open (for exiting processes).
     pub fn empty() -> Self {
-        Files { fds: vec![None; MAX_FDS], cwd: "/".to_string() }
+        Files { fds: vec![None; MAX_FDS], cwd: "/".to_string(), umask: 0o022 }
     }
 
     /// Close the close-on-exec fds (done by execve).
@@ -229,7 +239,7 @@ fn alloc_fd(p: &mut Files, handle: Handle, cloexec: bool) -> Result<usize, i64> 
     alloc_fd_from(p, handle, cloexec, 0)
 }
 
-fn open_path(abs: &str, flags: u64) -> i64 {
+fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
     let access = flags & O_ACCMODE;
     let readable = access == O_RDONLY || access == O_RDWR;
     let writable = access == O_WRONLY || access == O_RDWR;
@@ -237,7 +247,9 @@ fn open_path(abs: &str, flags: u64) -> i64 {
         return -EINVAL;
     }
 
-    let (loc, meta) = match mounts::stat(abs) {
+    let looked_up = if flags & O_NOFOLLOW != 0 { mounts::lstat(abs) } else { mounts::stat(abs) };
+    let (loc, meta) = match looked_up {
+        Ok((_, meta)) if meta.kind == FileType::Symlink => return -ELOOP, // O_NOFOLLOW
         Ok(found) => {
             if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
                 return -EEXIST;
@@ -245,7 +257,8 @@ fn open_path(abs: &str, flags: u64) -> i64 {
             found
         }
         Err(ENOENT) if flags & O_CREAT != 0 => {
-            let created = mounts::create(abs, FileType::File)
+            let perm = mode as u32 & 0o7777 & !with_process(|p| p.umask);
+            let created = mounts::create(abs, FileType::File, perm)
                 .and_then(|loc| Ok((loc, mounts::with_fs(loc.mount, |fs| fs.meta(loc.ino))?)));
             match created {
                 Ok(found) => found,
@@ -267,6 +280,7 @@ fn open_path(abs: &str, flags: u64) -> i64 {
             Device::Zero => Kind::Zero,
             Device::Tty => Kind::Console,
         },
+        FileType::Symlink => return -ELOOP, // a loop of symlinks
         FileType::File => {
             if flags & O_DIRECTORY != 0 {
                 return -ENOTDIR;
@@ -293,28 +307,34 @@ fn open_path(abs: &str, flags: u64) -> i64 {
 // ---- syscalls ----
 
 /// open(path, flags, mode)
-pub fn sys_open(path: u64, flags: u64) -> i64 {
+pub fn sys_open(path: u64, flags: u64, mode: u64) -> i64 {
     match user_path(path) {
-        Ok(path) => open_path(&absolute(&path), flags),
+        Ok(path) => open_path(&absolute(&path), flags, mode),
         Err(e) => -e,
     }
 }
 
-/// openat(dirfd, path, flags, mode): relative paths resolve against dirfd.
-pub fn sys_openat(dirfd: u64, path: u64, flags: u64) -> i64 {
-    let path = match user_path(path) {
-        Ok(p) => p,
-        Err(e) => return -e,
-    };
-    if path.starts_with('/') || dirfd as i64 == AT_FDCWD {
-        return open_path(&absolute(&path), flags);
+/// The absolute path for a `*at` syscall: `path` relative to the directory
+/// `dirfd` (or the working directory for AT_FDCWD).
+fn at_path(dirfd: u64, path: &str) -> Result<String, i64> {
+    if path.starts_with('/') || dirfd as i64 as i32 as i64 == AT_FDCWD {
+        return Ok(absolute(path));
     }
     let base = get(dirfd).and_then(|h| match &h.lock().kind {
         Kind::Dir { path, .. } => Ok(path.clone()),
         _ => Err(ENOTDIR),
-    });
-    match base {
-        Ok(base) => open_path(&filesystem::normalize(&base, &path), flags),
+    })?;
+    Ok(filesystem::normalize(&base, path))
+}
+
+fn user_at_path(dirfd: u64, path: u64) -> Result<String, i64> {
+    at_path(dirfd, &user_path(path)?)
+}
+
+/// openat(dirfd, path, flags, mode)
+pub fn sys_openat(dirfd: u64, path: u64, flags: u64, mode: u64) -> i64 {
+    match user_at_path(dirfd, path) {
+        Ok(abs) => open_path(&abs, flags, mode),
         Err(e) => -e,
     }
 }
@@ -660,6 +680,7 @@ fn stat_loc(loc: Loc, out: &mut [u8]) -> i64 {
     let kind_bits = match meta.kind {
         FileType::File => S_IFREG,
         FileType::Dir => S_IFDIR,
+        FileType::Symlink => S_IFLNK,
         FileType::CharDevice(_) => S_IFCHR,
     };
     fill_stat(out, loc.mount as u64 + 1, meta.ino, kind_bits | meta.perm, meta.nlink as u64, meta.size, meta.mtime);
@@ -686,14 +707,28 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
     }
 }
 
-/// stat(path, statbuf)
-pub fn sys_stat(path: u64, out: &mut [u8]) -> i64 {
+/// stat(path, statbuf) and lstat (`follow` false: a symlink itself).
+pub fn sys_stat(path: u64, out: &mut [u8], follow: bool) -> i64 {
     let abs = match user_path(path) {
         Ok(p) => absolute(&p),
         Err(e) => return -e,
     };
-    match mounts::resolve(&abs) {
-        Ok(loc) => stat_loc(loc, out),
+    let found = if follow { mounts::stat(&abs) } else { mounts::lstat(&abs) };
+    match found {
+        Ok((loc, _)) => stat_loc(loc, out),
+        Err(e) => -e,
+    }
+}
+
+/// newfstatat(dirfd, path, statbuf, flags)
+pub fn sys_fstatat(dirfd: u64, path: u64, out: &mut [u8], flags: u64) -> i64 {
+    let abs = match user_at_path(dirfd, path) {
+        Ok(p) => p,
+        Err(e) => return -e,
+    };
+    let found = if flags & AT_SYMLINK_NOFOLLOW != 0 { mounts::lstat(&abs) } else { mounts::stat(&abs) };
+    match found {
+        Ok((loc, _)) => stat_loc(loc, out),
         Err(e) => -e,
     }
 }
@@ -718,6 +753,7 @@ pub fn sys_getdents64(fd: u64, out: &mut [u8]) -> i64 {
             let t = match kind {
                 FileType::Dir => DT_DIR,
                 FileType::File => DT_REG,
+                FileType::Symlink => DT_LNK,
                 FileType::CharDevice(_) => DT_CHR,
             };
             (name, ino, t)
@@ -778,13 +814,14 @@ pub fn sys_chdir(path: u64) -> i64 {
     }
 }
 
-/// mkdir(path, mode)
-pub fn sys_mkdir(path: u64) -> i64 {
-    let abs = match user_path(path) {
-        Ok(p) => absolute(&p),
+/// mkdir(path, mode) / mkdirat(dirfd, path, mode)
+pub fn sys_mkdirat(dirfd: u64, path: u64, mode: u64) -> i64 {
+    let abs = match user_at_path(dirfd, path) {
+        Ok(p) => p,
         Err(e) => return -e,
     };
-    match mounts::create(&abs, FileType::Dir) {
+    let perm = mode as u32 & 0o7777 & !with_process(|p| p.umask);
+    match mounts::create(&abs, FileType::Dir, perm) {
         Ok(_) => 0,
         Err(e) => -e,
     }
@@ -792,13 +829,236 @@ pub fn sys_mkdir(path: u64) -> i64 {
 
 /// unlink(path) for files, rmdir(path) for directories.
 pub fn sys_remove(path: u64, want_dir: bool) -> i64 {
-    let abs = match user_path(path) {
-        Ok(p) => absolute(&p),
+    sys_unlinkat(AT_FDCWD as u64, path, if want_dir { AT_REMOVEDIR } else { 0 })
+}
+
+/// unlinkat(dirfd, path, flags): AT_REMOVEDIR means rmdir.
+pub fn sys_unlinkat(dirfd: u64, path: u64, flags: u64) -> i64 {
+    let abs = match user_at_path(dirfd, path) {
+        Ok(p) => p,
         Err(e) => return -e,
     };
-    match mounts::remove(&abs, want_dir) {
+    match mounts::remove(&abs, flags & AT_REMOVEDIR != 0) {
         Ok(()) => 0,
         Err(e) => -e,
+    }
+}
+
+/// renameat(olddirfd, old, newdirfd, new) (rename and renameat2 too)
+pub fn sys_renameat(olddirfd: u64, old: u64, newdirfd: u64, new: u64, flags: u64) -> i64 {
+    if flags != 0 {
+        return -EINVAL; // RENAME_NOREPLACE etc. aren't supported
+    }
+    let (old, new) = match (user_at_path(olddirfd, old), user_at_path(newdirfd, new)) {
+        (Ok(o), Ok(n)) => (o, n),
+        (Err(e), _) | (_, Err(e)) => return -e,
+    };
+    match mounts::rename(&old, &new) {
+        Ok(()) => 0,
+        Err(e) => -e,
+    }
+}
+
+/// linkat(olddirfd, old, newdirfd, new, flags) (and link)
+pub fn sys_linkat(olddirfd: u64, old: u64, newdirfd: u64, new: u64, flags: u64) -> i64 {
+    let (mut old, new) = match (user_at_path(olddirfd, old), user_at_path(newdirfd, new)) {
+        (Ok(o), Ok(n)) => (o, n),
+        (Err(e), _) | (_, Err(e)) => return -e,
+    };
+    if flags & AT_SYMLINK_FOLLOW != 0 {
+        match mounts::resolve_full(&old, true) {
+            Ok((_, _, real)) => old = real,
+            Err(e) => return -e,
+        }
+    }
+    match mounts::link(&old, &new) {
+        Ok(()) => 0,
+        Err(e) => -e,
+    }
+}
+
+/// symlinkat(target, newdirfd, linkpath) (and symlink)
+pub fn sys_symlinkat(target: u64, newdirfd: u64, linkpath: u64) -> i64 {
+    let target = match user_cstr(target) {
+        Ok(t) => t,
+        Err(e) => return -e,
+    };
+    let abs = match user_at_path(newdirfd, linkpath) {
+        Ok(p) => p,
+        Err(e) => return -e,
+    };
+    match mounts::symlink(&target, &abs) {
+        Ok(()) => 0,
+        Err(e) => -e,
+    }
+}
+
+/// readlinkat(dirfd, path, buf, size) (and readlink): the target, not
+/// NUL-terminated, cut to fit.
+pub fn sys_readlinkat(dirfd: u64, path: u64, out: &mut [u8]) -> i64 {
+    let abs = match user_at_path(dirfd, path) {
+        Ok(p) => p,
+        Err(e) => return -e,
+    };
+    let (loc, meta) = match mounts::lstat(&abs) {
+        Ok(found) => found,
+        Err(e) => return -e,
+    };
+    if meta.kind != FileType::Symlink {
+        return -EINVAL;
+    }
+    match mounts::with_fs(loc.mount, |fs| fs.readlink(loc.ino)) {
+        Ok(target) => {
+            let n = target.len().min(out.len());
+            out[..n].copy_from_slice(&target.as_bytes()[..n]);
+            n as i64
+        }
+        Err(e) => -e,
+    }
+}
+
+/// fchmodat(dirfd, path, mode) (and chmod)
+pub fn sys_fchmodat(dirfd: u64, path: u64, mode: u64) -> i64 {
+    let abs = match user_at_path(dirfd, path) {
+        Ok(p) => p,
+        Err(e) => return -e,
+    };
+    match mounts::stat(&abs) {
+        Ok((loc, _)) => match mounts::with_fs(loc.mount, |fs| fs.chmod(loc.ino, mode as u32 & 0o7777)) {
+            Ok(()) => 0,
+            Err(e) => -e,
+        },
+        Err(e) => -e,
+    }
+}
+
+/// The file an fd refers to (for fchmod, futimens, fstatfs).
+fn fd_loc(fd: u64) -> Result<Option<Loc>, i64> {
+    let h = get(fd)?;
+    let desc = h.lock();
+    Ok(match &desc.kind {
+        Kind::File { loc, .. } | Kind::Dir { loc, .. } => Some(*loc),
+        _ => None,
+    })
+}
+
+/// fchmod(fd, mode)
+pub fn sys_fchmod(fd: u64, mode: u64) -> i64 {
+    match fd_loc(fd) {
+        Ok(Some(loc)) => match mounts::with_fs(loc.mount, |fs| fs.chmod(loc.ino, mode as u32 & 0o7777)) {
+            Ok(()) => 0,
+            Err(e) => -e,
+        },
+        Ok(None) => -EINVAL,
+        Err(e) => -e,
+    }
+}
+
+/// faccessat(dirfd, path, mode) (and access). Every process is root for
+/// now, so reading and writing are always allowed; executing needs an
+/// execute bit (as for root on Linux).
+pub fn sys_faccessat(dirfd: u64, path: u64, mode: u64) -> i64 {
+    const X_OK: u64 = 1;
+    if mode & !7 != 0 {
+        return -EINVAL;
+    }
+    let abs = match user_at_path(dirfd, path) {
+        Ok(p) => p,
+        Err(e) => return -e,
+    };
+    match mounts::stat(&abs) {
+        Ok((_, meta)) => {
+            if mode & X_OK != 0 && meta.kind != FileType::Dir && meta.perm & 0o111 == 0 {
+                return -EACCES;
+            }
+            0
+        }
+        Err(e) => -e,
+    }
+}
+
+/// umask(mask): set the creation mask, returning the old one.
+pub fn sys_umask(mask: u64) -> i64 {
+    with_process(|p| core::mem::replace(&mut p.umask, mask as u32 & 0o777)) as i64
+}
+
+/// statfs(path, buf) / fstatfs(fd, buf): struct statfs (120 bytes).
+pub fn sys_statfs(path: Option<u64>, fd: u64, out: &mut [u8]) -> i64 {
+    let loc = match path {
+        Some(p) => match user_path(p).and_then(|p| mounts::resolve(&absolute(&p))) {
+            Ok(l) => l,
+            Err(e) => return -e,
+        },
+        None => match fd_loc(fd) {
+            Ok(Some(l)) => l,
+            Ok(None) => return -EINVAL,
+            Err(e) => return -e,
+        },
+    };
+    let (stats, name) = mounts::with_fs(loc.mount, |fs| (fs.statfs(), fs.name()));
+    let fs_type: u64 = match name {
+        "ext2" => 0xEF53,
+        "memfs" => 0x01021994, // tmpfs
+        _ => 0x1373,           // devfs
+    };
+    out.fill(0);
+    let put = |out: &mut [u8], off: usize, v: u64| out[off..off + 8].copy_from_slice(&v.to_le_bytes());
+    put(out, 0, fs_type);
+    put(out, 8, stats.block_size);
+    put(out, 16, stats.blocks);
+    put(out, 24, stats.free_blocks);
+    put(out, 32, stats.free_blocks); // available to unprivileged users
+    put(out, 40, stats.files);
+    put(out, 48, stats.free_files);
+    put(out, 56, loc.mount as u64); // f_fsid
+    put(out, 64, 255); // f_namelen
+    put(out, 72, stats.block_size); // f_frsize
+    0
+}
+
+pub const STATFS_SIZE: u64 = 120;
+
+/// utimensat(dirfd, path, times, flags): set the modification time (to
+/// now if `times` is NULL). With a NULL path it applies to dirfd itself.
+pub fn sys_utimensat(dirfd: u64, path: u64, times: u64, flags: u64) -> i64 {
+    const UTIME_NOW: i64 = (1 << 30) - 1;
+    const UTIME_OMIT: i64 = (1 << 30) - 2;
+    let mtime = if times == 0 {
+        Some(crate::rtc::now())
+    } else {
+        let Some(t) = (unsafe { crate::syscall::user_slice(times, 32) }) else { return -EFAULT };
+        let sec = i64::from_le_bytes(t[16..24].try_into().unwrap());
+        let nsec = i64::from_le_bytes(t[24..32].try_into().unwrap());
+        match nsec {
+            UTIME_OMIT => None,
+            UTIME_NOW => Some(crate::rtc::now()),
+            _ if sec < 0 => return -EINVAL,
+            _ => Some(sec as u64),
+        }
+    };
+    let loc = if path == 0 {
+        match fd_loc(dirfd) {
+            Ok(Some(l)) => l,
+            Ok(None) => return -EINVAL,
+            Err(e) => return -e,
+        }
+    } else {
+        let abs = match user_at_path(dirfd, path) {
+            Ok(p) => p,
+            Err(e) => return -e,
+        };
+        let found = if flags & AT_SYMLINK_NOFOLLOW != 0 { mounts::lstat(&abs) } else { mounts::stat(&abs) };
+        match found {
+            Ok((l, _)) => l,
+            Err(e) => return -e,
+        }
+    };
+    match mtime {
+        Some(t) => match mounts::with_fs(loc.mount, |fs| fs.set_mtime(loc.ino, t)) {
+            Ok(()) => 0,
+            Err(e) => -e,
+        },
+        None => 0,
     }
 }
 

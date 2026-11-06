@@ -40,6 +40,12 @@ pub struct Shell {
     pub interrupted: bool,
     /// An expansion error (bad arithmetic, ${x?}) in the current command.
     pub expansion_failed: bool,
+    /// set -e: exit when a command fails (outside conditions).
+    pub errexit: bool,
+    /// set -x: print each command before running it.
+    pub xtrace: bool,
+    /// > 0 while running a condition (if/while, && ||, !), where -e is ignored.
+    pub in_condition: usize,
 }
 
 impl Shell {
@@ -69,6 +75,9 @@ impl Shell {
             function_depth: 0,
             interrupted: false,
             expansion_failed: false,
+            errexit: false,
+            xtrace: false,
+            in_condition: 0,
         }
     }
 
@@ -130,13 +139,15 @@ impl Shell {
     /// Find a program: names with '/' are paths, others are searched in $PATH.
     pub fn find_program(&self, name: &str) -> Option<String> {
         if name.contains('/') {
+            // A path is used as is (execve reports "Permission denied" etc.).
             return stat(name).ok().filter(|s| s.is_file()).map(|_| name.to_string());
         }
         let path = self.get("PATH");
         for dir in path.split(':') {
             let dir = if dir.is_empty() { "." } else { dir };
             let candidate = format!("{}/{}", dir.trim_end_matches('/'), name);
-            if stat(&candidate).is_ok_and(|s| s.is_file()) {
+            // Only executable files count when searching $PATH.
+            if stat(&candidate).is_ok_and(|s| s.is_file() && s.st_mode & 0o111 != 0) {
                 return Some(candidate);
             }
         }
@@ -181,8 +192,11 @@ impl Shell {
     }
 
     fn run_and_or(&mut self, ao: &AndOr) {
-        self.run_pipeline(&ao.first);
-        for (conn, pipeline) in &ao.rest {
+        // Every part but the last is a condition: `false && x` doesn't trip -e.
+        let parts = 1 + ao.rest.len();
+        let mut ran_last = parts == 1;
+        self.condition(parts > 1, |sh| sh.run_pipeline(&ao.first));
+        for (i, (conn, pipeline)) in ao.rest.iter().enumerate() {
             if self.stopping() {
                 return;
             }
@@ -191,8 +205,25 @@ impl Shell {
                 Connector::Or => self.status != 0,
             };
             if run {
-                self.run_pipeline(pipeline);
+                let last = i + 2 == parts;
+                ran_last = last;
+                self.condition(!last, |sh| sh.run_pipeline(pipeline));
             }
+        }
+        let negated = if ran_last { ao.rest.last().map(|(_, p)| p).unwrap_or(&ao.first).negate } else { true };
+        if self.errexit && self.in_condition == 0 && self.status != 0 && !negated && !self.stopping() {
+            self.exit_requested = Some(self.status);
+        }
+    }
+
+    /// Run `f` as a condition (where `set -e` doesn't apply) if `yes`.
+    fn condition(&mut self, yes: bool, f: impl FnOnce(&mut Self)) {
+        if yes {
+            self.in_condition += 1;
+        }
+        f(self);
+        if yes {
+            self.in_condition -= 1;
         }
     }
 
@@ -241,11 +272,14 @@ impl Shell {
     }
 
     fn run_pipeline(&mut self, p: &Pipeline) {
-        if p.cmds.len() == 1 {
-            self.run_cmd(&p.cmds[0]);
-        } else {
-            self.run_multi(&p.cmds);
-        }
+        // A negated pipeline is a condition: `! false` doesn't trip -e.
+        self.condition(p.negate, |sh| {
+            if p.cmds.len() == 1 {
+                sh.run_cmd(&p.cmds[0]);
+            } else {
+                sh.run_multi(&p.cmds);
+            }
+        });
         if p.negate {
             self.status = (self.status == 0) as i32;
         }
@@ -380,7 +414,13 @@ impl Shell {
         let env = self.child_env(assigns);
         let argv: Vec<&str> = words.iter().map(String::as_str).collect();
         let envp: Vec<&str> = env.iter().map(String::as_str).collect();
-        let err = execve(&path, &argv, &envp);
+        let mut err = execve(&path, &argv, &envp);
+        if err == -ENOEXEC {
+            // An executable text file without "#!" is a shell script (POSIX).
+            let mut script_argv: Vec<&str> = alloc::vec!["sh", path.as_str()];
+            script_argv.extend(argv.iter().skip(1));
+            err = execve("/bin/sh", &script_argv, &envp);
+        }
         eprintln!("sh: {}: {}", words[0], strerror(-err));
         exit(if err == -ENOENT { 127 } else { 126 });
     }
@@ -421,7 +461,7 @@ impl Shell {
             Compound::Subshell(list) => self.run_subshell(list),
             Compound::If { branches, otherwise } => {
                 for (cond, body) in branches {
-                    self.run_list(cond);
+                    self.condition(true, |sh| sh.run_list(cond));
                     if self.stopping() {
                         return;
                     }
@@ -439,7 +479,7 @@ impl Shell {
                 let mut last = 0;
                 self.loop_depth += 1;
                 loop {
-                    self.run_list(cond);
+                    self.condition(true, |sh| sh.run_list(cond));
                     if self.loop_control() {
                         break;
                     }
@@ -581,6 +621,11 @@ impl Shell {
         if self.expansion_failed {
             self.status = 1;
             return;
+        }
+        if self.xtrace {
+            let mut line: Vec<String> = assigns.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+            line.extend(words.iter().cloned());
+            eprintln!("+ {}", line.join(" "));
         }
 
         if words.is_empty() {

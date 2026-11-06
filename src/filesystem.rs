@@ -97,7 +97,7 @@ pub fn write_bytes(path: &str, contents: &[u8]) -> Result<(), &'static str> {
     let loc = match mounts::stat(path) {
         Ok((_, meta)) if meta.kind == FileType::Dir => return Err("Is a directory"),
         Ok((loc, _)) => loc,
-        Err(crate::syscall::ENOENT) => mounts::create(path, FileType::File).map_err(message)?,
+        Err(crate::syscall::ENOENT) => mounts::create(path, FileType::File, 0o644).map_err(message)?,
         Err(e) => return Err(message(e)),
     };
     mounts::with_fs(loc.mount, |fs| {
@@ -116,13 +116,19 @@ pub fn write_file(path: &str, contents: &str) -> Result<(), &'static str> {
 }
 
 pub fn make_dir(path: &str) -> Result<(), &'static str> {
-    mounts::create(path, FileType::Dir).map(|_| ()).map_err(message)
+    mounts::create(path, FileType::Dir, 0o755).map(|_| ()).map_err(message)
 }
 
 /// Remove a file or an empty directory.
 pub fn remove(path: &str) -> Result<(), &'static str> {
     let is_dir = mounts::is_dir(path);
     mounts::remove(path, is_dir).map_err(message)
+}
+
+/// Set a file's permission bits.
+pub fn chmod(path: &str, perm: u32) -> Result<(), &'static str> {
+    let loc = mounts::resolve(path).map_err(message)?;
+    mounts::with_fs(loc.mount, |fs| fs.chmod(loc.ino, perm)).map_err(message)
 }
 
 pub fn is_dir(path: &str) -> bool {

@@ -127,6 +127,31 @@ impl Shell {
                 0
             }
             "set" => {
+                // set -e / -x / +e / +x (and combinations like -ex)
+                let mut i = 1;
+                while let Some(opt) = args.get(i).filter(|a| (a.starts_with('-') || a.starts_with('+')) && a.len() > 1 && *a != "--") {
+                    let on = opt.starts_with('-');
+                    for c in opt[1..].chars() {
+                        match c {
+                            'e' => self.errexit = on,
+                            'x' => self.xtrace = on,
+                            'u' | 'v' | 'f' | 'C' => {} // accepted, not implemented
+                            _ => {
+                                eprintln!("sh: set: -{}: invalid option", c);
+                                return 2;
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+                if i > 1 && args.get(i).map(String::as_str) != Some("--") {
+                    return 0;
+                }
+                if args.get(i).map(String::as_str) == Some("--") {
+                    let name = self.params[0].clone();
+                    self.params = core::iter::once(name).chain(args[i + 1..].iter().cloned()).collect();
+                    return 0;
+                }
                 if args.get(1).map(String::as_str) == Some("--") {
                     // set -- a b c: replace the positional parameters
                     let name = self.params[0].clone();
@@ -382,7 +407,7 @@ struct Test<'a> {
 }
 
 const BINARY: &[&str] = &["=", "==", "!=", "-eq", "-ne", "-lt", "-le", "-gt", "-ge"];
-const UNARY: &[&str] = &["-e", "-f", "-d", "-c", "-s", "-r", "-w", "-x", "-z", "-n"];
+const UNARY: &[&str] = &["-e", "-f", "-d", "-c", "-s", "-r", "-w", "-x", "-z", "-n", "-L", "-h"];
 
 impl<'a> Test<'a> {
     fn peek(&self, n: usize) -> Option<&'a str> {
@@ -453,6 +478,8 @@ fn unary(op: &str, s: &str) -> bool {
     match op {
         "-z" => s.is_empty(),
         "-n" => !s.is_empty(),
+        "-L" | "-h" => lstat(s).is_ok_and(|st| st.is_symlink()),
+        "-x" => access(s, X_OK) == 0,
         _ => match stat(s) {
             Err(_) => false,
             Ok(st) => match op {
@@ -460,7 +487,7 @@ fn unary(op: &str, s: &str) -> bool {
                 "-d" => st.is_dir(),
                 "-c" => st.st_mode & S_IFMT == S_IFCHR, // character device (/dev/null...)
                 "-s" => st.st_size > 0,
-                _ => true, // -e, and -r/-w/-x (there are no permissions yet)
+                _ => true, // -e, and -r/-w (every process is root for now)
             },
         },
     }

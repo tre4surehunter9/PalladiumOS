@@ -914,8 +914,8 @@ fn pipe_syscalls() {
 
 #[test_case]
 fn sh_pipelines() {
-    assert_eq!(sh("ls /bin | grep ^s > /p1.txt"), 0);
-    assert_eq!(file("/p1.txt"), "sh\nsleep\nsort\nsync\n");
+    assert_eq!(sh("ls /bin | grep '^s.e' > /p1.txt"), 0);
+    assert_eq!(file("/p1.txt"), "sleep\n");
     assert_eq!(sh("echo hello | cat | cat | cat > /p2.txt"), 0);
     assert_eq!(file("/p2.txt"), "hello\n");
     assert_eq!(sh("false | true"), 0, "status is the last command's");
@@ -1247,4 +1247,56 @@ fn scripting_does_not_leak() {
     assert_eq!(sh(s), 0);
     assert_eq!(frames_in_use(), before);
     assert!(only_kernel_left());
+}
+
+// ---- file toolkit ----
+
+#[test_case]
+fn links_permissions_scripts() {
+    assert_eq!(run(prog("test_links"), &["test_links"]), Ok(0));
+}
+
+#[test_case]
+fn file_tools_end_to_end() {
+    let script = "mkdir /ft && cd /ft && echo hello > a && cp a b && mv b c && ln -s a s && \
+                  chmod 700 c && ls -l > /ft-ls.txt; cp -r /ft /ft2 && cat /ft2/s > /ft-cat.txt; \
+                  stat a > /ft-stat.txt; readlink s > /ft-rl.txt; du -s /ft > /ft-du.txt; \
+                  df / > /ft-df.txt; rm -r /ft /ft2";
+    assert_eq!(sh(script), 0);
+    let ls = file("/ft-ls.txt");
+    assert!(ls.contains("-rw-r--r--") && ls.contains(" a\n"), "{}", ls);
+    assert!(ls.contains("-rwx------") && ls.contains(" c\n"), "{}", ls);
+    assert!(ls.contains("lrwxrwxrwx") && ls.contains("s -> a"), "{}", ls);
+    assert_eq!(file("/ft-cat.txt"), "hello\n", "cp -r keeps symlinks working");
+    assert!(file("/ft-stat.txt").contains("regular file"));
+    assert_eq!(file("/ft-rl.txt"), "a\n");
+    assert!(file("/ft-du.txt").ends_with("/ft\n"));
+    assert!(file("/ft-df.txt").contains("Mounted on"));
+    assert!(!filesystem::is_dir("/ft") && !filesystem::is_dir("/ft2"));
+}
+
+#[test_case]
+fn mv_cp_errors() {
+    assert_eq!(sh("mv /nope /x"), 1);
+    assert_eq!(sh("cp /nope /x"), 1);
+    assert_eq!(sh("mkdir /cpd; cp /cpd /cpd2"), 1, "directory without -r");
+    assert_eq!(sh("cp -r /cpd /cpd/inside"), 1, "into itself");
+    assert_eq!(sh("echo a > /f1; echo b > /f2; mv /f1 /f2 /not-a-dir"), 1);
+    assert_eq!(sh("chmod 999 /f2"), 1, "bad octal mode");
+    assert_eq!(sh("chmod u+z /f2"), 1, "bad symbolic mode");
+    assert_eq!(sh("rm -r /cpd /f1 /f2"), 0);
+}
+
+#[test_case]
+fn sh_errexit_and_xtrace() {
+    assert_eq!(run(prog("sh"), &["sh", "-e", "-c", "false; exit 7"]), Ok(1), "-e stops at the failure");
+    assert_eq!(sh("set -e; false; exit 7"), 1);
+    assert_eq!(sh("set -e; if false; then :; fi; false || true; ! true; exit 7"), 7, "conditions don't count");
+    assert_eq!(sh("set -e; while false; do :; done; true && false; exit 7"), 1, "the last part of && counts");
+    assert_eq!(sh("set -e; set +e; false; exit 7"), 7);
+    // The trace goes to the shell's stderr: capture an inner sh -x's.
+    assert_eq!(sh("sh -x -c 'x=1; echo hi $x > /xt-out.txt' 2> /xt.txt"), 0);
+    assert_eq!(file("/xt.txt"), "+ x=1\n+ echo hi 1\n");
+    assert_eq!(file("/xt-out.txt"), "hi 1\n");
+    assert_eq!(sh("set -q"), 2, "unknown option");
 }
