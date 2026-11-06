@@ -121,6 +121,7 @@ pub mod ext2;
 pub mod devfs;
 pub mod procfs;
 pub mod perm;
+pub mod signal;
 pub mod rtc;
 
 

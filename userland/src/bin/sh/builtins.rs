@@ -10,8 +10,8 @@ use crate::shell::{Shell, Var};
 use crate::{print_wrapped, shell_status};
 
 pub const BUILTINS: &[&str] = &[
-    ".", ":", "[", "break", "cd", "continue", "eval", "exit", "export", "false", "help", "jobs", "kill", "pwd", "read",
-    "return", "run", "script", "set", "shift", "source", "test", "true", "type", "unset", "wait",
+    ".", ":", "[", "bg", "break", "cd", "continue", "eval", "exit", "export", "false", "fg", "help", "jobs", "kill",
+    "pwd", "read", "return", "run", "script", "set", "shift", "source", "test", "trap", "true", "type", "unset", "wait",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -214,17 +214,33 @@ impl Shell {
                 status
             }
             "jobs" => {
-                for (i, pid) in self.jobs.iter().enumerate() {
-                    println!("[{}] {} Running", i + 1, pid);
+                self.reap_jobs();
+                let long = args.get(1).map(String::as_str) == Some("-l");
+                let count = self.jobs.len();
+                for (i, job) in self.jobs.iter().enumerate() {
+                    let mark = if i + 1 == count { '+' } else if i + 2 == count { '-' } else { ' ' };
+                    let state = if job.stopped { "Stopped" } else { "Running" };
+                    if long {
+                        println!("[{}]{} {} {:<22} {}", i + 1, mark, job.pgid, state, job.text);
+                    } else {
+                        println!("[{}]{}  {:<22} {}", i + 1, mark, state, job.text);
+                    }
                 }
                 0
             }
+            "fg" | "bg" => self.fg_bg(args),
+            "trap" => self.trap_builtin(args),
             "wait" => {
+                // Wait for the running jobs (stopped ones would never finish).
                 let mut status = 0;
                 let mut last = 0;
-                for pid in core::mem::take(&mut self.jobs) {
-                    if waitpid(pid, &mut status, 0) == pid as isize {
-                        last = shell_status(status);
+                let (running, stopped): (Vec<_>, Vec<_>) = core::mem::take(&mut self.jobs).into_iter().partition(|j| !j.stopped);
+                self.jobs = stopped;
+                for job in running {
+                    for pid in job.pids {
+                        if waitpid(pid, &mut status, 0) == pid as isize {
+                            last = shell_status(status);
+                        }
                     }
                 }
                 last
@@ -267,7 +283,7 @@ impl Shell {
                 println!("Syntax: | ; && || & > >> < 2> 2>&1 'quotes' \"$VAR\" $(cmd) $((1+2)) * ? [ ]");
                 println!("Scripting: if/then/elif/else/fi, while/until/do/done, for/in, case/esac,");
                 println!("  name() {{ ... }}, test or [ ], read, break, continue, return, shift");
-                println!("Keys: Up/Down history, Tab completes, Ctrl-C interrupts, Ctrl-D exits");
+                println!("Keys: Up/Down history, Tab completes, Ctrl-C interrupts, Ctrl-Z stops (fg/bg), Ctrl-D exits");
                 println!("Type 'exit' to return to the kernel shell.");
                 0
             }
@@ -349,11 +365,23 @@ impl Shell {
         for target in rest {
             // %N is job N from `jobs`; a job is its own process group.
             let pid = match target.strip_prefix('%') {
-                Some(n) => match n.parse::<usize>().ok().and_then(|n| self.jobs.get(n.wrapping_sub(1))) {
+                Some(n) => match self.job_index(n).and_then(|i| self.jobs.get(i)) {
                     // With job control (interactive) each job is a process
                     // group; without it, signal the job's process.
-                    Some(&pid) if self.interactive => -pid,
-                    Some(&pid) => pid,
+                    Some(job) if self.interactive => {
+                        if job.stopped && sig != SIGCONT && sig != SIGSTOP && sig != SIGTSTP {
+                            let pgid = job.pgid;
+                            let r = kill(-pgid, sig);
+                            kill(-pgid, SIGCONT); // so it acts on the signal now
+                            if r < 0 {
+                                eprintln!("sh: kill: ({}) - {}", target, strerror(-r));
+                                status = 1;
+                            }
+                            continue;
+                        }
+                        -job.pgid
+                    }
+                    Some(job) => job.pgid,
                     None => {
                         eprintln!("sh: kill: {}: no such job", target);
                         status = 1;
@@ -487,7 +515,9 @@ fn unary(op: &str, s: &str) -> bool {
                 "-d" => st.is_dir(),
                 "-c" => st.st_mode & S_IFMT == S_IFCHR, // character device (/dev/null...)
                 "-s" => st.st_size > 0,
-                _ => true, // -e, and -r/-w (every process is root for now)
+                "-r" => access(s, R_OK) == 0,
+                "-w" => access(s, W_OK) == 0,
+                _ => true, // -e
             },
         },
     }
@@ -509,4 +539,104 @@ fn binary(a: &str, op: &str, b: &str) -> Result<bool, String> {
         "-gt" => x > y,
         _ => x >= y,
     })
+
+}
+
+impl Shell {
+    /// %N, N, %+ / %% (the current job) or %- (the previous one) -> index in `jobs`.
+    pub fn job_index(&self, spec: &str) -> Option<usize> {
+        let spec = spec.strip_prefix('%').unwrap_or(spec);
+        let n = self.jobs.len();
+        match spec {
+            "" | "+" | "%" => n.checked_sub(1),
+            "-" => n.checked_sub(2).or(n.checked_sub(1)),
+            s => s.parse::<usize>().ok().filter(|&i| i >= 1 && i <= n).map(|i| i - 1),
+        }
+    }
+
+    /// fg [JOB]: continue a job in the foreground. bg [JOB]: in the background.
+    fn fg_bg(&mut self, args: &[String]) -> i32 {
+        let name = args[0].as_str();
+        if !self.interactive {
+            eprintln!("sh: {}: no job control", name);
+            return 1;
+        }
+        self.reap_jobs();
+        let Some(i) = self.job_index(args.get(1).map(String::as_str).unwrap_or("%")) else {
+            eprintln!("sh: {}: {}: no such job", name, args.get(1).map(String::as_str).unwrap_or("current"));
+            return 1;
+        };
+        if name == "bg" {
+            let job = &mut self.jobs[i];
+            job.stopped = false;
+            println!("[{}]+ {} &", i + 1, job.text);
+            kill(-job.pgid, SIGCONT);
+            return 0;
+        }
+        let job = self.jobs.remove(i);
+        println!("{}", job.text);
+        tcsetpgrp(STDIN, job.pgid); // before continuing it: it may read right away
+        kill(-job.pgid, SIGCONT);
+        let (status, interrupted) = self.wait_job(job.pgid, job.pids, job.text);
+        if interrupted {
+            self.interrupted = true;
+        }
+        shell_status(status)
+    }
+
+    /// trap [ACTION SIGNAL...] | trap -l | trap
+    fn trap_builtin(&mut self, args: &[String]) -> i32 {
+        let rest = &args[1..];
+        match rest.first().map(String::as_str) {
+            None => {
+                for (sig, cmd) in &self.traps {
+                    let name = if *sig == 0 { "EXIT".to_string() } else { alloc::format!("SIG{}", signal_name(*sig).unwrap_or("?")) };
+                    println!("trap -- '{}' {}", cmd.replace('\'', "'\\''"), name);
+                }
+                return 0;
+            }
+            Some("-l") => {
+                for (n, name) in SIGNAL_NAMES {
+                    println!("{:2}) SIG{}", n, name);
+                }
+                return 0;
+            }
+            _ => {}
+        }
+        let rest = if rest[0] == "--" { &rest[1..] } else { rest };
+        // `trap SIGNAL...` (the first word is a signal): reset them.
+        let (action, sigs) = if rest.len() == 1 || signal_spec(&rest[0]).is_some_and(|_| rest[0].parse::<u32>().is_ok()) {
+            ("-", rest)
+        } else {
+            (rest[0].as_str(), &rest[1..])
+        };
+        let mut status = 0;
+        for spec in sigs {
+            match signal_spec(spec) {
+                Some(sig) if sig == SIGKILL || sig == SIGSTOP => {
+                    eprintln!("sh: trap: {}: can't be trapped", spec);
+                    status = 1;
+                }
+                Some(sig) => {
+                    if self.set_trap(sig, action) < 0 {
+                        eprintln!("sh: trap: {}: invalid signal", spec);
+                        status = 1;
+                    }
+                }
+                None => {
+                    eprintln!("sh: trap: {}: invalid signal specification", spec);
+                    status = 1;
+                }
+            }
+        }
+        status
+    }
+}
+
+/// A trap signal: a name (INT, SIGINT), a number, or EXIT / 0.
+fn signal_spec(spec: &str) -> Option<i32> {
+    if spec.eq_ignore_ascii_case("EXIT") || spec == "0" {
+        return Some(0);
+    }
+    signal_number(spec).filter(|&n| n > 0)
 }

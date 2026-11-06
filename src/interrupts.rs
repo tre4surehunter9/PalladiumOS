@@ -13,8 +13,10 @@ lazy_static! {
         idt.double_fault.set_handler_fn(double_fault_handler)
         .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
     }
-    idt[InterruptIndex::Timer.as_usize()]
-        .set_handler_fn(timer_interrupt_handler);
+    unsafe {
+        idt[InterruptIndex::Timer.as_usize()]
+            .set_handler_addr(x86_64::VirtAddr::new(timer_entry as *const () as u64));
+    }
     idt[InterruptIndex::Keyboard.as_usize()]
         .set_handler_fn(keyboard_interrupt_handler);
     idt.page_fault.set_handler_fn(page_fault_handler);
@@ -32,20 +34,38 @@ use x86_64::structures::idt::PageFaultErrorCode;
 use crate::hlt_loop;
 
 
-extern "x86-interrupt" fn timer_interrupt_handler(
-    stack_frame: InterruptStackFrame)
-{
+// The timer saves every register in a SyscallFrame (like a syscall), so a
+// signal handler can be started for a program interrupted in the middle of
+// its work: the frame is what the program resumes with. It returns through
+// the same code as syscalls.
+core::arch::global_asm!(
+    ".global timer_entry",
+    "timer_entry:",
+    "push rax", "push rcx", "push rdx", "push rsi", "push rdi", "push r8", "push r9", "push r10",
+    "push r11", "push rbx", "push rbp", "push r12", "push r13", "push r14", "push r15",
+    "cld",
+    "mov rdi, rsp",
+    "call timer_dispatch",
+    "jmp syscall_return",
+);
+
+unsafe extern "C" {
+    fn timer_entry();
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn timer_dispatch(frame: &mut crate::syscall::SyscallFrame) {
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
     crate::process::tick();
     // Preemptive multitasking: only when we interrupted a user program, never
-    // in the middle of kernel code (which may hold locks). Signals (Ctrl-C)
-    // reach busy programs here too.
-    if crate::usermode::from_user(stack_frame.code_segment) {
-        crate::process::handle_signals();
+    // in the middle of kernel code (which may hold locks). Signals (Ctrl-C,
+    // alarms) reach busy programs here too.
+    if crate::usermode::from_user(frame.cs) {
         crate::process::preempt();
+        crate::process::handle_signals(frame, None);
     }
 }
 

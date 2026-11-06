@@ -41,6 +41,16 @@ pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT4: u64 = 61;
 pub const SYS_KILL: u64 = 62;
 pub const SYS_FCNTL: u64 = 72;
+pub const SYS_RT_SIGRETURN: u64 = 15;
+pub const SYS_PAUSE: u64 = 34;
+pub const SYS_GETITIMER: u64 = 36;
+pub const SYS_ALARM: u64 = 37;
+pub const SYS_SETITIMER: u64 = 38;
+pub const SYS_RT_SIGPENDING: u64 = 127;
+pub const SYS_RT_SIGSUSPEND: u64 = 130;
+pub const SYS_GETTID: u64 = 186;
+pub const SYS_TKILL: u64 = 200;
+pub const SYS_TGKILL: u64 = 234;
 pub const SYS_GETUID: u64 = 102;
 pub const SYS_GETGID: u64 = 104;
 pub const SYS_SETUID: u64 = 105;
@@ -201,6 +211,7 @@ global_asm!(
     "push r13",
     "push r14",
     "push r15",
+    "cld",                   // the program may have left the direction flag set
     "mov rdi, rsp",          // arg0 = &mut SyscallFrame
     "call syscall_dispatch",
     "syscall_return:",
@@ -244,8 +255,9 @@ pub fn init_syscalls(idt: &mut InterruptDescriptorTable) {
 extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
     let (a1, a2, a3, a4, a5) = (frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8);
     const FDCWD: u64 = -100i64 as u64;
+    let num = frame.rax;
 
-    let ret: i64 = match frame.rax {
+    let ret: i64 = match num {
         SYS_READ => match unsafe { user_slice_mut(a2, a3) } {
             Some(buf) => vfs::sys_read(a1, buf),
             None => -EFAULT,
@@ -348,7 +360,17 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_GETPGID => process::sys_getpgid(a1),
         SYS_GETPGRP => process::sys_getpgid(0),
         SYS_RT_SIGACTION => process::sys_rt_sigaction(a1, a2, a3),
-        SYS_RT_SIGPROCMASK => sys_rt_sigprocmask(a3),
+        SYS_RT_SIGPROCMASK => process::sys_rt_sigprocmask(a1, a2, a3),
+        SYS_RT_SIGRETURN => process::sys_rt_sigreturn(frame),
+        SYS_RT_SIGPENDING => process::sys_rt_sigpending(a1),
+        SYS_RT_SIGSUSPEND => process::sys_rt_sigsuspend(Some(a1)),
+        SYS_PAUSE => process::sys_rt_sigsuspend(None),
+        SYS_ALARM => process::sys_alarm(a1),
+        SYS_GETITIMER => process::sys_itimer(a1, 0, a2),
+        SYS_SETITIMER => process::sys_itimer(a1, a2, a3),
+        SYS_GETTID => process::current_pid() as i64,
+        SYS_TKILL => process::sys_tkill(a1, a2),
+        SYS_TGKILL => process::sys_tkill(a2, a3),
         SYS_NANOSLEEP => process::sys_nanosleep(a1, a2),
         SYS_CLOCK_GETTIME => process::sys_clock_gettime(a1, a2),
         SYS_EXIT | SYS_EXIT_GROUP => process::exit_current(process::ExitReason::Exited(a1 as i32)),
@@ -356,20 +378,10 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
     };
 
     frame.rax = ret as u64;
-    // A signal (e.g. Ctrl-C) takes effect before returning to the program.
-    process::handle_signals();
-}
-
-/// rt_sigprocmask(how, set, oldset): signal masks aren't implemented; report
-/// an empty old mask so libc code that saves/restores masks works.
-fn sys_rt_sigprocmask(oldset: u64) -> i64 {
-    if oldset != 0 {
-        match unsafe { user_slice_mut(oldset, 8) } {
-            Some(out) => out.fill(0),
-            None => return -EFAULT,
-        }
-    }
-    0
+    // Signals take effect before returning to the program (a handler may
+    // run first). After sigreturn, there's no syscall to restart.
+    let syscall = (num != SYS_RT_SIGRETURN).then_some((num, ret));
+    process::handle_signals(frame, syscall);
 }
 
 /// reboot(magic1, magic2, cmd): restart or power off the machine.

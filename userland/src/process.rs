@@ -5,6 +5,10 @@ use crate::fs::{E2BIG, ENAMETOOLONG};
 use crate::sys::{self, syscall3};
 
 pub const WNOHANG: u64 = 1;
+/// waitpid option: also report children that stopped (Ctrl-Z, SIGSTOP).
+pub const WUNTRACED: u64 = 2;
+/// waitpid option: also report stopped children that continued.
+pub const WCONTINUED: u64 = 8;
 
 pub fn getppid() -> i32 {
     unsafe { syscall3(sys::GETPPID, 0, 0, 0) as i32 }
@@ -34,6 +38,15 @@ pub fn wifsignaled(status: i32) -> bool {
 }
 pub fn wtermsig(status: i32) -> i32 {
     status & 0x7f
+}
+pub fn wifstopped(status: i32) -> bool {
+    status & 0xff == 0x7f
+}
+pub fn wstopsig(status: i32) -> i32 {
+    (status >> 8) & 0xff
+}
+pub fn wifcontinued(status: i32) -> bool {
+    status == 0xffff
 }
 
 const MAX_ARGV: usize = 32;

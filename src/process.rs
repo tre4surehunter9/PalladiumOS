@@ -71,6 +71,8 @@ pub enum State {
     /// Waiting for something identified by a key (e.g. a pipe to have data
     /// or room); `wake(key)` makes it Ready again.
     Blocked(u64),
+    /// Stopped by a signal (SIGSTOP, Ctrl-Z) until SIGCONT.
+    Stopped,
     Zombie(ExitReason),
 }
 
@@ -89,10 +91,20 @@ pub struct Process {
     pub brk: u64,
     /// Process group (for Ctrl-C and kill(-pgid)).
     pub pgid: u64,
-    /// Signals sent but not yet acted on (bit n = signal n).
+    /// Signals sent but not yet acted on (bit n-1 = signal n).
     pending: u64,
-    /// Signals set to SIG_IGN (bit n = signal n). Kept across execve.
-    ignored: u64,
+    /// What to do for each signal (index n-1), see sigaction.
+    /// (Boxed: it's 2 KiB, and Process values pass through small kernel stacks.)
+    actions: Box<[SigAction; MAX_SIGNAL as usize]>,
+    /// The signal mask: blocked signals stay pending until unblocked.
+    blocked: u64,
+    /// The mask to go back to after sigsuspend's handler.
+    saved_mask: Option<u64>,
+    /// SIGALRM timer: the tick it fires at (0 = off) and its repeat interval.
+    alarm_at: u64,
+    alarm_every: u64,
+    /// A stop or continue not yet reported to the parent by wait4.
+    wait_event: Option<u32>,
     /// Timer tick to wake up at, while Sleeping.
     wake_at: u64,
     /// The program's arguments and path (for /proc and ps).
@@ -204,7 +216,12 @@ pub fn init() {
         brk: HEAP_BASE,
         pgid: 0,
         pending: 0,
-        ignored: 0,
+        actions: Box::new([SigAction::DEFAULT; MAX_SIGNAL as usize]),
+        blocked: 0,
+        saved_mask: None,
+        alarm_at: 0,
+        alarm_every: 0,
+        wait_event: None,
         wake_at: 0,
         argv: vec!["kernel".to_string()],
         exe: String::new(),
@@ -247,7 +264,8 @@ pub fn others_ready() -> bool {
     }
     let now = ticks();
     TABLE.lock().values().any(|p| {
-        p.pid != cur && (p.state == State::Ready || (p.state == State::Sleeping && now >= p.wake_at))
+        (p.alarm_at != 0 && now >= p.alarm_at)
+            || (p.pid != cur && (p.state == State::Ready || (p.state == State::Sleeping && now >= p.wake_at)))
     })
 }
 
@@ -296,7 +314,8 @@ pub fn schedule() {
         let switch = {
             let mut table = TABLE.lock();
             let cur = current_pid();
-            deliver_ctrl_c(&mut table);
+            deliver_tty_signals(&mut table);
+            fire_alarms_locked(&mut table);
             let now = ticks();
             let woken = core::mem::take(&mut *WAKE_QUEUE.lock());
             for p in table.values_mut() {
@@ -425,6 +444,7 @@ pub fn exit_current(reason: ExitReason) -> ! {
                 parent.state = State::Ready;
             }
         }
+        signal_locked(&mut table, ppid, SIGCHLD);
         // If an orphan already exited, the kernel may be waiting for it.
         if let Some(kernel) = table.get_mut(&0) {
             if kernel.state == State::Waiting {
@@ -453,6 +473,9 @@ fn free_process(p: Box<Process>) {
 /// for any. Returns Ok(None) if `nohang` and no child has exited yet.
 pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u64, ExitReason)>, i64> {
     loop {
+        if !nohang && signal_pending() {
+            return Err(EINTR);
+        }
         let reaped = {
             let mut table = TABLE.lock();
             let cur = current_pid();
@@ -467,7 +490,7 @@ pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u64, ExitReason)>, i64> {
             match zombie {
                 Some(zpid) => table.remove(&zpid),
                 None if nohang => return Ok(None),
-                None if has_pending_locked(&table, cur) => return Err(EINTR),
+                None if loud_pending_locked(&table, cur) => return Err(EINTR),
                 None => {
                     table.get_mut(&cur).unwrap().state = State::Waiting;
                     None
@@ -491,13 +514,13 @@ pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u64, ExitReason)>, i64> {
 /// fork(): duplicate the current process. Returns the child's pid to the
 /// parent; the child returns from the same syscall with 0.
 pub fn fork(frame: &SyscallFrame) -> i64 {
-    let (p4, files, name, ppid, brk, pgid, ignored, argv, exe, cred) = {
+    let (p4, files, name, ppid, brk, pgid, (actions, blocked), argv, exe, cred) = {
         let table = TABLE.lock();
         if table.len() >= MAX_PROCESSES {
             return -EAGAIN;
         }
         let cur = table.get(&current_pid()).unwrap();
-        (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid, cur.brk, cur.pgid, cur.ignored, cur.argv.clone(), cur.exe.clone(), cur.cred.clone())
+        (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid, cur.brk, cur.pgid, (cur.actions.clone(), cur.blocked), cur.argv.clone(), cur.exe.clone(), cur.cred.clone())
     };
 
     let child_p4 = {
@@ -524,7 +547,12 @@ pub fn fork(frame: &SyscallFrame) -> i64 {
         brk, // the heap pages were copied with the rest of the address space
         pgid,
         pending: 0,
-        ignored,
+        actions, // handlers and the mask are inherited; pending signals and alarms aren't
+        blocked,
+        saved_mask: None,
+        alarm_at: 0,
+        alarm_every: 0,
+        wait_event: None,
         wake_at: 0,
         argv,
         exe,
@@ -660,6 +688,13 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
         p.argv = argv.clone();
         p.exe = crate::filesystem::normalize(&p.files.cwd, &path);
         p.brk = HEAP_BASE; // the new program starts with an empty heap
+        // Handlers are gone with the old program: back to the default action
+        // (ignored signals stay ignored; the mask and pending signals stay).
+        for a in p.actions.iter_mut() {
+            if a.handler != SIG_IGN {
+                *a = SigAction::DEFAULT;
+            }
+        }
         core::mem::replace(&mut p.p4, image.p4)
     };
     // A setuid/setgid program runs as the file's owner/group.
@@ -677,11 +712,14 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
     0 // becomes rax at the new program's entry point
 }
 
-/// wait4(pid, wstatus, options, rusage)
+/// wait4(pid, wstatus, options, rusage): pid > 0 is one child, -1 any,
+/// 0 any in our process group, < -1 any in group -pid. Options: WNOHANG,
+/// WUNTRACED (also report stopped children), WCONTINUED (and continued).
 pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> i64 {
-    let pid = pid as i64;
-    // No process groups yet: 0 and < -1 mean "any child", like -1.
-    let filter = if pid > 0 { pid } else { -1 };
+    const WNOHANG: u64 = 1;
+    const WUNTRACED: u64 = 2;
+    const WCONTINUED: u64 = 8;
+    let pid = pid as i64 as i32 as i64;
     let status_out = if status_ptr != 0 {
         match unsafe { user_slice_mut(status_ptr, 4) } {
             Some(s) => Some(s),
@@ -690,15 +728,60 @@ pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> i64 {
     } else {
         None
     };
-    match wait(filter, options & WNOHANG != 0) {
-        Ok(Some((pid, reason))) => {
-            if let Some(out) = status_out {
-                out.copy_from_slice(&reason.wait_status().to_le_bytes());
-            }
-            pid as i64
+    loop {
+        if options & WNOHANG == 0 && signal_pending() {
+            return -EINTR;
         }
-        Ok(None) => 0,
-        Err(e) => -e,
+        let found = {
+            let mut table = TABLE.lock();
+            let cur = current_pid();
+            let my_pgid = table.get(&cur).map(|p| p.pgid).unwrap_or(0);
+            let matches = |p: &Process| {
+                p.ppid == cur
+                    && p.pid != cur
+                    && match pid {
+                        -1 => true,
+                        0 => p.pgid == my_pgid,
+                        n if n < -1 => p.pgid == (-n) as u64,
+                        n => p.pid as i64 == n,
+                    }
+            };
+            if !table.values().any(|p| matches(p)) {
+                return -ECHILD;
+            }
+            if let Some(zpid) = table.values().find(|p| matches(p) && matches!(p.state, State::Zombie(_))).map(|p| p.pid) {
+                let p = table.remove(&zpid).unwrap();
+                let State::Zombie(reason) = p.state else { unreachable!() };
+                drop(table);
+                free_process(p);
+                Some((zpid, reason.wait_status() as u32))
+            } else {
+                // A stop (status 0x7f) or continue (0xffff) not yet reported?
+                let wanted = |e: u32| (e & 0xff == 0x7f && options & WUNTRACED != 0) || (e == 0xffff && options & WCONTINUED != 0);
+                let event = table.values().find(|p| matches(p) && p.wait_event.is_some_and(wanted)).map(|p| p.pid);
+                match event {
+                    Some(epid) => {
+                        let p = table.get_mut(&epid).unwrap();
+                        Some((epid, p.wait_event.take().unwrap()))
+                    }
+                    None if options & WNOHANG != 0 => return 0,
+                    None if loud_pending_locked(&table, cur) => return -EINTR,
+                    None => {
+                        table.get_mut(&cur).unwrap().state = State::Waiting;
+                        None
+                    }
+                }
+            }
+        };
+        match found {
+            Some((pid, status)) => {
+                if let Some(out) = status_out {
+                    out.copy_from_slice(&status.to_le_bytes());
+                }
+                return pid as i64;
+            }
+            None => schedule(),
+        }
     }
 }
 
@@ -734,7 +817,12 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         brk: HEAP_BASE,
         pgid: pid, // leader of a new process group
         pending: 0,
-        ignored: 0,
+        actions: Box::new([SigAction::DEFAULT; MAX_SIGNAL as usize]),
+        blocked: 0,
+        saved_mask: None,
+        alarm_at: 0,
+        alarm_every: 0,
+        wait_event: None,
         wake_at: 0,
         argv: argv.iter().map(|a| a.to_string()).collect(),
         exe: program_path(argv.first().copied().unwrap_or("")),
@@ -864,16 +952,74 @@ pub fn sys_brk(addr: u64) -> i64 {
 
 pub const SIGHUP: i32 = 1;
 pub const SIGINT: i32 = 2;
-pub const SIGPIPE: i32 = 13;
+pub const SIGQUIT: i32 = 3;
 pub const SIGKILL: i32 = 9;
+pub const SIGSEGV: i32 = 11;
+pub const SIGPIPE: i32 = 13;
+pub const SIGALRM: i32 = 14;
+pub const SIGCHLD: i32 = 17;
+pub const SIGCONT: i32 = 18;
 pub const SIGSTOP: i32 = 19;
+pub const SIGTSTP: i32 = 20;
+pub const SIGTTIN: i32 = 21;
+pub const SIGTTOU: i32 = 22;
 const MAX_SIGNAL: i32 = 64;
+
+pub const SIG_DFL: u64 = 0;
+pub const SIG_IGN: u64 = 1;
+
+// sigaction flags (Linux values)
+const SA_NOCLDSTOP: u64 = 1;
+const SA_RESTORER: u64 = 0x0400_0000;
+const SA_RESTART: u64 = 0x1000_0000;
+const SA_NODEFER: u64 = 0x4000_0000;
+const SA_RESETHAND: u64 = 0x8000_0000;
+
+/// What a process does when it gets a signal: struct sigaction as Linux
+/// passes it (handler, flags, restorer, mask).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SigAction {
+    /// SIG_DFL, SIG_IGN, or the address of a handler function.
+    pub handler: u64,
+    pub flags: u64,
+    /// Where the handler returns to: code that calls rt_sigreturn.
+    pub restorer: u64,
+    /// Signals blocked while the handler runs.
+    pub mask: u64,
+}
+
+impl SigAction {
+    pub const DEFAULT: SigAction = SigAction { handler: SIG_DFL, flags: 0, restorer: 0, mask: 0 };
+}
+
+/// What SIG_DFL means for a signal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DefaultAction {
+    Terminate,
+    Ignore,
+    Stop,
+    Continue,
+}
+
+fn default_action(sig: i32) -> DefaultAction {
+    match sig {
+        SIGCHLD | 23 | 28 => DefaultAction::Ignore, // CHLD, URG, WINCH
+        SIGCONT => DefaultAction::Continue,
+        SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => DefaultAction::Stop,
+        _ => DefaultAction::Terminate,
+    }
+}
+
+const STOP_SIGNALS: u64 = (1 << (SIGSTOP - 1)) | (1 << (SIGTSTP - 1)) | (1 << (SIGTTIN - 1)) | (1 << (SIGTTOU - 1));
+/// SIGKILL and SIGSTOP can't be blocked, caught or ignored.
+const UNBLOCKABLE: u64 = (1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1));
 
 /// Process group that owns the keyboard (gets SIGINT on Ctrl-C). 0 = the kernel.
 static FOREGROUND: AtomicU64 = AtomicU64::new(0);
-/// Set by the keyboard interrupt when Ctrl-C is pressed; acted on at the next
-/// safe point (the interrupt handler itself must not take locks).
-static CTRL_C: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Signals the keyboard interrupt asked for (Ctrl-C, Ctrl-Z, Ctrl-\), as a
+/// bit set; sent at the next safe point (the interrupt handler itself must
+/// not take locks).
+static TTY_SIGNALS: AtomicU64 = AtomicU64::new(0);
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Length of a timer tick: the PIT's default rate is 1193182 Hz / 65536.
@@ -885,7 +1031,13 @@ pub fn foreground() -> u64 {
 
 /// Called from the keyboard interrupt on Ctrl-C (when the console is cooked).
 pub fn ctrl_c_pressed() {
-    CTRL_C.store(true, Ordering::SeqCst);
+    tty_signal(SIGINT);
+}
+
+/// Called from the keyboard interrupt for Ctrl-C (SIGINT), Ctrl-Z
+/// (SIGTSTP) and Ctrl-\ (SIGQUIT).
+pub fn tty_signal(sig: i32) {
+    TTY_SIGNALS.fetch_or(bit(sig), Ordering::SeqCst);
 }
 
 /// Called from the timer interrupt.
@@ -901,10 +1053,40 @@ fn bit(sig: i32) -> u64 {
     1u64 << (sig - 1)
 }
 
-/// Signals whose default action is to do nothing (no job control yet, so
-/// stop/continue are ignored too).
-fn ignored_by_default(sig: i32) -> bool {
-    matches!(sig, 17 | 18 | 19 | 20 | 21 | 22 | 23 | 28) // CHLD CONT STOP TSTP TTIN TTOU URG WINCH
+fn lowest(set: u64) -> i32 {
+    set.trailing_zeros() as i32 + 1
+}
+
+/// Is `pgid` an orphaned process group: no member has a parent outside the
+/// group (other than the kernel)? Nobody could continue such a group, so
+/// Ctrl-Z and friends (SIGTSTP, SIGTTIN, SIGTTOU) don't stop it (POSIX).
+/// Programs the kernel starts (login, sh) are in orphaned groups.
+fn orphaned_locked(table: &BTreeMap<u64, Box<Process>>, pgid: u64) -> bool {
+    !table.values().any(|m| {
+        m.pgid == pgid && m.ppid != 0 && table.get(&m.ppid).is_some_and(|parent| parent.pgid != pgid)
+    })
+}
+
+/// Would delivering `sig` to `p` do nothing (so it may as well be dropped)?
+fn discarded(p: &Process, sig: i32) -> bool {
+    let act = p.actions[(sig - 1) as usize];
+    sig != SIGKILL
+        && (act.handler == SIG_IGN
+            || (act.handler == SIG_DFL && matches!(default_action(sig), DefaultAction::Ignore | DefaultAction::Continue)))
+}
+
+/// Tell a parent its child stopped, continued or exited: wake it if it's in
+/// wait4, and send it SIGCHLD (unless it asked for SA_NOCLDSTOP).
+fn notify_parent_locked(table: &mut BTreeMap<u64, Box<Process>>, child: u64, stop_or_continue: bool) {
+    let Some(ppid) = table.get(&child).map(|c| c.ppid) else { return };
+    let Some(parent) = table.get_mut(&ppid) else { return };
+    if parent.state == State::Waiting {
+        parent.state = State::Ready;
+    }
+    let nocldstop = parent.actions[(SIGCHLD - 1) as usize].flags & SA_NOCLDSTOP != 0;
+    if ppid != 0 && !(stop_or_continue && nocldstop) {
+        signal_locked(table, ppid, SIGCHLD);
+    }
 }
 
 /// Send `sig` to one process. Returns false if there's no such process.
@@ -912,16 +1094,42 @@ fn signal_locked(table: &mut BTreeMap<u64, Box<Process>>, pid: u64, sig: i32) ->
     if pid == 0 {
         return false; // the kernel can't be signaled
     }
-    let Some(p) = table.get_mut(&pid) else { return false };
-    if sig == 0 || matches!(p.state, State::Zombie(_)) {
-        return true;
+    let orphan = {
+        let Some(p) = table.get(&pid) else { return false };
+        if sig == 0 || matches!(p.state, State::Zombie(_)) {
+            return true;
+        }
+        orphaned_locked(table, p.pgid)
+    };
+    let mut continued = false;
+    {
+        let p = table.get_mut(&pid).unwrap();
+        if sig == SIGCONT {
+            // Continuing happens whatever the handler: the process must run
+            // to handle anything. Pending stops are cancelled.
+            p.pending &= !STOP_SIGNALS;
+            if p.state == State::Stopped {
+                p.state = State::Ready;
+                p.wait_event = Some(0xffff);
+                continued = true;
+            }
+        } else if STOP_SIGNALS & bit(sig) != 0 {
+            p.pending &= !bit(SIGCONT);
+        }
+        let default_stop = p.actions[(sig - 1) as usize].handler == SIG_DFL && sig != SIGSTOP && STOP_SIGNALS & bit(sig) != 0;
+        if !discarded(p, sig) && !(default_stop && orphan) {
+            p.pending |= bit(sig);
+            let wake = sig == SIGKILL || p.blocked & bit(sig) == 0;
+            if wake && matches!(p.state, State::Waiting | State::Sleeping | State::Blocked(_)) {
+                p.state = State::Ready; // so it notices
+            }
+            if sig == SIGKILL && p.state == State::Stopped {
+                p.state = State::Ready;
+            }
+        }
     }
-    if sig != SIGKILL && (p.ignored & bit(sig) != 0 || ignored_by_default(sig)) {
-        return true;
-    }
-    p.pending |= bit(sig);
-    if matches!(p.state, State::Waiting | State::Sleeping | State::Blocked(_)) {
-        p.state = State::Ready; // so it notices
+    if continued {
+        notify_parent_locked(table, pid, true);
     }
     true
 }
@@ -931,47 +1139,174 @@ fn signal_group_locked(table: &mut BTreeMap<u64, Box<Process>>, pgid: u64, sig: 
     members.iter().filter(|&&pid| signal_locked(table, pid, sig)).count()
 }
 
-fn deliver_ctrl_c(table: &mut BTreeMap<u64, Box<Process>>) {
-    if CTRL_C.swap(false, Ordering::SeqCst) {
+/// Send the signals typed at the keyboard to the foreground process group.
+fn deliver_tty_signals(table: &mut BTreeMap<u64, Box<Process>>) {
+    let mut sigs = TTY_SIGNALS.swap(0, Ordering::SeqCst);
+    while sigs != 0 {
+        let sig = lowest(sigs);
+        sigs &= !bit(sig);
         let fg = foreground();
-        if fg != 0 && signal_group_locked(table, fg, SIGINT) > 0 {
-            crate::println!("^C");
+        if fg == 0 || !table.values().any(|p| p.pgid == fg && p.pid != 0) {
+            continue;
+        }
+        if sig == SIGTSTP && orphaned_locked(table, fg) {
+            continue; // nobody could continue it
+        }
+        signal_group_locked(table, fg, sig);
+        match sig {
+            SIGINT => crate::println!("^C"),
+            SIGTSTP => crate::println!("^Z"),
+            SIGQUIT => crate::println!("^\\"),
+            _ => {}
         }
     }
 }
 
-fn has_pending_locked(table: &BTreeMap<u64, Box<Process>>, pid: u64) -> bool {
-    table.get(&pid).is_some_and(|p| p.pending & !p.ignored != 0)
+/// Fire SIGALRM for every alarm that's due.
+fn fire_alarms_locked(table: &mut BTreeMap<u64, Box<Process>>) {
+    let now = ticks();
+    let due: Vec<u64> = table.values().filter(|p| p.alarm_at != 0 && now >= p.alarm_at).map(|p| p.pid).collect();
+    for pid in due {
+        let p = table.get_mut(&pid).unwrap();
+        p.alarm_at = if p.alarm_every > 0 { now + p.alarm_every } else { 0 };
+        signal_locked(table, pid, SIGALRM);
+    }
 }
 
-/// Does the current process have a signal to act on? (Blocking syscalls
-/// check this and return EINTR.)
+/// Is there a signal for `pid` that will interrupt what it's doing: one it
+/// handles, or one that ends it? (Not blocked, ignored, or stop/continue.)
+fn loud_pending_locked(table: &BTreeMap<u64, Box<Process>>, pid: u64) -> bool {
+    let Some(p) = table.get(&pid) else { return false };
+    let mut set = p.pending & !p.blocked;
+    while set != 0 {
+        let sig = lowest(set);
+        set &= !bit(sig);
+        let act = p.actions[(sig - 1) as usize];
+        if act.handler > SIG_IGN || (act.handler == SIG_DFL && default_action(sig) == DefaultAction::Terminate) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Called by blocking syscalls while they wait, and before returning to the
+/// program. Deals with signals the program never sees: ignored ones are
+/// dropped, and stop signals stop the process right here (it continues
+/// waiting after SIGCONT, so `sleep 10`, Ctrl-Z, `fg` still sleeps 10 s).
+/// Returns true if a signal remains that should interrupt the syscall
+/// (EINTR): one with a handler, or one that ends the process.
 pub fn signal_pending() -> bool {
-    let mut table = TABLE.lock();
-    deliver_ctrl_c(&mut table);
-    has_pending_locked(&table, current_pid())
+    loop {
+        {
+            let mut table = TABLE.lock();
+            deliver_tty_signals(&mut table);
+            fire_alarms_locked(&mut table);
+            let cur = current_pid();
+            if cur == 0 {
+                return false;
+            }
+            let orphan = orphaned_locked(&table, table[&cur].pgid);
+            let p = table.get_mut(&cur).unwrap();
+            let mut set = p.pending & !p.blocked;
+            let mut stop = None;
+            while set != 0 {
+                let sig = lowest(set);
+                set &= !bit(sig);
+                let act = p.actions[(sig - 1) as usize];
+                if act.handler > SIG_IGN || (act.handler == SIG_DFL && default_action(sig) == DefaultAction::Terminate) {
+                    return true;
+                }
+                p.pending &= !bit(sig);
+                if act.handler == SIG_DFL && default_action(sig) == DefaultAction::Stop && !(orphan && sig != SIGSTOP) {
+                    stop = Some(sig);
+                    break;
+                }
+            }
+            let Some(sig) = stop else { return false };
+            p.state = State::Stopped;
+            p.wait_event = Some(((sig as u32) << 8) | 0x7f);
+            notify_parent_locked(&mut table, cur, true);
+        }
+        schedule(); // until SIGCONT (or SIGKILL)
+    }
 }
 
-/// Act on pending signals before returning to ring 3. Every signal we
-/// deliver has the default action "terminate" (handlers aren't supported
-/// yet), so this ends the process.
-pub fn handle_signals() {
-    let sig = {
-        let mut table = TABLE.lock();
-        deliver_ctrl_c(&mut table);
-        let cur = current_pid();
-        match table.get_mut(&cur) {
-            Some(p) if cur != 0 => {
-                let deliverable = p.pending & !p.ignored;
-                if deliverable == 0 {
-                    return;
-                }
-                deliverable.trailing_zeros() as i32 + 1
-            }
-            _ => return,
+/// Syscalls that SA_RESTART restarts after a handler (not sleeps or waits
+/// for signals, which always report EINTR, as on Linux).
+fn restartable(num: u64) -> bool {
+    !matches!(num, SYS_NANOSLEEP | SYS_PAUSE | SYS_RT_SIGSUSPEND)
+}
+
+/// Act on pending signals before returning to ring 3 (after a syscall,
+/// with its number and result, or from the timer). A handler is run by
+/// rewriting `frame` so the program "returns" into it; the default action
+/// may end the process instead.
+pub fn handle_signals(frame: &mut SyscallFrame, syscall: Option<(u64, i64)>) {
+    let restart = |frame: &mut SyscallFrame| {
+        // Back up over `int 0x80` (2 bytes) with the syscall number in rax:
+        // the program makes the same call again.
+        if let Some((num, _)) = syscall {
+            frame.rax = num;
+            frame.rip -= 2;
         }
     };
-    exit_current(ExitReason::Signaled(sig));
+    if !signal_pending() {
+        // Interrupted, but nothing for the program to see (e.g. it was
+        // stopped and continued): just carry on with the syscall.
+        if matches!(syscall, Some((num, ret)) if ret == -EINTR && restartable(num)) {
+            restart(frame);
+        }
+        let mut table = TABLE.lock();
+        if let Some(p) = table.get_mut(&current_pid()) {
+            if let Some(mask) = p.saved_mask.take() {
+                p.blocked = mask;
+            }
+        }
+        return;
+    }
+    let (sig, act, old_mask) = {
+        let mut table = TABLE.lock();
+        let p = table.get_mut(&current_pid()).unwrap();
+        // signal_pending dropped everything quieter: the lowest deliverable
+        // signal is the one to act on.
+        let sig = lowest(p.pending & !p.blocked);
+        p.pending &= !bit(sig);
+        let act = p.actions[(sig - 1) as usize];
+        if act.handler == SIG_DFL {
+            drop(table);
+            exit_current(ExitReason::Signaled(sig));
+        }
+        let old_mask = p.saved_mask.take().unwrap_or(p.blocked);
+        let mut during = p.blocked | act.mask;
+        if act.flags & SA_NODEFER == 0 {
+            during |= bit(sig);
+        }
+        p.blocked = during & !UNBLOCKABLE;
+        if act.flags & SA_RESETHAND != 0 {
+            p.actions[(sig - 1) as usize] = SigAction::DEFAULT;
+        }
+        (sig, act, old_mask)
+    };
+    if matches!(syscall, Some((num, ret)) if ret == -EINTR && restartable(num)) && act.flags & SA_RESTART != 0 {
+        restart(frame);
+    }
+    // No way back from the handler without a restorer (libc always gives one).
+    if act.flags & SA_RESTORER == 0 || crate::signal::setup_frame(frame, sig, act.handler, act.restorer, old_mask).is_err() {
+        exit_current(ExitReason::Signaled(SIGSEGV));
+    }
+}
+
+/// rt_sigreturn(): back from a handler. Restores the registers and signal
+/// mask saved in the frame on the user stack. Returns the restored rax.
+pub fn sys_rt_sigreturn(frame: &mut SyscallFrame) -> i64 {
+    match crate::signal::restore_frame(frame) {
+        Ok(mask) => {
+            let mut table = TABLE.lock();
+            table.get_mut(&current_pid()).unwrap().blocked = mask & !UNBLOCKABLE;
+            frame.rax as i64
+        }
+        Err(()) => exit_current(ExitReason::Signaled(SIGSEGV)),
+    }
 }
 
 /// kill(pid, sig)
@@ -985,7 +1320,8 @@ pub fn sys_kill(pid: u64, sig: u64) -> i64 {
     let cur = current_pid();
     let me = table.get(&cur).map(|p| p.cred.clone()).unwrap_or(Cred::ROOT);
     // POSIX: root may signal anything; others only processes whose real or
-    // saved user ID matches their real or effective one.
+    // saved user ID matches their real or effective one. (SIGCONT may go to
+    // anything in the same... we have no sessions, so the same rule.)
     let allowed = |p: &Process| {
         me.euid == 0 || [me.ruid, me.euid].iter().any(|&u| u == p.cred.ruid || u == p.cred.suid)
     };
@@ -1010,6 +1346,14 @@ pub fn sys_kill(pid: u64, sig: u64) -> i64 {
         signal_locked(&mut table, t, sig);
     }
     0
+}
+
+/// tgkill(tgid, tid, sig) and tkill(tid, sig): one thread is one process here.
+pub fn sys_tkill(tid: u64, sig: u64) -> i64 {
+    if tid as i64 <= 0 {
+        return -EINVAL;
+    }
+    sys_kill(tid, sig)
 }
 
 /// setpgid(pid, pgid): 0 means "the caller" / "same as pid".
@@ -1038,41 +1382,195 @@ pub fn set_foreground(pgid: u64) {
     FOREGROUND.store(pgid, Ordering::SeqCst);
 }
 
-/// rt_sigaction(sig, act, oldact, sigsetsize): only SIG_DFL and SIG_IGN are
-/// supported (no user handlers yet).
+fn read_u64(ptr: u64) -> Result<u64, i64> {
+    match unsafe { user_slice(ptr, 8) } {
+        Some(b) => Ok(u64::from_le_bytes(b.try_into().unwrap())),
+        None => Err(EFAULT),
+    }
+}
+
+fn write_u64(ptr: u64, v: u64) -> Result<(), i64> {
+    match unsafe { user_slice_mut(ptr, 8) } {
+        Some(out) => {
+            out.copy_from_slice(&v.to_le_bytes());
+            Ok(())
+        }
+        None => Err(EFAULT),
+    }
+}
+
+/// rt_sigaction(sig, act, oldact, sigsetsize): set what a signal does:
+/// SIG_DFL, SIG_IGN, or a handler (with flags and a mask).
 pub fn sys_rt_sigaction(sig: u64, act: u64, oldact: u64) -> i64 {
-    const SIG_DFL: u64 = 0;
-    const SIG_IGN: u64 = 1;
     let sig = sig as i32;
-    if !(1..=MAX_SIGNAL).contains(&sig) || (act != 0 && (sig == SIGKILL || sig == SIGSTOP)) {
+    if !(1..=MAX_SIGNAL).contains(&sig) || (act != 0 && bit(sig) & UNBLOCKABLE != 0) {
         return -EINVAL;
     }
-    let new_handler = if act != 0 {
-        match unsafe { user_slice(act, 8) } {
-            Some(b) => Some(u64::from_le_bytes(b.try_into().unwrap())),
+    let new = if act != 0 {
+        match unsafe { user_slice(act, 32) } {
+            Some(b) => {
+                let word = |i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+                Some(SigAction { handler: word(0), flags: word(1), restorer: word(2), mask: word(3) & !UNBLOCKABLE })
+            }
             None => return -EFAULT,
         }
     } else {
         None
     };
-    if matches!(new_handler, Some(h) if h != SIG_DFL && h != SIG_IGN) {
-        return -EINVAL; // signal handlers aren't supported yet
-    }
     let mut table = TABLE.lock();
     let p = table.get_mut(&current_pid()).unwrap();
+    let old = p.actions[(sig - 1) as usize];
     if oldact != 0 {
-        // struct sigaction: handler, flags, restorer, mask
         let Some(out) = (unsafe { user_slice_mut(oldact, 32) }) else { return -EFAULT };
-        out.fill(0);
-        let old = if p.ignored & bit(sig) != 0 { SIG_IGN } else { SIG_DFL };
-        out[..8].copy_from_slice(&old.to_le_bytes());
-    }
-    match new_handler {
-        Some(SIG_IGN) => p.ignored |= bit(sig),
-        Some(_) => {
-            p.ignored &= !bit(sig);
+        for (i, v) in [old.handler, old.flags, old.restorer, old.mask].into_iter().enumerate() {
+            out[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
         }
-        None => {}
+    }
+    if let Some(new) = new {
+        p.actions[(sig - 1) as usize] = new;
+        // Setting a signal to be ignored drops it if it's pending (POSIX).
+        if discarded(p, sig) {
+            p.pending &= !bit(sig);
+        }
+    }
+    0
+}
+
+/// rt_sigprocmask(how, set, oldset, sigsetsize): change the signal mask.
+pub fn sys_rt_sigprocmask(how: u64, set: u64, oldset: u64) -> i64 {
+    const SIG_BLOCK: u64 = 0;
+    const SIG_UNBLOCK: u64 = 1;
+    const SIG_SETMASK: u64 = 2;
+    let new = if set != 0 {
+        match read_u64(set) {
+            Ok(v) => Some(v),
+            Err(e) => return -e,
+        }
+    } else {
+        None
+    };
+    let mut table = TABLE.lock();
+    let p = table.get_mut(&current_pid()).unwrap();
+    if oldset != 0 {
+        if let Err(e) = write_u64(oldset, p.blocked) {
+            return -e;
+        }
+    }
+    if let Some(v) = new {
+        p.blocked = match how {
+            SIG_BLOCK => p.blocked | v,
+            SIG_UNBLOCK => p.blocked & !v,
+            SIG_SETMASK => v,
+            _ => return -EINVAL,
+        } & !UNBLOCKABLE;
+        // Newly unblocked signals are delivered on the way out of this syscall.
+    }
+    0
+}
+
+/// rt_sigpending(set, sigsetsize): the signals waiting because they're blocked.
+pub fn sys_rt_sigpending(set: u64) -> i64 {
+    let pending = {
+        let table = TABLE.lock();
+        let p = &table[&current_pid()];
+        p.pending & p.blocked
+    };
+    match write_u64(set, pending) {
+        Ok(()) => 0,
+        Err(e) => -e,
+    }
+}
+
+/// Never woken by wake(): sigsuspend and pause wait for a signal only.
+const SIGNAL_ONLY: u64 = u64::MAX;
+
+/// rt_sigsuspend(mask, sigsetsize): wait for a signal with `mask` in effect
+/// (the old mask comes back after the handler). Always returns EINTR.
+/// With mask = None, it's pause().
+pub fn sys_rt_sigsuspend(mask: Option<u64>) -> i64 {
+    let mask = match mask.map(read_u64) {
+        Some(Ok(m)) => Some(m),
+        Some(Err(e)) => return -e,
+        None => None,
+    };
+    if let Some(m) = mask {
+        let mut table = TABLE.lock();
+        let p = table.get_mut(&current_pid()).unwrap();
+        p.saved_mask = Some(p.blocked);
+        p.blocked = m & !UNBLOCKABLE;
+    }
+    loop {
+        if signal_pending() {
+            return -EINTR;
+        }
+        {
+            let mut table = TABLE.lock();
+            let cur = current_pid();
+            if loud_pending_locked(&table, cur) {
+                return -EINTR;
+            }
+            table.get_mut(&cur).unwrap().state = State::Blocked(SIGNAL_ONLY);
+        }
+        schedule();
+    }
+}
+
+fn ticks_from(sec: u64, usec: u64) -> u64 {
+    (sec.saturating_mul(1_000_000_000).saturating_add(usec.saturating_mul(1000))).div_ceil(TICK_NS)
+}
+
+/// The current alarm as (seconds, microseconds) left, and its interval.
+fn alarm_left(p: &Process) -> ((u64, u64), (u64, u64)) {
+    let split = |t: u64| {
+        let ns = t * TICK_NS;
+        (ns / 1_000_000_000, (ns % 1_000_000_000) / 1000)
+    };
+    let left = if p.alarm_at == 0 { 0 } else { p.alarm_at.saturating_sub(ticks()).max(1) };
+    (split(left), split(p.alarm_every))
+}
+
+/// alarm(seconds): SIGALRM after that long (0 cancels). Returns the seconds
+/// left on the previous alarm.
+pub fn sys_alarm(secs: u64) -> i64 {
+    let mut table = TABLE.lock();
+    let p = table.get_mut(&current_pid()).unwrap();
+    let ((s, us), _) = alarm_left(p);
+    // Rounded to the nearest second (ticks are ~55 ms), but at least 1.
+    let old = if p.alarm_at == 0 { 0 } else { (s + (us >= 500_000) as u64).max(1) };
+    p.alarm_at = if secs == 0 { 0 } else { ticks() + ticks_from(secs, 0) };
+    p.alarm_every = 0;
+    old as i64
+}
+
+/// getitimer(which, value) / setitimer(which, new, old): only ITIMER_REAL
+/// (SIGALRM) is supported. struct itimerval = { interval, value } timevals.
+pub fn sys_itimer(which: u64, new: u64, old: u64) -> i64 {
+    if which != 0 {
+        return -EINVAL;
+    }
+    let new = if new != 0 {
+        match unsafe { user_slice(new, 32) } {
+            Some(b) => {
+                let w = |i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+                Some((ticks_from(w(0), w(1)), ticks_from(w(2), w(3))))
+            }
+            None => return -EFAULT,
+        }
+    } else {
+        None
+    };
+    let mut table = TABLE.lock();
+    let p = table.get_mut(&current_pid()).unwrap();
+    if old != 0 {
+        let ((vs, vus), (is, ius)) = alarm_left(p);
+        let Some(out) = (unsafe { user_slice_mut(old, 32) }) else { return -EFAULT };
+        for (i, v) in [is, ius, vs, vus].into_iter().enumerate() {
+            out[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    if let Some((interval, value)) = new {
+        p.alarm_at = if value == 0 { 0 } else { ticks() + value };
+        p.alarm_every = interval;
     }
     0
 }
@@ -1088,14 +1586,22 @@ pub fn sys_nanosleep(req: u64, rem: u64) -> i64 {
     }
     let total = (sec as u64).saturating_mul(1_000_000_000).saturating_add(nsec as u64);
     let wake_at = ticks() + total.div_ceil(TICK_NS);
-    {
-        let mut table = TABLE.lock();
-        let p = table.get_mut(&current_pid()).unwrap();
-        p.wake_at = wake_at;
-        p.state = State::Sleeping;
+    loop {
+        if ticks() >= wake_at {
+            return 0;
+        }
+        if signal_pending() {
+            break;
+        }
+        {
+            let mut table = TABLE.lock();
+            let p = table.get_mut(&current_pid()).unwrap();
+            p.wake_at = wake_at;
+            p.state = State::Sleeping;
+        }
+        schedule();
     }
-    schedule();
-    if signal_pending() {
+    {
         if rem != 0 {
             if let Some(out) = unsafe { user_slice_mut(rem, 16) } {
                 let left = wake_at.saturating_sub(ticks()) * TICK_NS;
@@ -1105,7 +1611,6 @@ pub fn sys_nanosleep(req: u64, rem: u64) -> i64 {
         }
         return -EINTR;
     }
-    0
 }
 
 /// clock_gettime(clock, tp)
@@ -1140,10 +1645,13 @@ pub fn wake(key: u64) {
 /// Sleep until someone calls `wake(key)` (or a signal arrives). Callers
 /// re-check their condition afterwards.
 pub fn block_on(key: u64) {
+    if signal_pending() {
+        return; // (this also stops the process here for SIGTSTP & co.)
+    }
     {
         let mut table = TABLE.lock();
         let cur = current_pid();
-        if has_pending_locked(&table, cur) {
+        if loud_pending_locked(&table, cur) {
             return;
         }
         table.get_mut(&cur).unwrap().state = State::Blocked(key);
@@ -1183,12 +1691,15 @@ pub struct ProcInfo {
     pub cred: Cred,
     pub uid: u32,
     pub gid: u32,
+    /// Signals: pending, blocked, ignored, caught (with a handler).
+    pub signals: [u64; 4],
 }
 
 fn state_letter(s: State) -> char {
     match s {
         State::Running | State::Ready => 'R',
         State::Waiting | State::Sleeping | State::Blocked(_) => 'S',
+        State::Stopped => 'T',
         State::Zombie(_) => 'Z',
     }
 }
@@ -1222,6 +1733,12 @@ pub fn snapshot(only: Option<u64>) -> Vec<ProcInfo> {
                 cred: p.cred.clone(),
                 uid: p.cred.ruid,
                 gid: p.cred.rgid,
+                signals: {
+                    let set = |f: &dyn Fn(&SigAction) -> bool| {
+                        p.actions.iter().enumerate().filter(|(_, a)| f(a)).fold(0u64, |m, (i, _)| m | 1 << i)
+                    };
+                    [p.pending, p.blocked, set(&|a| a.handler == SIG_IGN), set(&|a| a.handler > SIG_IGN)]
+                },
             }
         })
         .collect()

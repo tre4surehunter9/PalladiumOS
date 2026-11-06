@@ -67,8 +67,16 @@ pub fn restore_fds(saved: Vec<(i32, isize)>) {
         }
     }
 }
+/// $? for a wait status: the exit code, or 128 + the signal that killed
+/// (or stopped) it.
 pub fn shell_status(status: i32) -> i32 {
-    if wifsignaled(status) { 128 + wtermsig(status) } else { wexitstatus(status) }
+    if wifstopped(status) {
+        128 + wstopsig(status)
+    } else if wifsignaled(status) {
+        128 + wtermsig(status)
+    } else {
+        wexitstatus(status)
+    }
 }
 pub fn cwd() -> String {
     let mut buf = [0u8; 1024];
@@ -151,6 +159,7 @@ fn main(args: Args) -> i32 {
             let mut sh = Shell::new(params, false);
             setup(&mut sh);
             sh.run_text(script);
+            sh.run_exit_trap();
             sh.exit_status()
         }
         Some(file) => {
@@ -164,6 +173,7 @@ fn main(args: Args) -> i32 {
             let mut sh = Shell::new(argv[1..].to_vec(), false);
             setup(&mut sh);
             sh.run_text(&text);
+            sh.run_exit_trap();
             sh.exit_status()
         }
         None => interactive(argv.first().cloned().unwrap_or_else(|| "sh".to_string())),
@@ -186,14 +196,19 @@ fn prompt_text() -> String {
 
 fn interactive(name: String) -> i32 {
     let mut sh = Shell::new(vec![name], true);
-    // Ctrl-C interrupts commands, not the interactive shell.
-    set_signal(SIGINT, SIG_IGN);
+    // Ctrl-C interrupts commands and Ctrl-Z stops them, not the interactive
+    // shell itself.
+    for sig in shell::SHELL_IGNORED {
+        set_signal(sig, SIG_IGN);
+    }
     tcsetpgrp(STDIN, getpgrp());
     println!("PalladiumOS shell. Type 'help' for commands.");
     let mut editor = LineEditor::new();
     let tty = isatty(STDIN);
+    let mut warned_stopped = false;
 
     loop {
+        sh.run_traps();
         sh.reap_jobs();
         sh.interrupted = false;
         // Read lines until they form a complete command (an `if` or a
@@ -212,8 +227,9 @@ fn interactive(name: String) -> i32 {
                     eprintln!("sh: syntax error: unexpected end of file");
                 }
                 println!();
+                sh.run_exit_trap();
                 sh.hang_up_jobs();
-                return sh.status; // Ctrl-D
+                return sh.exit_status(); // Ctrl-D
             };
             text.push_str(&line);
             text.push('\n');
@@ -234,9 +250,18 @@ fn interactive(name: String) -> i32 {
             sh.continuing = 0;
             sh.returning = false;
         }
-        if let Some(code) = sh.exit_requested {
+        if sh.exit_requested.is_some() {
+            if sh.jobs.iter().any(|j| j.stopped) && !warned_stopped {
+                // Like bash: a second `exit` really exits.
+                println!("There are stopped jobs.");
+                warned_stopped = true;
+                sh.exit_requested = None;
+                continue;
+            }
+            sh.run_exit_trap();
             sh.hang_up_jobs();
-            return code;
+            return sh.exit_status();
         }
+        warned_stopped = false;
     }
 }

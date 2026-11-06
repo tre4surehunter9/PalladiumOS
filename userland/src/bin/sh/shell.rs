@@ -7,13 +7,78 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use userlib::*;
 
-use crate::lex::{lex, LexError, Redir, RedirKind};
+use crate::lex::{lex, LexError, Part, Redir, RedirKind, Word};
 use crate::parse::{parse, AndOr, Cmd, Compound, Connector, List, ParseError, Pipeline, Simple};
 use crate::shell_status;
 
 pub struct Var {
     pub value: String,
     pub exported: bool,
+}
+
+/// A job: a command running in the background or stopped with Ctrl-Z.
+/// With job control, it's a process group (the pgid is its first pid).
+pub struct Job {
+    pub pgid: i32,
+    /// The processes not yet finished.
+    pub pids: Vec<i32>,
+    /// The command, for `jobs` and messages.
+    pub text: String,
+    pub stopped: bool,
+}
+
+/// Signals that arrived for `trap` commands, as a bit set (bit n = signal
+/// n); the handler only records them, and the shell runs the commands
+/// between commands.
+static TRAPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+extern "C" fn trap_handler(sig: i32) {
+    TRAPPED.fetch_or(1 << sig, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Signals the interactive shell itself ignores (they're for its jobs).
+pub const SHELL_IGNORED: [i32; 5] = [SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU];
+
+/// In a child that will run a command: the default actions again.
+pub fn child_signals() {
+    for sig in SHELL_IGNORED {
+        set_signal(sig, SIG_DFL);
+    }
+}
+
+/// A short text for a command, for job messages ("sleep 10 | wc").
+pub fn describe_cmd(cmd: &Cmd) -> String {
+    match cmd {
+        Cmd::Simple(s) => s.words.iter().map(|w| describe_word(w)).collect::<Vec<_>>().join(" "),
+        Cmd::Compound(..) => "(...)".to_string(),
+        Cmd::FuncDef(name, _) => format!("{}() {{...}}", name),
+    }
+}
+
+fn describe_word(word: &Word) -> String {
+    word.iter()
+        .map(|part| match part {
+            Part::Lit(t) => t.clone(),
+            Part::Quoted(t) => t.clone(),
+            Part::Param { name, .. } => format!("${}", name),
+            Part::CmdSub { src, .. } => format!("$({})", src),
+            Part::Arith { src, .. } => format!("$(({}))", src),
+            Part::Home => "~".to_string(),
+        })
+        .collect()
+}
+
+pub fn describe_pipeline(p: &Pipeline) -> String {
+    p.cmds.iter().map(describe_cmd).collect::<Vec<_>>().join(" | ")
+}
+
+pub fn describe_and_or(ao: &AndOr) -> String {
+    let mut text = describe_pipeline(&ao.first);
+    for (conn, p) in &ao.rest {
+        text.push_str(if matches!(conn, Connector::And) { " && " } else { " || " });
+        text.push_str(&describe_pipeline(p));
+    }
+    text
 }
 
 pub struct Shell {
@@ -23,8 +88,10 @@ pub struct Shell {
     pub functions: BTreeMap<String, Compound>,
     pub status: i32,
     pub interactive: bool,
-    /// Background jobs (pids) not yet reported.
-    pub jobs: Vec<i32>,
+    /// Background and stopped jobs not yet reported as done.
+    pub jobs: Vec<Job>,
+    /// `trap` commands by signal number (0 = EXIT; "" = ignore).
+    pub traps: BTreeMap<i32, String>,
     pub last_background: i32,
     /// Set by `exit`.
     pub exit_requested: Option<i32>,
@@ -66,6 +133,7 @@ impl Shell {
             status: 0,
             interactive,
             jobs: Vec::new(),
+            traps: BTreeMap::new(),
             last_background: 0,
             exit_requested: None,
             breaking: 0,
@@ -159,10 +227,67 @@ impl Shell {
     /// works normally for whatever it runs.
     pub fn become_subshell(&mut self) {
         if self.interactive {
-            set_signal(SIGINT, SIG_DFL);
+            child_signals();
         }
         self.interactive = false;
         self.jobs.clear();
+        // Traps with commands don't carry into subshells; ignored ones do.
+        let caught: Vec<i32> = self.traps.iter().filter(|(_, c)| !c.is_empty()).map(|(s, _)| *s).collect();
+        for sig in caught {
+            self.traps.remove(&sig);
+            if sig != 0 {
+                set_signal(sig, SIG_DFL);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ traps
+
+    /// trap ACTION SIGNAL...: run ACTION when the signal arrives ("" ignores
+    /// it, "-" restores the default).
+    pub fn set_trap(&mut self, sig: i32, action: &str) -> isize {
+        if action == "-" {
+            self.traps.remove(&sig);
+            if sig == 0 {
+                return 0;
+            }
+            // The interactive shell's own default for job-control signals is "ignore".
+            let ignore = self.interactive && SHELL_IGNORED.contains(&sig);
+            return set_signal(sig, if ignore { SIG_IGN } else { SIG_DFL });
+        }
+        self.traps.insert(sig, action.to_string());
+        if sig == 0 {
+            return 0;
+        }
+        if action.is_empty() {
+            set_signal(sig, SIG_IGN)
+        } else {
+            signal(sig, trap_handler)
+        }
+    }
+
+    /// Run the commands for signals that arrived. `$?` is kept.
+    pub fn run_traps(&mut self) {
+        let mut pending = TRAPPED.swap(0, core::sync::atomic::Ordering::SeqCst);
+        while pending != 0 {
+            let sig = pending.trailing_zeros() as i32;
+            pending &= !(1 << sig);
+            if let Some(cmd) = self.traps.get(&sig).filter(|c| !c.is_empty()).cloned() {
+                let status = self.status;
+                self.run_text(&cmd);
+                self.status = status;
+            }
+        }
+    }
+
+    /// The EXIT trap, when the shell exits (once).
+    pub fn run_exit_trap(&mut self) {
+        if let Some(cmd) = self.traps.remove(&0).filter(|c| !c.is_empty()) {
+            let status = self.exit_status();
+            self.exit_requested = None;
+            self.run_text(&cmd);
+            self.exit_requested = Some(self.exit_requested.unwrap_or(status));
+        }
     }
 
     // ------------------------------------------------------------ running
@@ -188,6 +313,7 @@ impl Shell {
             } else {
                 self.run_and_or(ao);
             }
+            self.run_traps();
         }
     }
 
@@ -249,26 +375,97 @@ impl Shell {
             setpgid(pid as i32, pid as i32); // also in the child: whichever runs first
             println!("[{}] {}", self.jobs.len() + 1, pid);
         }
-        self.jobs.push(pid as i32);
+        let pid = pid as i32;
+        self.jobs.push(Job { pgid: pid, pids: alloc::vec![pid], text: describe_and_or(ao), stopped: false });
         self.last_background = pid as i32;
         self.status = 0;
     }
 
     /// Report background jobs that have finished (before each prompt).
     pub fn reap_jobs(&mut self) {
-        let mut status = 0;
         let mut i = 0;
         while i < self.jobs.len() {
-            let pid = self.jobs[i];
-            if waitpid(pid, &mut status, WNOHANG) == pid as isize {
-                if self.interactive {
-                    println!("[{}] {} Done ({})", i + 1, pid, shell_status(status));
+            let mut status = 0;
+            let mut last = None;
+            let mut stopped = None;
+            let options = WNOHANG | if self.interactive { WUNTRACED | WCONTINUED } else { 0 };
+            self.jobs[i].pids.retain(|&pid| {
+                if waitpid(pid, &mut status, options) != pid as isize {
+                    return true;
                 }
-                self.jobs.remove(i);
+                if wifstopped(status) || wifcontinued(status) {
+                    stopped = Some(wifstopped(status)); // e.g. kill -STOP %1
+                    return true;
+                }
+                last = Some(status);
+                false
+            });
+            if let Some(now_stopped) = stopped {
+                let job = &mut self.jobs[i];
+                if now_stopped && !job.stopped {
+                    println!("[{}]+  {:<22} {}", i + 1, "Stopped", job.text);
+                }
+                job.stopped = now_stopped;
+            }
+            if self.jobs[i].pids.is_empty() {
+                let job = self.jobs.remove(i);
+                if self.interactive {
+                    let how = match last {
+                        Some(st) if wifsignaled(st) => match wtermsig(st) {
+                            SIGTERM => "Terminated".to_string(),
+                            SIGKILL => "Killed".to_string(),
+                            SIGINT => "Interrupt".to_string(),
+                            sig => format!("SIG{}", signal_name(sig).unwrap_or("?")),
+                        },
+                        Some(st) if wexitstatus(st) != 0 => format!("Exit {}", wexitstatus(st)),
+                        _ => "Done".to_string(),
+                    };
+                    println!("[{}]  {:<22} {}", i + 1, how, job.text);
+                }
             } else {
                 i += 1;
             }
         }
+    }
+
+    /// Wait for a foreground job (giving it the terminal if interactive).
+    /// If it's stopped by Ctrl-Z it becomes a stopped job in `jobs`. Returns
+    /// the status of the last process, and whether ^C killed any of them.
+    pub fn wait_job(&mut self, pgid: i32, pids: Vec<i32>, text: String) -> (i32, bool) {
+        if self.interactive && pgid > 0 {
+            tcsetpgrp(STDIN, pgid);
+        }
+        let options = if self.interactive { WUNTRACED } else { 0 };
+        let last_pid = pids.last().copied();
+        let mut last_status = 0;
+        let mut interrupted = false;
+        let mut left = pids.clone();
+        let mut stopped = None;
+        for &pid in &pids {
+            let mut status = 0;
+            if waitpid(pid, &mut status, options) != pid as isize {
+                left.retain(|&p| p != pid);
+                continue;
+            }
+            if wifstopped(status) {
+                stopped = Some(wstopsig(status));
+                break;
+            }
+            left.retain(|&p| p != pid);
+            interrupted |= wifsignaled(status) && wtermsig(status) == SIGINT;
+            if Some(pid) == last_pid {
+                last_status = status;
+            }
+        }
+        if self.interactive {
+            tcsetpgrp(STDIN, getpgrp()); // the terminal is ours again
+        }
+        if let Some(sig) = stopped {
+            self.jobs.push(Job { pgid, pids: left, text: text.clone(), stopped: true });
+            println!("[{}]+  {:<22} {}", self.jobs.len(), "Stopped", text);
+            return ((sig << 8) | 0x7f, false); // a "stopped" wait status
+        }
+        (last_status, interrupted)
     }
 
     fn run_pipeline(&mut self, p: &Pipeline) {
@@ -361,25 +558,10 @@ impl Shell {
             close(r);
         }
 
-        if self.interactive && pgid > 0 {
-            tcsetpgrp(STDIN, pgid);
-        }
-        let mut last_status = 0;
-        let mut any_interrupted = false;
-        for (i, &pid) in pids.iter().enumerate() {
-            let mut status = 0;
-            if waitpid(pid, &mut status, 0) == pid as isize {
-                any_interrupted |= wifsignaled(status) && wtermsig(status) == SIGINT;
-                if i + 1 == pids.len() {
-                    last_status = status;
-                }
-            }
-        }
-        if self.interactive {
-            tcsetpgrp(STDIN, getpgrp());
-            if any_interrupted {
-                self.interrupted = true;
-            }
+        let text = cmds.iter().map(describe_cmd).collect::<Vec<_>>().join(" | ");
+        let (last_status, any_interrupted) = self.wait_job(pgid, pids, text);
+        if self.interactive && any_interrupted {
+            self.interrupted = true;
         }
         self.status = if failed { 1 } else { shell_status(last_status) };
     }
@@ -586,24 +768,15 @@ impl Shell {
             self.run_list(list);
             exit(self.exit_status());
         }
-        self.wait_foreground(pid as i32, None);
+        self.wait_foreground(pid as i32, None, "( ... )".to_string());
     }
 
     /// Wait for a foreground child, giving it the terminal meanwhile.
-    fn wait_foreground(&mut self, pid: i32, name: Option<&str>) {
+    fn wait_foreground(&mut self, pid: i32, name: Option<&str>, text: String) {
         if self.interactive {
             setpgid(pid, pid);
-            tcsetpgrp(STDIN, pid);
         }
-        let mut status = 0;
-        let r = waitpid(pid, &mut status, 0);
-        if self.interactive {
-            tcsetpgrp(STDIN, getpgrp()); // the terminal is ours again
-        }
-        if r < 0 {
-            self.status = 1;
-            return;
-        }
+        let (status, _) = self.wait_job(pid, alloc::vec![pid], text);
         self.status = shell_status(status);
         if self.interactive && wifsignaled(status) {
             if wtermsig(status) == SIGINT {
@@ -695,14 +868,14 @@ impl Shell {
                 // interrupts this command and not the shell.
                 setpgid(0, 0);
                 tcsetpgrp(STDIN, getpid());
-                set_signal(SIGINT, SIG_DFL);
+                child_signals();
             }
             if self.apply_redirs(&cmd.redirs).is_err() {
                 exit(1);
             }
             self.exec_program(&words, &assigns);
         }
-        self.wait_foreground(pid as i32, Some(&words[0]));
+        self.wait_foreground(pid as i32, Some(&words[0]), words.join(" "));
     }
 
     fn call_function(&mut self, body: &Compound, words: &[String]) {
@@ -765,8 +938,11 @@ impl Shell {
 
     /// When the interactive shell exits, hang up its background jobs.
     pub fn hang_up_jobs(&mut self) {
-        for &pid in &self.jobs {
-            kill(-pid, SIGHUP);
+        for job in &self.jobs {
+            kill(-job.pgid, SIGHUP);
+            if job.stopped {
+                kill(-job.pgid, SIGCONT); // so it can act on the SIGHUP
+            }
         }
     }
 }

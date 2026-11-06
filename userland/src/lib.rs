@@ -42,6 +42,13 @@ pub mod sys {
     pub const PIPE: u64 = 22;
     pub const BRK: u64 = 12;
     pub const RT_SIGACTION: u64 = 13;
+    pub const RT_SIGPROCMASK: u64 = 14;
+    pub const RT_SIGRETURN: u64 = 15;
+    pub const PAUSE: u64 = 34;
+    pub const ALARM: u64 = 37;
+    pub const SETITIMER: u64 = 38;
+    pub const RT_SIGPENDING: u64 = 127;
+    pub const RT_SIGSUSPEND: u64 = 130;
     pub const IOCTL: u64 = 16;
     pub const SCHED_YIELD: u64 = 24;
     pub const NANOSLEEP: u64 = 35;

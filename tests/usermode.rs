@@ -690,8 +690,8 @@ fn sh_does_not_leak() {
     assert!(only_kernel_left());
 }
 
-/// Type `text` (lowercase letters, digits, space, '|', '>', '/' and '.')
-/// as PS/2 set-1 scancodes, then Enter.
+/// Type `text` (lowercase letters, digits, space, some capitals and
+/// punctuation) as PS/2 set-1 scancodes, then Enter.
 fn type_line(text: &str) {
     const LSHIFT: u8 = 0x2a;
     for c in text.chars() {
@@ -706,6 +706,9 @@ fn type_line(text: &str) {
             '1'..='9' => (false, 0x02 + (c as u8 - b'1')), '0' => (false, 0x0b),
             ' ' => (false, 0x39), '/' => (false, 0x35), '.' => (false, 0x34),
             '|' => (true, 0x2b), '>' => (true, 0x34),
+            '-' => (false, 0x0c), '\'' => (false, 0x28), ';' => (false, 0x27), '%' => (true, 0x06),
+            '$' => (true, 0x05), '?' => (true, 0x35), '&' => (true, 0x08), 'S' => (true, 0x1f),
+            'T' => (true, 0x14), 'O' => (true, 0x18), 'P' => (true, 0x19),
             _ => panic!("type_line: no scancode for {:?}", c),
         };
         if shift {
@@ -1445,4 +1448,84 @@ fn chown_chgrp_tools() {
     assert!(file("/tmp/own.st").contains("Uid: 0  Gid: 0"));
     assert_eq!(sh("chown nobody /tmp/own"), 1, "unknown user");
     assert_eq!(sh("su user -c 'chown user /tmp/own'"), 1, "only root gives files away");
+}
+
+// ---- signal handlers ----
+
+#[test_case]
+fn signal_handlers_masks_alarms_stop_continue() {
+    assert_eq!(run(prog("test_signals"), &["test_signals", "all"]), Ok(0));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn sh_trap() {
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("rm -f /tmp/t1; trap 'echo caught >> /tmp/t1' USR1; kill -USR1 $$; echo after >> /tmp/t1"), 0);
+    assert_eq!(file("/tmp/t1"), "caught\nafter\n");
+    // EXIT runs at the end, and the exit status is kept
+    assert_eq!(sh("rm -f /tmp/t2; trap 'echo bye >> /tmp/t2' EXIT; echo hi >> /tmp/t2; exit 4"), 4);
+    assert_eq!(file("/tmp/t2"), "hi\nbye\n");
+    // '' ignores, - restores the default (USR1 kills: 128 + 10)
+    assert_eq!(sh("trap '' INT; kill -INT $$; echo survived > /tmp/t3"), 0);
+    assert_eq!(file("/tmp/t3"), "survived\n");
+    assert_eq!(sh("trap 'echo x' USR1; trap - USR1; kill -USR1 $$; echo no"), 138);
+    // a trap doesn't change $?
+    assert_eq!(sh("trap 'false' USR1; true; kill -USR1 $$; exit $?"), 0);
+    // listing
+    assert_eq!(sh("trap 'echo a' INT EXIT; trap > /tmp/t4; trap - EXIT"), 0);
+    assert!(file("/tmp/t4").contains("trap -- 'echo a' SIGINT"), "{}", file("/tmp/t4"));
+    assert!(file("/tmp/t4").contains("trap -- 'echo a' EXIT"));
+    assert_eq!(sh("trap 'x' NOPE"), 1);
+    assert_eq!(sh("trap 'x' KILL"), 1);
+    // a trap command runs in the shell: it can set variables
+    assert_eq!(sh("trap 'n=5' USR2; kill -USR2 $$; exit $n"), 5);
+    assert!(only_kernel_left());
+}
+
+#[test_case]
+fn sh_job_control_stop_fg_bg() {
+    let _ = filesystem::make_dir("/tmp");
+    palladiumos::task::keyboard::init_queue();
+    // A job that stops itself (as Ctrl-Z would), then fg continues it.
+    type_line("sh -c 'kill -STOP $$; echo resumed > /tmp/jc1'");
+    type_line("echo $? > /tmp/jc0");
+    type_line("jobs > /tmp/jc2");
+    type_line("fg > /dev/null");
+    type_line("echo $? > /tmp/jc3");
+    // A background job stopped with kill, then continued with bg.
+    type_line("sleep 100 &");
+    type_line("kill -STOP %1");
+    type_line("sleep 1");
+    type_line("jobs > /tmp/jc4");
+    type_line("bg");
+    type_line("jobs > /tmp/jc5");
+    type_line("kill %1");
+    type_line("wait");
+    type_line("jobs > /tmp/jc6");
+    type_line("exit 0");
+    assert_eq!(run(prog("sh"), &["sh"]), Ok(0));
+    assert_eq!(file("/tmp/jc0"), "147\n"); // 128 + SIGSTOP
+    assert!(file("/tmp/jc2").contains("Stopped"), "{}", file("/tmp/jc2"));
+    assert!(file("/tmp/jc2").contains("sh -c kill -STOP $$; echo resumed > /tmp/jc1"));
+    assert_eq!(file("/tmp/jc1"), "resumed\n");
+    assert_eq!(file("/tmp/jc3"), "0\n");
+    assert!(file("/tmp/jc4").contains("Stopped") && file("/tmp/jc4").contains("sleep 100"), "{}", file("/tmp/jc4"));
+    assert!(file("/tmp/jc5").contains("Running"), "{}", file("/tmp/jc5"));
+    assert_eq!(file("/tmp/jc6"), "");
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn ctrl_z_stops_the_foreground_job() {
+    palladiumos::task::keyboard::init_queue();
+    // Ctrl-Z sends SIGTSTP to the foreground job; here the job sends it to
+    // itself (the keyboard interrupt can't be simulated mid-command).
+    type_line("sh -c 'kill -TSTP $$; echo back > /tmp/cz'");
+    type_line("echo $? > /tmp/cz0");
+    type_line("fg");
+    type_line("exit 0");
+    assert_eq!(run(prog("sh"), &["sh"]), Ok(0));
+    assert_eq!(file("/tmp/cz0"), "148\n"); // 128 + SIGTSTP
+    assert_eq!(file("/tmp/cz"), "back\n");
 }

@@ -100,11 +100,13 @@ fn status(p: &ProcInfo) -> String {
     let state = match p.state {
         'R' => "R (running)",
         'Z' => "Z (zombie)",
+        'T' => "T (stopped)",
         _ => "S (sleeping)",
     };
     format!(
         "Name:\t{}\nState:\t{}\nPid:\t{}\nPPid:\t{}\nPGid:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\n\
-         FDSize:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} kB\nThreads:\t1\n",
+         FDSize:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} kB\nThreads:\t1\n\
+         SigPnd:\t{:016x}\nSigBlk:\t{:016x}\nSigIgn:\t{:016x}\nSigCgt:\t{:016x}\n",
         p.name,
         state,
         p.pid,
@@ -122,6 +124,10 @@ fn status(p: &ProcInfo) -> String {
         kib(p.pages),
         kib(p.pages),
         p.heap / 1024,
+        p.signals[0],
+        p.signals[1],
+        p.signals[2],
+        p.signals[3],
     )
 }
 

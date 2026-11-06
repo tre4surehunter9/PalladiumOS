@@ -67,14 +67,22 @@ pub fn set_mode(mode: Mode) {
 pub fn intercept_scancode(scancode: u8) -> bool {
     const CTRL: u8 = 0x1d;
     const KEY_C: u8 = 0x2e;
+    const KEY_Z: u8 = 0x2c;
+    const KEY_BACKSLASH: u8 = 0x2b;
     match scancode {
         CTRL => CTRL_HELD.store(true, Ordering::SeqCst),
         s if s == CTRL | 0x80 => CTRL_HELD.store(false, Ordering::SeqCst),
-        KEY_C if CTRL_HELD.load(Ordering::SeqCst)
-            && LFLAG.load(Ordering::SeqCst) & ISIG != 0
-            && crate::process::foreground() != 0 =>
+        KEY_C | KEY_Z | KEY_BACKSLASH
+            if CTRL_HELD.load(Ordering::SeqCst)
+                && LFLAG.load(Ordering::SeqCst) & ISIG != 0
+                && crate::process::foreground() != 0 =>
         {
-            crate::process::ctrl_c_pressed();
+            let sig = match scancode {
+                KEY_C => crate::process::SIGINT,
+                KEY_Z => crate::process::SIGTSTP,
+                _ => crate::process::SIGQUIT,
+            };
+            crate::process::tty_signal(sig);
             return true;
         }
         _ => {}

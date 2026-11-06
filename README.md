@@ -113,8 +113,16 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 280 | utimensat | modification time |
 | 22 | pipe | yes |
 | 12 | brk | yes (the heap behind `userlib`'s allocator) |
-| 13 | rt_sigaction | `SIG_DFL` and `SIG_IGN` only (no handlers yet) |
-| 14 | rt_sigprocmask | accepted, masks not implemented |
+| 13 | rt_sigaction | yes (handlers, `SA_RESTART`, `SA_NODEFER`, `SA_RESETHAND`, `SA_NOCLDSTOP`, `sa_mask`) |
+| 14 | rt_sigprocmask | yes |
+| 15 | rt_sigreturn | yes |
+| 34 | pause | yes |
+| 36/38 | getitimer, setitimer | `ITIMER_REAL` |
+| 37 | alarm | yes |
+| 127 | rt_sigpending | yes |
+| 130 | rt_sigsuspend | yes |
+| 186 | gettid | yes (one thread per process) |
+| 200/234 | tkill, tgkill | yes |
 | 16 | ioctl | console: `TCGETS`/`TCSETS` (raw and cooked mode), `TIOCGWINSZ`, `TIOCGPGRP`/`TIOCSPGRP` |
 | 24 | sched_yield | yes |
 | 32 | dup | yes |
@@ -125,7 +133,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 58 | vfork | yes (same as fork, which POSIX allows) |
 | 59 | execve | yes (static ELF executables) |
 | 60 | exit | yes |
-| 61 | wait4 | yes (`WNOHANG`; no rusage) |
+| 61 | wait4 | yes (`WNOHANG`, `WUNTRACED`, `WCONTINUED`, process groups; no rusage) |
 | 62 | kill | yes (pid, process group, or -1 for all; `EPERM` for other users' processes) |
 | 92/93/94/260 | chown, fchown, lchown, fchownat | yes |
 | 102/104/107/108 | getuid, getgid, geteuid, getegid | yes |
@@ -173,7 +181,13 @@ PalladiumOS boots into `login`. A fresh disk has two accounts, `root` and `user`
 
 Open files work like POSIX: an fd refers to a shared open file description, so after `fork` or `dup` both fds share one file offset. Pipes hold 16 KiB; readers wait for data and get end-of-file when every writer has closed, writers wait for room and get SIGPIPE/`EPIPE` when no reader is left. `O_CLOEXEC` fds are closed by `execve`.
 
-Signals: Ctrl-C sends SIGINT to the foreground process group (the shell gives each command its own group, so only the command is interrupted). Default actions are supported (terminate or ignore) and `SIG_IGN`; signal handlers are not yet.
+Signals work as in POSIX:
+* Handlers (`sigaction`), with the Linux x86_64 signal frame and `rt_sigreturn`, so a C library's handlers work unchanged. A handler can interrupt a program in the middle of a computation (the timer interrupt saves every register), not only at syscalls.
+* Signal masks (`sigprocmask`, `sigpending`, `sigsuspend`), `pause`, `alarm` and `setitimer`, `SIGCHLD`.
+* Blocking syscalls interrupted by a handler fail with `EINTR`, or restart with `SA_RESTART`. Ignored and stop/continue signals never interrupt them: a `sleep 10` stopped and continued still sleeps 10 s.
+* Job control: SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU stop a process, SIGCONT continues it, and `wait4` reports both. Ctrl-C sends SIGINT, Ctrl-Z SIGTSTP and Ctrl-\ SIGQUIT to the foreground process group. As POSIX says, Ctrl-Z doesn't stop orphaned process groups (like programs the kernel started), which nobody could continue.
+* `execve` resets handlers to the default (ignored signals and the mask are kept).
+* Not yet: `SA_SIGINFO` details (the siginfo has only the signal number), `sigaltstack`, handlers for faults (a segfault always ends the program).
 The console understands the usual ANSI escape sequences (cursor movement, clearing, colors and reverse video), so full-screen programs like `edit` work.
 
 Programs live in `/bin` as ordinary files, installed at boot: `run ls` runs `/bin/ls`, and `run /path/to/program` runs any ELF file.
@@ -223,8 +237,10 @@ After you log in, you get `/bin/sh`, a POSIX-style shell that runs in userland a
 * Scripts: `sh script.sh args...`, `sh -c 'commands'`, `. file` / `source file`
 * Scripts can be run directly: `chmod +x script.sh; ./script.sh` (with a `#!/bin/sh` line, or without one)
 * Options: `sh -e` / `set -e` (stop at the first failing command), `sh -x` / `set -x` (print commands as they run)
-* Builtins: `cd`, `pwd`, `exit`, `export`, `unset`, `set`, `wait`, `jobs`, `kill` (understands `%1`), `.`, `source`, `help`, `true`, `false`, and `run`/`script` like the kernel shell
-* Keys: Up/Down for history, Left/Right/Home/End to edit the line, Tab completes commands and file names, Ctrl-C interrupts the running program (or clears the line), Ctrl-D exits, Ctrl-L clears the screen
+* Job control: Ctrl-Z stops the running command; `jobs` lists jobs, `fg [%N]` and `bg [%N]` continue them
+* Traps: `trap 'commands' INT TERM ...`, `trap '' SIG` (ignore), `trap - SIG` (default), `trap '...' EXIT`
+* Builtins: `cd`, `pwd`, `exit`, `export`, `unset`, `set`, `wait`, `jobs`, `fg`, `bg`, `trap`, `kill` (understands `%1`), `.`, `source`, `help`, `true`, `false`, and `run`/`script` like the kernel shell
+* Keys: Up/Down for history, Left/Right/Home/End to edit the line, Tab completes commands and file names, Ctrl-C interrupts the running program (or clears the line), Ctrl-Z stops it, Ctrl-D exits, Ctrl-L clears the screen
 
 Not yet: here-documents (`<<EOF`), aliases, `local`.
 
