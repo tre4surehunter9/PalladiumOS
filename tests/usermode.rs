@@ -1710,3 +1710,17 @@ fn micropython_port_works() {
     assert_eq!(file("/tmp/k.out"), "interrupted\n");
     assert!(only_kernel_left(), "{:?}", process::list());
 }
+
+#[test_case]
+fn dmesg_shows_the_boot_log() {
+    let _ = filesystem::make_dir("/tmp");
+    // Test kernels don't print the boot log, but keep it.
+    assert_eq!(sh("dmesg -n > /tmp/dmesg.out"), 0);
+    let out = file("/tmp/dmesg.out");
+    assert!(out.contains("[  OK  ] Loaded the GDT and TSS"), "{}", out);
+    assert!(out.contains("[  OK  ] Enabled the syscall instruction"), "{}", out);
+    assert!(!out.contains('\x1b'), "-n strips the color codes");
+    // (/proc files report size 0, like Linux: copy it with cat to read it here)
+    assert_eq!(sh("cat /proc/kmsg > /tmp/kmsg.out"), 0);
+    assert!(file("/tmp/kmsg.out").contains("\x1b[1;32m  OK  \x1b[0m"), "the log itself has colors");
+}

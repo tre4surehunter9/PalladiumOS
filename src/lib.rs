@@ -85,11 +85,16 @@ fn test_breakpoint_exception() {
 
 pub fn init() {
     gdt::init();
+    boot_ok!("Loaded the GDT and TSS (kernel/user segments, interrupt stacks)");
     interrupts::init_idt();
+    boot_ok!("Set up the IDT (exceptions, timer, keyboard, int 0x80 syscalls)");
     fpu::init();
+    boot_ok!("Enabled SSE and FPU state for programs");
     syscall::init_fast_syscalls();
+    boot_ok!("Enabled the syscall instruction (Linux x86_64 ABI)");
     unsafe { interrupts::PICS.lock().initialize() };
     x86_64::instructions::interrupts::enable();
+    boot_ok!("Started interrupts (PIC remapped, timer at 18.2 Hz)");
 }
 
 pub fn hlt_loop() -> ! {
@@ -127,6 +132,7 @@ pub mod signal;
 pub mod fpu;
 pub mod mmap;
 pub mod random;
+pub mod boot;
 pub mod rtc;
 
 

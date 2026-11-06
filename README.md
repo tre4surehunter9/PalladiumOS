@@ -252,6 +252,9 @@ The kernel has a small VFS layer: every filesystem implements one interface, and
 
 The date comes from the PC's real-time clock, so file times and `date` are real.
 
+## Booting
+The kernel reports each boot step like Linux with systemd: timestamped facts (`[    0.164] CPU: ...`) and a green `[  OK  ]`, yellow `[ WARN ]` or red `[FAILED]` for each step (paging, heap, interrupts, disks, mounts, programs...), then the login prompt. The log is kept: `dmesg` shows it again (`dmesg -n` without colors), and it's in `/proc/kmsg`.
+
 ## Instructions for Running the Kernel
 * Install QEMU
 * Download the Latest Release

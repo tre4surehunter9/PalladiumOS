@@ -72,16 +72,30 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         use palladiumos::task::keyboard::run_shell;
         use x86_64::VirtAddr;
 
-        // welcome message
-        palladiumos::shell::print_welcome();
+        use palladiumos::{boot_failed, boot_info, boot_ok};
+
+        // A Linux-style boot log (see boot.rs; `dmesg` shows it again).
+        palladiumos::vga_buffer::clear_screen();
+        palladiumos::boot::set_verbose(true);
+        boot_info!("PalladiumOS 0.4.0 (x86_64) is booting");
         palladiumos::init();
 
         let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
         let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
         let mut mapper = unsafe { memory::init(phys_mem_offset) };
         memory::PHYS_MEM_OFFSET.store(phys_mem_offset.as_u64(), core::sync::atomic::Ordering::Relaxed);
+        boot_ok!("Set up paging (physical memory mapped at {:#x})", phys_mem_offset.as_u64());
 
-        allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+        match allocator::init_heap(&mut mapper, &mut frame_allocator) {
+            Ok(()) => boot_ok!("Mapped the kernel heap ({} MiB)", allocator::HEAP_SIZE / 1024 / 1024),
+            Err(_) => {
+                boot_failed!("Mapping the kernel heap: out of memory");
+                panic!("heap initialization failed");
+            }
+        }
+        boot_info!("CPU: {}", palladiumos::boot::cpu_name());
+        boot_info!("CPU features: {}", palladiumos::boot::cpu_features());
+        boot_info!("Memory: {} MiB usable", frame_allocator.total_frames() * 4096 / 1024 / 1024);
 
 
 
@@ -91,12 +105,17 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         *memory::MAPPER.lock() = Some(mapper);
         *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
         palladiumos::process::init();
+        boot_ok!("Started the scheduler (preemptive, up to {} processes)", palladiumos::process::MAX_PROCESSES);
         palladiumos::rtc::init();
+        boot_ok!("Read the real-time clock: {}", palladiumos::boot::format_date(palladiumos::rtc::now()));
         // Keys pressed before anything reads the keyboard must not be lost.
         palladiumos::task::keyboard::init_queue();
+        boot_ok!("Started the keyboard");
         mount_filesystems();
-        palladiumos::programs::install();
+        let (count, bytes) = palladiumos::programs::install();
+        boot_ok!("Installed {} programs in /bin ({} KiB)", count, bytes / 1024);
         palladiumos::filesystem::init_default_files();
+        boot_ok!("Checked the system files (/etc: accounts, os-release)");
 
         #[cfg(test)]
         test_main();
@@ -116,19 +135,27 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
 /// are in memory, and /dev has the device files.
 fn mount_filesystems() {
     use alloc::boxed::Box;
-    use palladiumos::{block, devfs::DevFs, ext2::Ext2, fdfs::Fdfs, mounts};
+    use palladiumos::{block, boot_failed, boot_info, boot_ok, boot_warn, devfs::DevFs, ext2::Ext2, fdfs::Fdfs, mounts};
 
-    let root: Box<dyn mounts::FileSystem> = match block::data_disk().map(Ext2::mount) {
-        Some(Ok(fs)) => {
-            println!("Mounted the ext2 disk at /{}", if fs.is_read_only() { " (read-only)" } else { "" });
+    let disk = block::data_disk();
+    if let Some(d) = &disk {
+        boot_info!("ata0-slave: {} MiB disk", d.sectors() * 512 / 1024 / 1024);
+    }
+    let root: Box<dyn mounts::FileSystem> = match disk.map(Ext2::mount) {
+        Some(Ok(mut fs)) => {
+            let stats = mounts::FileSystem::statfs(&mut fs);
+            let used = (stats.blocks - stats.free_blocks) * stats.block_size / 1024 / 1024;
+            let size = stats.blocks * stats.block_size / 1024 / 1024;
+            let ro = if fs.is_read_only() { ", read-only" } else { "" };
+            boot_ok!("Mounted the ext2 disk at / ({} of {} MiB used{})", used, size, ro);
             Box::new(fs)
         }
         Some(Err(e)) => {
-            println!("Disk found but not mounted ({}); files will not be saved.", e);
+            boot_failed!("Mounting the disk at /: {} (files will not be saved)", e);
             Box::new(Fdfs::new())
         }
         None => {
-            println!("No disk attached; files will not be saved.");
+            boot_warn!("No disk attached: / is in memory, files will not be saved");
             Box::new(Fdfs::new())
         }
     };
@@ -140,10 +167,15 @@ fn mount_filesystems() {
     let mut tmp = Fdfs::new();
     let _ = mounts::FileSystem::chmod(&mut tmp, 0, 0o1777); // sticky, writable by everyone
     mounts::mount("/tmp", Box::new(tmp));
+    boot_ok!("Mounted /bin and /tmp (in memory)");
     mounts::mount("/dev", Box::new(DevFs));
+    boot_ok!("Mounted /dev (console, tty, null, zero, random, urandom)");
     mounts::mount("/proc", Box::new(palladiumos::procfs::ProcFs));
+    boot_ok!("Mounted /proc (processes and system information)");
     if block::mount_system_disk() {
-        println!("Mounted the system disk at /usr (read-only)");
+        boot_ok!("Mounted the system disk at /usr (read-only: C headers and libraries)");
+    } else {
+        boot_warn!("No system disk: /usr is empty (tcc has no headers or libraries)");
     }
 }
 
@@ -152,19 +184,26 @@ fn start_userland_shell() {
     // login asks who you are and starts your shell; when you log out, it
     // starts again. Ctrl-D at the login prompt (status 99) opens the kernel
     // shell. Without /bin/login, start sh directly.
+    use palladiumos::{boot_failed, boot_info, boot_ok};
     const TO_KERNEL_SHELL: i32 = 99;
     let env = palladiumos::process::DEFAULT_ENV;
+    let mut first = true;
     loop {
         let (bytes, argv) = match palladiumos::filesystem::read_bytes("/bin/login") {
             Ok(b) => (b, ["login"]),
             Err(_) => match palladiumos::filesystem::read_bytes("/bin/sh") {
                 Ok(b) => (b, ["sh"]),
                 Err(e) => {
-                    println!("Can't read /bin/login or /bin/sh ({}); starting the kernel shell.", e);
+                    boot_failed!("Starting a shell: can't read /bin/login or /bin/sh ({}); using the kernel shell", e);
                     return;
                 }
             },
         };
+        if first {
+            boot_ok!("Reached the {} prompt", if argv[0] == "login" { "login" } else { "shell" });
+            boot_info!("Boot finished. `dmesg` shows this log again.");
+            first = false;
+        }
         match palladiumos::process::run_program_env(&bytes, &argv, env) {
             Ok(TO_KERNEL_SHELL) => {
                 println!("This is the kernel shell; type 'run login' to log in again.");
@@ -176,7 +215,7 @@ fn start_userland_shell() {
                 return;
             }
             Err(e) => {
-                println!("Can't start {} ({}); starting the kernel shell.", argv[0], e);
+                boot_failed!("Starting {}: {}; using the kernel shell", argv[0], e);
                 return;
             }
         }

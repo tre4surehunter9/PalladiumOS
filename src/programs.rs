@@ -13,9 +13,13 @@ pub static FLAT_PROGRAMS: &[(&str, &[u8])] = &[
 
 /// Install every bundled program as /bin/<name>, so programs can be run by
 /// path (execve("/bin/ls", ...)) like on any Unix.
-pub fn install() {
+/// Put every bundled program in /bin. Returns how many (and their size).
+pub fn install() -> (usize, usize) {
     let _ = crate::filesystem::make_dir("/bin");
+    let (mut count, mut bytes_total) = (0, 0);
     for (name, bytes) in USER_PROGRAMS.iter().chain(FLAT_PROGRAMS) {
+        count += 1;
+        bytes_total += bytes.len();
         let path = alloc::format!("/bin/{}", name);
         crate::filesystem::write_bytes(&path, bytes).expect("can't write /bin entry");
         // Executable; su and passwd are setuid root (they switch users and
@@ -23,6 +27,7 @@ pub fn install() {
         let mode = if matches!(*name, "su" | "passwd") { 0o4755 } else { 0o755 };
         let _ = crate::filesystem::chmod(&path, mode);
     }
+    (count, bytes_total)
 }
 
 /// Look up a bundled program by name.

@@ -261,7 +261,7 @@ pub fn draw_cursor_inner(&mut self) {
     self.update_hw_cursor();
  }
 
-fn update_hw_cursor(&self) {
+pub fn update_hw_cursor(&self) {
     use x86_64::instructions::port::Port;
     let pos = (self.row_position * BUFFER_WIDTH + self.column_position.min(BUFFER_WIDTH - 1)) as u16;
     unsafe {

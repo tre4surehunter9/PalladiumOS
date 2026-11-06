@@ -23,7 +23,8 @@ use crate::syscall::{EACCES, EINVAL, ENOENT, ENOTDIR, EPERM};
 const ROOT: Ino = 1;
 const SELF: Ino = 2;
 /// System files: (name, inode).
-const SYSTEM: &[(&str, Ino)] = &[("cpuinfo", 3), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("uptime", 7), ("version", 8)];
+const SYSTEM: &[(&str, Ino)] =
+    &[("cpuinfo", 3), ("kmsg", 9), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("uptime", 7), ("version", 8)];
 
 // Files in /proc/PID: (name, number).
 const P_DIR: u64 = 0;
@@ -68,6 +69,7 @@ impl ProcFs {
         }
         Ok(match ino {
             3 => cpuinfo(),
+            9 => crate::boot::log(), // the boot log (dmesg)
             4 => {
                 let (total, ready) = process::counts();
                 // No load average yet: show 0, with running/total and the last pid.

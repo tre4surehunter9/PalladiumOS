@@ -112,7 +112,13 @@ use bootloader::bootinfo::MemoryMap;
 
 pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,
+    /// Frames handed out from the memory map so far (not from the free list).
     next: usize,
+    /// Where the next never-used frame comes from: a memory map region and
+    /// an address in it. (Searching from the start each time made handing
+    /// out n frames take n^2 steps: seconds at boot for the heap alone.)
+    region: usize,
+    next_addr: u64,
     /// Physical address of the first freed frame. Each free frame stores the
     /// address of the next one in its first 8 bytes (an intrusive linked list).
     free_list: Option<u64>,
@@ -126,6 +132,8 @@ impl BootInfoFrameAllocator {
         BootInfoFrameAllocator {
             memory_map,
             next: 0,
+            region: 0,
+            next_addr: memory_map.first().map_or(0, |r| r.range.start_addr()),
             free_list: None,
             free_count: 0,
             total: 0,
@@ -178,11 +186,17 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
             self.free_count -= 1;
             return Some(PhysFrame::containing_address(PhysAddr::new(phys)));
         }
-        let frame = self.usable_frames().nth(self.next);
-        if frame.is_some() {
-            self.next += 1;
+        while let Some(r) = self.memory_map.get(self.region) {
+            if r.region_type == MemoryRegionType::Usable && self.next_addr < r.range.end_addr() {
+                let frame = PhysFrame::containing_address(PhysAddr::new(self.next_addr));
+                self.next_addr += 4096;
+                self.next += 1;
+                return Some(frame);
+            }
+            self.region += 1;
+            self.next_addr = self.memory_map.get(self.region).map_or(0, |r| r.range.start_addr());
         }
-        frame
+        None
     }
 }
 
