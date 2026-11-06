@@ -52,6 +52,14 @@ The repo includes a `rust-toolchain.toml`, so `rustup` installs the right nightl
 * Build: `cargo bootimage`
 * Run: `cargo run` (boots it in QEMU)
 
+## Running the Tests
+`cargo test` boots each test kernel in QEMU (no window) and reports results over serial.
+* `tests/usermode.rs` - ring 3 programs, syscalls, exit statuses and fault handling
+* `tests/filesystem.rs` - the filesystem and shell commands
+* `tests/heap_allocation.rs`, `tests/stack_overflow.rs`, `tests/should_panic.rs`, `tests/basic_boot.rs` - kernel basics
+
+The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh` rebuilds them).
+
 ## Instructions for Running the Kernel
 * Install QEMU
 * Download the Latest Release

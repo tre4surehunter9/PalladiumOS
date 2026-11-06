@@ -96,6 +96,9 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         *memory::MAPPER.lock() = Some(mapper);
         *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
 
+        #[cfg(test)]
+        test_main();
+
         let mut executor = Executor::new();
         executor.spawn(Task::new(run_shell()));
         executor.run();
