@@ -86,6 +86,8 @@ enum Kind {
     Null,
     /// /dev/zero: reads are zeros, writes are discarded.
     Zero,
+    /// /dev/random, /dev/urandom: reads are random bytes, writes discarded.
+    Random,
     PipeRead(PipeReader),
     PipeWrite(PipeWriter),
 }
@@ -129,6 +131,7 @@ fn handle(kind: Kind) -> Handle {
         Kind::Console => "/dev/tty".to_string(),
         Kind::Null => "/dev/null".to_string(),
         Kind::Zero => "/dev/zero".to_string(),
+        Kind::Random => "/dev/urandom".to_string(),
         Kind::File { path, .. } | Kind::Dir { path, .. } => path.clone(),
         Kind::PipeRead(r) => alloc::format!("pipe:[{}]", pipe::id(&r.pipe())),
         Kind::PipeWrite(w) => alloc::format!("pipe:[{}]", pipe::id(&w.pipe())),
@@ -324,6 +327,7 @@ fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
         FileType::CharDevice(dev) => match dev {
             Device::Null => Kind::Null,
             Device::Zero => Kind::Zero,
+            Device::Random => Kind::Random,
             Device::Tty => Kind::Console,
         },
         FileType::Symlink => return -ELOOP, // a loop of symlinks
@@ -564,7 +568,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                     };
                     (mode | if *append { O_APPEND } else { 0 }) as i64
                 }
-                Kind::Console | Kind::Null | Kind::Zero => O_RDWR as i64,
+                Kind::Console | Kind::Null | Kind::Zero | Kind::Random => O_RDWR as i64,
                 Kind::PipeWrite(_) => O_WRONLY as i64,
                 Kind::Dir { .. } | Kind::PipeRead(_) => O_RDONLY as i64,
             },
@@ -610,6 +614,10 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
             buf.fill(0);
             buf.len() as i64
         }
+        Kind::Random => {
+            crate::random::fill(buf);
+            buf.len() as i64
+        }
         Kind::Dir { .. } => -EISDIR,
         Kind::PipeWrite(_) => -EBADF,
     }
@@ -637,6 +645,10 @@ pub fn sys_pread(fd: u64, buf: &mut [u8], offset: u64) -> i64 {
         Kind::Dir { .. } => -EISDIR,
         Kind::Zero => {
             buf.fill(0);
+            buf.len() as i64
+        }
+        Kind::Random => {
+            crate::random::fill(buf);
             buf.len() as i64
         }
         Kind::Null => 0,
@@ -706,7 +718,7 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
                 Err(e) => -e,
             }
         }
-        Kind::Null | Kind::Zero => bytes.len() as i64,
+        Kind::Null | Kind::Zero | Kind::Random => bytes.len() as i64,
         Kind::Dir { .. } => -EISDIR,
         Kind::PipeRead(_) => -EBADF,
     }
@@ -747,7 +759,7 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
             0
         }
         Kind::Dir { .. } => -EINVAL,
-        Kind::Null | Kind::Zero => 0,
+        Kind::Null | Kind::Zero | Kind::Random => 0,
         Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) => -ESPIPE,
     }
 }
@@ -810,7 +822,7 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
     };
     let desc = h.lock();
     match &desc.kind {
-        Kind::Console | Kind::Null | Kind::Zero => {
+        Kind::Console | Kind::Null | Kind::Zero | Kind::Random => {
             fill_stat(out, 0, 0, S_IFCHR | 0o666, 1, 0, 0);
             0
         }

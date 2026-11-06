@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 static STATE: AtomicU64 = AtomicU64::new(0);
 
 fn has_rdrand() -> bool {
-    let r = unsafe { core::arch::x86_64::__cpuid(1) };
+    let r = core::arch::x86_64::__cpuid(1);
     r.ecx & (1 << 30) != 0
 }
 
@@ -21,8 +21,6 @@ fn rdrand() -> Option<u64> {
         if ok != 0 {
             return Some(v);
         }
-        v = 0;
-        let _ = v;
     }
     None
 }

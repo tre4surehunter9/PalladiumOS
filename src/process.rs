@@ -34,7 +34,6 @@ use crate::vfs::{self, Files};
 
 pub const MAX_PROCESSES: usize = 32;
 const KERNEL_STACK_SIZE: usize = 16 * 1024;
-const WNOHANG: u64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitReason {

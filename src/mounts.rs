@@ -29,6 +29,8 @@ pub enum Device {
     Null,
     Zero,
     Tty,
+    /// /dev/random and /dev/urandom
+    Random,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

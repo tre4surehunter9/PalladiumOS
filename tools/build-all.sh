@@ -3,7 +3,7 @@
 # Build musl (if needed) and every port in tools/ports, so their programs
 # end up in /bin on the next kernel build.
 #
-#   tools/build-all.sh            musl (once), then lua, dash, fastfetch, tcc
+#   tools/build-all.sh            musl (once), then lua, dash, fastfetch, tcc, micropython
 #   tools/build-all.sh --rebuild  rebuild musl too
 #   tools/build-all.sh --run      ...then `cargo run`
 #
@@ -42,7 +42,7 @@ fi
 built=""
 skipped=""
 failed=""
-for port in lua dash fastfetch tcc; do
+for port in lua dash fastfetch tcc micropython; do
     if [ "$port" = fastfetch ] && ! command -v cmake >/dev/null 2>&1; then
         echo "==> $port: skipped (needs cmake on the host)"
         skipped="$skipped $port"

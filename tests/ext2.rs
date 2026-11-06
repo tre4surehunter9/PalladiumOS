@@ -324,13 +324,18 @@ fn mount_points_and_cross_mount_paths() {
 }
 
 #[test_case]
-fn dev_null_zero_tty() {
+fn dev_null_zero_tty_random() {
     with_ext2_root(|| {
         let script = "echo gone > /dev/null && cat /dev/null > /n.txt && test -c /dev/null && \
                       ! test -c /n.txt && ls /dev > /d.txt";
         assert_eq!(run("sh", &["sh", "-c", script]), 0);
         assert_eq!(filesystem::read_file("/n.txt").unwrap(), "");
-        assert_eq!(filesystem::read_file("/d.txt").unwrap(), "console\nnull\ntty\nzero\n");
+        assert_eq!(filesystem::read_file("/d.txt").unwrap(), "console\nnull\nrandom\ntty\nurandom\nzero\n");
+        // /dev/urandom: random bytes (not all the same, different each read)
+        assert_eq!(run("sh", &["sh", "-c", "cat /dev/urandom | head -n 4 > /r1; cat /dev/urandom | head -n 4 > /r2"]), 0);
+        let (r1, r2) = (filesystem::read_bytes("/r1").unwrap(), filesystem::read_bytes("/r2").unwrap());
+        assert!(r1.len() > 4);
+        assert!(r1 != r2 && r1.iter().any(|&b| b != r1[0]));
         assert_eq!(run("sh", &["sh", "-c", "echo to-tty > /dev/tty"]), 0);
         assert_eq!(run("sh", &["sh", "-c", "touch /dev/new"]), 1, "can't create files in /dev");
     });

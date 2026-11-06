@@ -9,6 +9,11 @@ PCC="$ROOT/target/musl/bin/palladium-cc"
 PORTS="$ROOT/target/ports"
 BIN="$PORTS/bin"
 mkdir -p "$PORTS/src" "$BIN"
+# Sources are unpacked inside the PalladiumOS repository: don't let their
+# build scripts find *its* git history (MicroPython took its version
+# from `git describe`).
+GIT_CEILING_DIRECTORIES="$PORTS/src"
+export GIT_CEILING_DIRECTORIES
 
 if [ ! -x "$PCC" ]; then
     echo "palladium-cc not found: run tools/build-musl.sh first" >&2
@@ -19,7 +24,10 @@ fi
 # $PORTS/src/NAME-VERSION, and cd there.
 fetch() {
     dir=$1 url=$2 sum=$3
-    tarball="$PORTS/src/$dir.tar.gz"
+    case $url in
+        *.tar.xz) tarball="$PORTS/src/$dir.tar.xz" ;;
+        *) tarball="$PORTS/src/$dir.tar.gz" ;;
+    esac
     if [ ! -f "$tarball" ]; then
         echo "Downloading $url"
         curl -fL --proto '=https' -o "$tarball.part" "$url"

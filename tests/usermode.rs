@@ -1687,3 +1687,26 @@ fn tcc_compiles_itself() {
         let _ = filesystem::remove(f);
     }
 }
+
+#[test_case]
+fn micropython_port_works() {
+    let Some(_) = c_program("micropython") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    filesystem::write_file("/tmp/check.py", include_str!("ports/check.py")).unwrap();
+    let status = sh("micropython /tmp/check.py arg1 'arg 2' > /tmp/pcheck.out 2>&1");
+    let out = file("/tmp/pcheck.out");
+    assert_eq!(status, 0, "{}", out);
+    assert_eq!(out, "micropython checks passed\n");
+    // a #! script, and Ctrl-C's signal becoming KeyboardInterrupt
+    filesystem::write_file(
+        "/tmp/k.py",
+        // (system() ignores SIGINT while it waits, as POSIX says: send it
+        // from a background job, after system() has returned.)
+        "#!/bin/micropython\nimport os\ntry:\n    os.system('(sleep 1; pkill -INT micropython) &')\n    \
+         while True: pass\nexcept KeyboardInterrupt:\n    print('interrupted')\n",
+    )
+    .unwrap();
+    assert_eq!(sh("chmod +x /tmp/k.py && /tmp/k.py > /tmp/k.out 2>&1"), 0, "{}", file("/tmp/k.out"));
+    assert_eq!(file("/tmp/k.out"), "interrupted\n");
+    assert!(only_kernel_left(), "{:?}", process::list());
+}

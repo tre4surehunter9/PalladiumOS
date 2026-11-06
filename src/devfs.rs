@@ -1,7 +1,8 @@
 // Copyright (c) 2026 tre4surehunter9
 //! /dev: device files. Opening one gives a device instead of a file:
 //! /dev/null (discards writes, reads are end-of-file), /dev/zero (reads
-//! zeros), and /dev/tty and /dev/console (the console).
+//! zeros), /dev/random and /dev/urandom (random bytes, as getrandom), and
+//! /dev/tty and /dev/console (the console).
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -10,7 +11,14 @@ use crate::mounts::{Device, FileSystem, FileType, FsResult, Ino, Meta};
 use crate::syscall::{EACCES, ENOENT, ENOTDIR, EPERM};
 
 const ROOT: Ino = 1;
-const DEVICES: &[(&str, Device)] = &[("console", Device::Tty), ("null", Device::Null), ("tty", Device::Tty), ("zero", Device::Zero)];
+const DEVICES: &[(&str, Device)] = &[
+    ("console", Device::Tty),
+    ("null", Device::Null),
+    ("random", Device::Random),
+    ("tty", Device::Tty),
+    ("urandom", Device::Random),
+    ("zero", Device::Zero),
+];
 
 pub struct DevFs;
 
