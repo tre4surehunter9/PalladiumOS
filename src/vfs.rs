@@ -229,6 +229,57 @@ pub fn sys_openat(dirfd: u64, path: u64, flags: u64) -> i64 {
     }
 }
 
+/// Print to the screen, handling the few ANSI escape sequences programs use:
+/// ESC[2J / ESC[J clears the screen, ESC[H moves to the top left. Other
+/// sequences are dropped instead of being printed as garbage.
+fn console_write(bytes: &[u8]) {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'[') {
+            let mut j = i + 2;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+                j += 1;
+            }
+            if j < bytes.len() {
+                match bytes[j] {
+                    b'J' => crate::vga_buffer::clear_screen(),
+                    b'H' => crate::vga_buffer::WRITER.lock().set_cursor_pos(0, 0),
+                    _ => {}
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        crate::print!("{}", bytes[i] as char);
+        i += 1;
+    }
+}
+
+/// dup(fd): copy an fd to the lowest free slot.
+pub fn sys_dup(fd: u64) -> i64 {
+    match get_fd(fd) {
+        Ok(file) => match with_process(|p| alloc_fd(p, file)) {
+            Ok(new) => new as i64,
+            Err(e) => -e,
+        },
+        Err(e) => -e,
+    }
+}
+
+/// dup2(oldfd, newfd): make newfd refer to the same file as oldfd,
+/// closing whatever newfd was. Used for redirections like `> file`.
+pub fn sys_dup2(old: u64, new: u64) -> i64 {
+    let file = match get_fd(old) {
+        Ok(f) => f,
+        Err(e) => return -e,
+    };
+    if new as usize >= MAX_FDS {
+        return -EBADF;
+    }
+    with_process(|p| p.fds[new as usize] = Some(file));
+    new as i64
+}
+
 /// close(fd)
 pub fn sys_close(fd: u64) -> i64 {
     with_process(|p| match p.fds.get_mut(fd as usize) {
@@ -277,9 +328,7 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
 pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
     match get_fd(fd) {
         Ok(OpenFile::Console) => {
-            for &byte in bytes {
-                crate::print!("{}", byte as char);
-            }
+            console_write(bytes);
             bytes.len() as i64
         }
         Ok(OpenFile::File { node, offset, writable, append, .. }) => {

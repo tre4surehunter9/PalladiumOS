@@ -24,7 +24,10 @@ pub const SYS_STAT: u64 = 4;
 pub const SYS_FSTAT: u64 = 5;
 pub const SYS_LSTAT: u64 = 6;
 pub const SYS_LSEEK: u64 = 8;
+pub const SYS_BRK: u64 = 12;
 pub const SYS_SCHED_YIELD: u64 = 24;
+pub const SYS_DUP: u64 = 32;
+pub const SYS_DUP2: u64 = 33;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_FORK: u64 = 57;
 pub const SYS_VFORK: u64 = 58;
@@ -38,11 +41,13 @@ pub const SYS_CHDIR: u64 = 80;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
 pub const SYS_UNLINK: u64 = 87;
+pub const SYS_REBOOT: u64 = 169;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_EXIT_GROUP: u64 = 231;
 pub const SYS_OPENAT: u64 = 257;
 
 // ---- errno values (Linux) ----
+pub const EPERM: i64 = 1;
 pub const ENOENT: i64 = 2;
 pub const E2BIG: i64 = 7;
 pub const ENOEXEC: i64 = 8;
@@ -214,6 +219,10 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_MKDIR => vfs::sys_mkdir(a1),
         SYS_RMDIR => vfs::sys_remove(a1, true),
         SYS_UNLINK => vfs::sys_remove(a1, false),
+        SYS_DUP => vfs::sys_dup(a1),
+        SYS_DUP2 => vfs::sys_dup2(a1, a2),
+        SYS_BRK => process::sys_brk(a1),
+        SYS_REBOOT => sys_reboot(a1, a2, a3),
         SYS_SCHED_YIELD => {
             process::yield_now();
             0
@@ -230,6 +239,34 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
     };
 
     frame.rax = ret as u64;
+}
+
+/// reboot(magic1, magic2, cmd): restart or power off the machine.
+fn sys_reboot(magic1: u64, magic2: u64, cmd: u64) -> i64 {
+    const MAGIC1: u64 = 0xfee1dead;
+    const MAGIC2: u64 = 672274793;
+    const CMD_RESTART: u64 = 0x01234567;
+    const CMD_POWER_OFF: u64 = 0x4321fedc;
+    const CMD_HALT: u64 = 0xcdef0123;
+    use x86_64::instructions::port::Port;
+
+    if magic1 as u32 as u64 != MAGIC1 || magic2 as u32 as u64 != MAGIC2 {
+        return -EINVAL;
+    }
+    match cmd as u32 as u64 {
+        CMD_RESTART => unsafe {
+            crate::println!("Rebooting...");
+            Port::<u8>::new(0x64).write(0xFE); // keyboard controller reset
+        },
+        CMD_POWER_OFF => unsafe {
+            crate::println!("Powering off...");
+            Port::<u16>::new(0x604).write(0x2000); // QEMU ACPI power off
+            Port::<u16>::new(0xB004).write(0x2000); // older QEMU / Bochs
+        },
+        CMD_HALT => crate::println!("System halted."),
+        _ => return -EINVAL,
+    }
+    crate::hlt_loop();
 }
 
 /// uname(struct utsname *buf)

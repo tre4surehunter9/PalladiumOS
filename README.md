@@ -38,11 +38,15 @@ User programs run in ring 3 and are started with `run <name> [args...]` (`run` a
 * rm - removes files (`-r` for directories, `-f` to ignore missing files)
 * touch - creates empty files
 * pwd - prints the working directory
+* env - prints the environment
+* clear - clears the screen
+* reboot / poweroff - restarts or turns off the machine
+* sh - the shell
 * uname - prints system info (`-a`, `-s`, `-n`, `-r`, `-v`, `-m`)
 * crash - checks that bad pointers return EFAULT and that a segfault only kills the program
 
 ### Writing a Program
-Programs are written in Rust in `userland/src/bin/` using `userlib` (syscalls, `print!`/`println!`, arguments).
+Programs are written in Rust in `userland/src/bin/` using `userlib` (syscalls, `print!`/`println!`, arguments, environment, and a heap so `Vec`, `String` and `Box` work).
 Every file there is built and bundled into the kernel automatically by `build.rs`:
 
 ```rust
@@ -75,7 +79,10 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 5 | fstat | yes |
 | 6 | lstat | yes (same as stat, no symlinks) |
 | 8 | lseek | yes |
+| 12 | brk | yes (the heap behind `userlib`'s allocator) |
 | 24 | sched_yield | yes |
+| 32 | dup | yes |
+| 33 | dup2 | yes |
 | 39 | getpid | yes |
 | 57 | fork | yes (copies the whole address space) |
 | 58 | vfork | yes (same as fork, which POSIX allows) |
@@ -89,6 +96,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 84 | rmdir | yes |
 | 87 | unlink | yes |
 | 110 | getppid | yes |
+| 169 | reboot | yes (restart, power off, halt) |
 | 217 | getdents64 | yes |
 | 231 | exit_group | yes |
 | 257 | openat | yes |
@@ -116,21 +124,36 @@ The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh
 * Run this Command: qemu-system-x86_64 -drive format=raw,file=[location of BIN file
 * The system is running
 
-## Commands
+## The Shell
+PalladiumOS boots into `/bin/sh`, a POSIX-style shell that runs in userland as a normal process.
+
+* Run programs by name (`ls -l /bin`) or by path (`/bin/echo hi`); names are looked up in `$PATH`
+* Quoting: `'single'`, `"double with $VARS"`, `\` escapes, `# comments`
+* Variables: `x=1`, `$x`, `${x}`, `$?` (last exit status), `$$`, `$#`, `$0`-`$9`, `~`
+* Environment: `export NAME=value`, `unset NAME`, `NAME=value command` for one command
+* Lists: `cmd1; cmd2`, `cmd1 && cmd2`, `cmd1 || cmd2`, background jobs with `cmd &`
+* Redirection: `> file`, `>> file`, `< file`, `2> file`, `2>&1`
+* Scripts: `sh script.sh args...`, `sh -c 'commands'`, `. file` / `source file`
+* Builtins: `cd`, `pwd`, `exit`, `export`, `unset`, `set`, `wait`, `.`, `source`, `help`, `true`, `false`
+
+Not yet: pipes (`|`), wildcards, `if`/`while`/`for`, functions.
+
+### Kernel Shell
+Typing `exit` in `sh` (or Ctrl-D) drops to the built-in kernel shell, which is kept as a fallback. Type `run sh` to go back. Kernel shell commands:
 * echo                - Echos back your Message
 * about               - Kernel info
 * clear               - Clear the screen
 * help                - Show the help message
 * reboot              - Reboots the system
 * script <file>       - Runs script
-* edit <file>         - Open file in the text editor
+* edit <file>         - Open file in the text editor (only in the kernel shell for now)
 * ls <path>           - List directory
 * cat <file>          - Print file contents
 * mkdir <dir>         - Create directory
 * rm <file>           - Remove file or empty directory
 * cd  <dir>           - Change directory
 * pwd                 - Print working directory
-* run <program>       - Run a Ring 3 program
+* run <program>       - Run a program from /bin (or a path)
 
 ## Credits
 Philipp Oppermann for his 'Writing an OS in Rust' guide

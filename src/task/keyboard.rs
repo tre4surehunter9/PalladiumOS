@@ -19,9 +19,20 @@ impl ScancodeStream {
     }
 }
 
+/// Work around a pc-keyboard 0.7 bug: scancode set 1 decodes the
+/// backslash key (0x2B) as Oem7, but the US layout only maps that key as
+/// Oem5, so the backslash and '|' characters could not be typed at all.
+pub fn fix_key_event(mut event: pc_keyboard::KeyEvent) -> pc_keyboard::KeyEvent {
+    if event.code == pc_keyboard::KeyCode::Oem7 {
+        event.code = pc_keyboard::KeyCode::Oem5;
+    }
+    event
+}
+
 /// Create the scancode queue if it doesn't exist yet. Safe to call repeatedly.
 pub fn init_queue() {
-    let _ = SCANCODE_QUEUE.try_init_once(|| ArrayQueue::new(100));
+    // Room for plenty of type-ahead (each key press is 2 scancodes, 4 with Shift).
+    let _ = SCANCODE_QUEUE.try_init_once(|| ArrayQueue::new(1024));
 }
 
 /// Take the next scancode without waiting (used by the TTY while a
@@ -95,6 +106,7 @@ pub async fn run_shell() {
     loop {
         if let Some(scancode) = scancodes.next().await {
             if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+                let key_event = fix_key_event(key_event);
                 // Route to editor if active
                 if EDITOR_ACTIVE.load(Ordering::SeqCst) {
                     handle_editor_key(key_event, &mut keyboard);

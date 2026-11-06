@@ -51,9 +51,9 @@ T: Fn(),
     }
 }
 
-mod vga_buffer;
-mod serial;
-mod memory;
+// Use the library's modules: declaring them again here (`mod vga_buffer;`)
+// would create a second screen writer with its own cursor position.
+use palladiumos::{println, serial_print, serial_println};
 
 use bootloader::{BootInfo, entry_point};
 use palladiumos::hlt_loop;
@@ -97,10 +97,34 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         #[cfg(test)]
         test_main();
 
+        // Start the userland shell. If it exits (or can't start), fall back
+        // to the built-in kernel shell.
+        #[cfg(not(test))]
+        start_userland_shell();
+
         let mut executor = Executor::new();
         executor.spawn(Task::new(run_shell()));
         executor.run();
     }
+
+#[cfg(not(test))]
+fn start_userland_shell() {
+    let bytes = match palladiumos::filesystem::read_bytes("/bin/sh") {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            println!("Can't read /bin/sh ({}); starting the kernel shell.", e);
+            return;
+        }
+    };
+    let env = palladiumos::process::DEFAULT_ENV;
+    match palladiumos::process::run_program_env(&bytes, &["sh"], env) {
+        Ok(status) => println!(
+            "\nsh exited with status {}. This is the kernel shell; type 'run sh' to start a new one.",
+            status
+        ),
+        Err(e) => println!("Can't start /bin/sh ({}); starting the kernel shell.", e),
+    }
+}
 
 #[cfg(not(test))]
 #[panic_handler]

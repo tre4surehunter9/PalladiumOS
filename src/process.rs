@@ -80,7 +80,17 @@ pub struct Process {
     kernel_stack: Option<Box<[u8]>>,
     pub p4: PhysFrame,
     pub files: Files,
+    /// Current program break (end of the brk heap), see sys_brk.
+    pub brk: u64,
 }
+
+/// The brk heap starts here: level-4 slot 32, unused by the kernel.
+pub const HEAP_BASE: u64 = 0x1000_0000_0000;
+/// Largest brk heap a process may have.
+pub const HEAP_MAX: u64 = 256 * 1024 * 1024;
+
+/// Environment for programs started by the kernel.
+pub const DEFAULT_ENV: &[&str] = &["PATH=/bin", "HOME=/", "SHELL=/bin/sh", "TERM=vga"];
 
 impl Process {
     fn kernel_stack_top(&self) -> Option<u64> {
@@ -140,6 +150,7 @@ pub fn init() {
         kernel_stack: None,
         p4: memory::kernel_p4(),
         files: Files::new("/"),
+        brk: HEAP_BASE,
     }));
     CURRENT.store(0, Ordering::SeqCst);
 }
@@ -363,13 +374,13 @@ pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u64, ExitReason)>, i64> {
 /// fork(): duplicate the current process. Returns the child's pid to the
 /// parent; the child returns from the same syscall with 0.
 pub fn fork(frame: &SyscallFrame) -> i64 {
-    let (p4, files, name, ppid) = {
+    let (p4, files, name, ppid, brk) = {
         let table = TABLE.lock();
         if table.len() >= MAX_PROCESSES {
             return -EAGAIN;
         }
         let cur = table.get(&current_pid()).unwrap();
-        (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid)
+        (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid, cur.brk)
     };
 
     let child_p4 = {
@@ -393,6 +404,7 @@ pub fn fork(frame: &SyscallFrame) -> i64 {
         kernel_stack: Some(kernel_stack),
         p4: child_p4,
         files,
+        brk, // the heap pages were copied with the rest of the address space
     };
     match add_process(child) {
         Ok(pid) => pid as i64,
@@ -475,6 +487,7 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
         let mut table = TABLE.lock();
         let p = table.get_mut(&current_pid()).unwrap();
         p.name = basename(&path);
+        p.brk = HEAP_BASE; // the new program starts with an empty heap
         core::mem::replace(&mut p.p4, image.p4)
     };
     let (_, flags) = Cr3::read();
@@ -515,23 +528,25 @@ pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> i64 {
 
 // ---- used by the kernel shell ----
 
-/// Start a program as a child of the kernel, with the shell's working
-/// directory. Returns its pid.
-pub fn spawn(bytes: &[u8], argv: &[&str], name: &str) -> Result<u64, &'static str> {
-    let image = usermode::build_image(bytes, argv, &[])?;
+/// Start a program as a child of the kernel, with the kernel shell's
+/// working directory. Returns its pid.
+pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static str> {
+    let image = usermode::build_image(bytes, argv, envp)?;
     let frame = SyscallFrame::new_user(image.entry, image.stack_pointer);
     let (kernel_stack, kernel_rsp) = new_kernel_stack(&frame);
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     let cwd = crate::filesystem::CWD.lock().clone();
+    let name = argv.first().map(|a| basename(a)).unwrap_or_else(|| "program".to_string());
     let process = Process {
         pid,
         ppid: current_pid(),
-        name: name.to_string(),
+        name,
         state: State::Ready,
         kernel_rsp,
         kernel_stack: Some(kernel_stack),
         p4: image.p4,
         files: Files::new(&cwd),
+        brk: HEAP_BASE,
     };
     add_process(process).map_err(|_| {
         let mut alloc = FRAME_ALLOCATOR.lock();
@@ -543,9 +558,12 @@ pub fn spawn(bytes: &[u8], argv: &[&str], name: &str) -> Result<u64, &'static st
 /// Run a program and wait for it and everything it started. Returns the
 /// shell-style status (exit code, or 128 + signal).
 pub fn run_program(bytes: &[u8], argv: &[&str]) -> Result<i32, &'static str> {
+    run_program_env(bytes, argv, DEFAULT_ENV)
+}
+
+pub fn run_program_env(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<i32, &'static str> {
     assert_eq!(current_pid(), 0, "run_program must be called by the kernel");
-    let name = argv.first().copied().unwrap_or("program");
-    let pid = spawn(bytes, argv, name)?;
+    let pid = spawn(bytes, argv, envp)?;
 
     let mut status = None;
     // Reap the program, then any orphans it left behind (they were handed
@@ -558,4 +576,75 @@ pub fn run_program(bytes: &[u8], argv: &[&str]) -> Result<i32, &'static str> {
         }
     }
     Ok(status.expect("program vanished").shell_status())
+}
+
+/// brk(addr): move the end of the heap. Returns the new break, or the
+/// current one if `addr` is 0, out of range, or memory ran out (Linux
+/// semantics: the caller compares the result with what it asked for).
+pub fn sys_brk(addr: u64) -> i64 {
+    use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, Mapper, Page, PageTableFlags as F, Size4KiB};
+
+    let (p4, current) = {
+        let table = TABLE.lock();
+        let p = table.get(&current_pid()).unwrap();
+        (p.p4, p.brk)
+    };
+    if addr < HEAP_BASE || addr > HEAP_BASE + HEAP_MAX {
+        return current as i64;
+    }
+
+    let page_up = |a: u64| (a + 4095) & !4095;
+    let (old_end, new_end) = (page_up(current), page_up(addr));
+    let mut mapper = memory::mapper_for(p4);
+    let mut alloc = FRAME_ALLOCATOR.lock();
+    let frames = alloc.as_mut().unwrap();
+
+    if new_end > old_end {
+        let mut page_addr = old_end;
+        while page_addr < new_end {
+            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
+            let mapped = frames.allocate_frame().and_then(|frame| {
+                memory::zero_frame(frame);
+                let flags = F::PRESENT | F::WRITABLE | F::USER_ACCESSIBLE;
+                match unsafe { mapper.map_to(page, frame, flags, frames) } {
+                    Ok(flush) => {
+                        flush.flush();
+                        Some(())
+                    }
+                    Err(_) => {
+                        unsafe { frames.deallocate_frame(frame) };
+                        None
+                    }
+                }
+            });
+            if mapped.is_none() {
+                // Out of memory: undo this call's mappings, keep the old break.
+                let mut undo = old_end;
+                while undo < page_addr {
+                    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(undo));
+                    if let Ok((frame, flush)) = mapper.unmap(page) {
+                        flush.flush();
+                        unsafe { frames.deallocate_frame(frame) };
+                    }
+                    undo += 4096;
+                }
+                return current as i64;
+            }
+            page_addr += 4096;
+        }
+    } else {
+        let mut page_addr = new_end;
+        while page_addr < old_end {
+            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
+            if let Ok((frame, flush)) = mapper.unmap(page) {
+                flush.flush();
+                unsafe { frames.deallocate_frame(frame) };
+            }
+            page_addr += 4096;
+        }
+    }
+    drop(alloc);
+
+    TABLE.lock().get_mut(&current_pid()).unwrap().brk = addr;
+    addr as i64
 }

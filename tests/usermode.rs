@@ -519,3 +519,214 @@ fn each_run_gets_a_new_pid() {
     assert_eq!(launch_program(hello()), 0);
     assert_eq!(process::list().len(), before.len());
 }
+
+// ---- heap, dup, environment (milestone D) ----
+
+#[test_case]
+fn brk_heap_and_allocator() {
+    let before = frames_in_use();
+    assert_eq!(run(prog("test_misc"), &["test_misc", "heap"]), Ok(0));
+    assert_eq!(frames_in_use(), before, "heap pages leaked");
+}
+
+#[test_case]
+fn dup_and_dup2() {
+    assert_eq!(run(prog("test_misc"), &["test_misc", "dup"]), Ok(0));
+}
+
+// ---- the userland shell ----
+
+fn sh(script: &str) -> i32 {
+    run(prog("sh"), &["sh", "-c", script]).expect("sh failed to start")
+}
+
+fn file(path: &str) -> alloc::string::String {
+    filesystem::read_file(path).unwrap_or_else(|e| panic!("{}: {}", path, e))
+}
+
+#[test_case]
+fn sh_exit_status() {
+    assert_eq!(sh("exit 3"), 3);
+    assert_eq!(sh("true"), 0);
+    assert_eq!(sh("false"), 1);
+    assert_eq!(sh("no-such-command"), 127);
+    assert_eq!(sh("exit 300"), 300 & 0xff);
+    assert_eq!(sh("test_proc exit 9"), 9);
+    assert_eq!(sh("test_stack"), 139, "killed by SIGSEGV -> 128 + 11");
+    assert_eq!(sh(""), 0);
+    assert_eq!(sh("# just a comment"), 0);
+}
+
+#[test_case]
+fn sh_and_or_lists() {
+    assert_eq!(sh("true && exit 4"), 4);
+    assert_eq!(sh("false || exit 5"), 5);
+    assert_eq!(sh("false && exit 6"), 1);
+    assert_eq!(sh("true || exit 7"), 0);
+    assert_eq!(sh("false; true"), 0);
+    assert_eq!(sh("exit 9; exit 1"), 9);
+    assert_eq!(sh("false && true || exit 8"), 8);
+}
+
+#[test_case]
+fn sh_variables_and_quoting() {
+    assert_eq!(sh(r#"x=hello; echo $x "$x world" '$x' ${x}! a\ b > /sh_v.txt"#), 0);
+    assert_eq!(file("/sh_v.txt"), "hello hello world $x hello! a b\n");
+    // $? is expanded before echo runs, so both copies see false's status
+    assert_eq!(sh(r#"false; echo $? "$?" > /sh_s.txt; echo $? >> /sh_s.txt"#), 0);
+    assert_eq!(file("/sh_s.txt"), "1 1\n0\n");
+}
+
+#[test_case]
+fn sh_positional_parameters() {
+    assert_eq!(
+        run(prog("sh"), &["sh", "-c", "echo $0 $1 $2 $# > /sh_p.txt", "name", "one", "two"]),
+        Ok(0)
+    );
+    assert_eq!(file("/sh_p.txt"), "name one two 2\n");
+}
+
+#[test_case]
+fn sh_redirections() {
+    assert_eq!(sh("echo one > /r.txt; echo two >> /r.txt; cat < /r.txt > /r2.txt"), 0);
+    assert_eq!(file("/r2.txt"), "one\ntwo\n");
+    assert_eq!(sh("echo replaced > /r.txt"), 0);
+    assert_eq!(file("/r.txt"), "replaced\n", "> truncates");
+    assert_eq!(sh("cat /missing 2> /r3.txt"), 1);
+    assert!(file("/r3.txt").contains("No such file"));
+    assert_eq!(sh("cat /missing > /r4.txt 2>&1"), 1);
+    assert!(file("/r4.txt").contains("No such file"));
+    // builtins can be redirected, and stdout comes back afterwards
+    assert_eq!(sh("pwd > /r5.txt; echo after > /r6.txt"), 0);
+    assert_eq!(file("/r5.txt"), "/\n");
+    assert_eq!(file("/r6.txt"), "after\n");
+    assert_eq!(sh("cat < /nonexistent"), 1);
+    assert_eq!(sh("> /r7.txt"), 0, "redirection alone creates the file");
+    assert_eq!(file("/r7.txt"), "");
+}
+
+#[test_case]
+fn sh_cd_and_pwd() {
+    assert_eq!(sh("cd /bin && pwd > /c.txt"), 0);
+    assert_eq!(file("/c.txt"), "/bin\n");
+    assert_eq!(*filesystem::CWD.lock(), "/", "the shell's cd must not move the kernel");
+    assert_eq!(sh("cd /nope"), 1);
+    assert_eq!(sh("cd /bin; cd ~; pwd > /c2.txt; cd /bin; cd; echo $PWD >> /c2.txt"), 0);
+    assert_eq!(file("/c2.txt"), "/\n/\n");
+    assert_eq!(sh("cd /bin; ls > /c3.txt"), 0);
+    assert!(file("/c3.txt").contains("sh"), "relative to the new cwd");
+}
+
+#[test_case]
+fn sh_environment() {
+    assert_eq!(sh("export FOO=bar; test_misc env"), 0);
+    assert_eq!(sh("FOO=bar test_misc env"), 0, "per-command assignment");
+    assert_ne!(sh("test_misc env"), 0, "FOO not set");
+    assert_ne!(sh("FOO=bar; test_misc env"), 0, "set but not exported");
+    assert_eq!(sh("FOO=bar; export FOO; test_misc env"), 0);
+    assert_eq!(sh("export FOO=bar; unset FOO; test_misc env") != 0, true);
+    assert_eq!(sh("env > /env.txt"), 0);
+    assert!(file("/env.txt").contains("PATH=/bin"));
+}
+
+#[test_case]
+fn sh_path_lookup() {
+    assert_eq!(sh("/bin/echo absolute > /pl.txt"), 0);
+    assert_eq!(sh("PATH=/nowhere; echo x"), 127, "not found outside PATH");
+    assert_eq!(sh("cd /; bin/echo relative > /pl2.txt"), 0);
+    assert_eq!(file("/pl2.txt"), "relative\n");
+    assert_eq!(sh("/bin"), 127, "a directory is not a program");
+}
+
+#[test_case]
+fn sh_background_jobs() {
+    assert_eq!(sh("test_proc exit 3 & wait"), 3);
+    assert_eq!(sh("test_proc spin 1 & echo x > /bg.txt; wait"), 0);
+    assert_eq!(file("/bg.txt"), "x\n");
+    assert_eq!(sh("true && test_proc exit 4 &"), 0, "& itself succeeds");
+    assert!(only_kernel_left(), "background jobs must be reaped: {:?}", process::list());
+}
+
+#[test_case]
+fn sh_scripts_and_source() {
+    filesystem::write_file("/t.sh", "#!/bin/sh\n# a comment\necho $1 $2 > /t_out.txt\n\nexit 4\necho not reached > /t_out.txt\n").unwrap();
+    assert_eq!(run(prog("sh"), &["sh", "/t.sh", "a", "b"]), Ok(4));
+    assert_eq!(file("/t_out.txt"), "a b\n");
+    filesystem::write_file("/set_x.sh", "x=5\n").unwrap();
+    assert_eq!(sh("x=1; . /set_x.sh; exit $x"), 5);
+    assert_eq!(sh("source /set_x.sh; exit $x"), 5);
+    assert_eq!(sh(". /missing.sh"), 1);
+    assert_eq!(run(prog("sh"), &["sh", "/missing.sh"]), Ok(127));
+    assert_eq!(sh("sh /t.sh x y"), 4, "nested shell");
+}
+
+#[test_case]
+fn sh_syntax_errors() {
+    assert_eq!(sh("echo a | cat"), 2, "pipes are not supported yet");
+    assert_eq!(sh("&& echo"), 2);
+    assert_eq!(sh("echo 'unterminated"), 2);
+    assert_eq!(sh("echo \"unterminated"), 2);
+    assert_eq!(sh("echo >"), 2);
+    assert_eq!(sh("true &&"), 2);
+    assert_eq!(sh("echo ${}"), 2);
+    assert_eq!(sh("echo ok; echo 'bad"), 2, "the whole line is rejected");
+}
+
+#[test_case]
+fn sh_does_not_leak() {
+    assert_eq!(sh("true"), 0);
+    let before = frames_in_use();
+    for _ in 0..5 {
+        assert_eq!(sh("x=1; echo $x > /leak.txt; test_proc exit 0; true && false || true"), 0);
+    }
+    assert_eq!(frames_in_use(), before);
+    assert!(only_kernel_left());
+}
+
+/// Type `text` (lowercase letters, digits, space, '|', '>', '/' and '.')
+/// as PS/2 set-1 scancodes, then Enter.
+fn type_line(text: &str) {
+    const LSHIFT: u8 = 0x2a;
+    for c in text.chars() {
+        let (shift, code) = match c {
+            'a' => (false, 0x1e), 'b' => (false, 0x30), 'c' => (false, 0x2e), 'd' => (false, 0x20),
+            'e' => (false, 0x12), 'f' => (false, 0x21), 'g' => (false, 0x22), 'h' => (false, 0x23),
+            'i' => (false, 0x17), 'j' => (false, 0x24), 'k' => (false, 0x25), 'l' => (false, 0x26),
+            'm' => (false, 0x32), 'n' => (false, 0x31), 'o' => (false, 0x18), 'p' => (false, 0x19),
+            'q' => (false, 0x10), 'r' => (false, 0x13), 's' => (false, 0x1f), 't' => (false, 0x14),
+            'u' => (false, 0x16), 'v' => (false, 0x2f), 'w' => (false, 0x11), 'x' => (false, 0x2d),
+            'y' => (false, 0x15), 'z' => (false, 0x2c),
+            '1'..='9' => (false, 0x02 + (c as u8 - b'1')), '0' => (false, 0x0b),
+            ' ' => (false, 0x39), '/' => (false, 0x35), '.' => (false, 0x34),
+            '|' => (true, 0x2b), '>' => (true, 0x34),
+            _ => panic!("type_line: no scancode for {:?}", c),
+        };
+        if shift {
+            palladiumos::task::keyboard::add_scancode(LSHIFT);
+        }
+        press(code);
+        if shift {
+            palladiumos::task::keyboard::add_scancode(LSHIFT | 0x80);
+        }
+    }
+    press(KEY_ENTER);
+}
+
+#[test_case]
+fn sh_interactive_session() {
+    palladiumos::task::keyboard::init_queue();
+    type_line("echo typed > /typed.txt");
+    type_line("false || touch /or.txt");
+    type_line("exit 6");
+    assert_eq!(run(prog("sh"), &["sh"]), Ok(6));
+    assert_eq!(file("/typed.txt"), "typed\n");
+    assert!(filesystem::read_file("/or.txt").is_ok());
+}
+
+#[test_case]
+fn sh_exits_on_ctrl_d() {
+    palladiumos::task::keyboard::init_queue();
+    type_line("true");
+    ctrl_d();
+    assert_eq!(run(prog("sh"), &["sh"]), Ok(0));
+}

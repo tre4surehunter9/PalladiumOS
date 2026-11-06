@@ -12,6 +12,8 @@
 //! ```
 #![no_std]
 
+extern crate alloc;
+
 use core::arch::{asm, global_asm};
 use core::ffi::{c_char, CStr};
 use core::fmt;
@@ -27,13 +29,17 @@ pub mod sys {
     pub const STAT: u64 = 4;
     pub const FSTAT: u64 = 5;
     pub const LSEEK: u64 = 8;
+    pub const BRK: u64 = 12;
     pub const SCHED_YIELD: u64 = 24;
+    pub const DUP: u64 = 32;
+    pub const DUP2: u64 = 33;
     pub const GETPID: u64 = 39;
     pub const FORK: u64 = 57;
     pub const EXECVE: u64 = 59;
     pub const EXIT: u64 = 60;
     pub const WAIT4: u64 = 61;
     pub const GETPPID: u64 = 110;
+    pub const REBOOT: u64 = 169;
     pub const UNAME: u64 = 63;
     pub const GETCWD: u64 = 79;
     pub const CHDIR: u64 = 80;
@@ -66,6 +72,7 @@ pub mod fs;
 pub use fs::*;
 pub mod process;
 pub use process::*;
+pub mod heap;
 
 pub const STDIN: i32 = 0;
 pub const STDOUT: i32 = 1;
@@ -89,6 +96,29 @@ pub fn exit(status: i32) -> ! {
 
 pub fn getpid() -> i32 {
     unsafe { sys::syscall3(sys::GETPID, 0, 0, 0) as i32 }
+}
+
+/// dup(2)
+pub fn dup(fd: i32) -> isize {
+    unsafe { sys::syscall3(sys::DUP, fd as u64, 0, 0) as isize }
+}
+
+/// dup2(2): make `new` refer to the same file as `old`.
+pub fn dup2(old: i32, new: i32) -> isize {
+    unsafe { sys::syscall3(sys::DUP2, old as u64, new as u64, 0) as isize }
+}
+
+/// brk(2): returns the new program break (or the current one on failure).
+pub fn brk(addr: u64) -> u64 {
+    unsafe { sys::syscall3(sys::BRK, addr, 0, 0) as u64 }
+}
+
+pub const REBOOT_RESTART: u64 = 0x01234567;
+pub const REBOOT_POWER_OFF: u64 = 0x4321fedc;
+
+/// reboot(2) with the Linux magic numbers. Only returns on error.
+pub fn reboot(cmd: u64) -> isize {
+    unsafe { sys::syscall3(sys::REBOOT, 0xfee1dead, 672274793, cmd) as isize }
 }
 
 pub fn sched_yield() {
@@ -197,6 +227,28 @@ impl Iterator for Args {
     }
 }
 
+// ---- environment ----
+
+static mut ENVP: *const *const c_char = core::ptr::null();
+
+/// The environment as "NAME=value" strings.
+pub fn environ() -> impl Iterator<Item = &'static str> {
+    let mut p = unsafe { ENVP };
+    core::iter::from_fn(move || unsafe {
+        if p.is_null() || (*p).is_null() {
+            return None;
+        }
+        let s = CStr::from_ptr(*p).to_str().unwrap_or("");
+        p = p.add(1);
+        Some(s)
+    })
+}
+
+/// Look up an environment variable, like getenv(3).
+pub fn getenv(name: &str) -> Option<&'static str> {
+    environ().find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))
+}
+
 // ---- entry point ----
 
 unsafe extern "Rust" {
@@ -217,6 +269,8 @@ global_asm!(
 extern "C" fn userlib_start(sp: *const u64) -> ! {
     let argc = unsafe { *sp } as usize;
     let argv = unsafe { sp.add(1) } as *const *const c_char;
+    // envp follows argv's NULL terminator
+    unsafe { ENVP = argv.add(argc + 1) };
     let status = unsafe { __userlib_main(Args { argc, argv, index: 0 }) };
     exit(status)
 }
