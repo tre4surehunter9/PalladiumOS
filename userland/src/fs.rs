@@ -22,6 +22,8 @@ pub const SEEK_END: u64 = 2;
 
 // errno values
 pub const ENOENT: isize = 2;
+pub const ESRCH: isize = 3;
+pub const EINTR: isize = 4;
 pub const E2BIG: isize = 7;
 pub const ENOEXEC: isize = 8;
 pub const EIO: isize = 5;
@@ -37,6 +39,7 @@ pub const ENOTDIR: isize = 20;
 pub const EISDIR: isize = 21;
 pub const EINVAL: isize = 22;
 pub const EMFILE: isize = 24;
+pub const ENOTTY: isize = 25;
 pub const EFBIG: isize = 27;
 pub const ESPIPE: isize = 29;
 pub const ERANGE: isize = 34;
@@ -48,6 +51,8 @@ pub const ENOTEMPTY: isize = 39;
 pub fn strerror(errno: isize) -> &'static str {
     match errno {
         ENOENT => "No such file or directory",
+        ESRCH => "No such process",
+        EINTR => "Interrupted system call",
         E2BIG => "Argument list too long",
         ENOEXEC => "Exec format error",
         ECHILD => "No child processes",
@@ -63,6 +68,7 @@ pub fn strerror(errno: isize) -> &'static str {
         EISDIR => "Is a directory",
         EINVAL => "Invalid argument",
         EMFILE => "Too many open files",
+        ENOTTY => "Inappropriate ioctl for device",
         EFBIG => "File too large",
         ESPIPE => "Illegal seek",
         ERANGE => "Result too large",

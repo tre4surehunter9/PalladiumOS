@@ -10,7 +10,6 @@
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Mutex;
 
 use crate::fdfs::Node;
 use crate::filesystem::{self, FS};
@@ -44,7 +43,6 @@ const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 
 // d_type values for getdents64
-const DT_CHR: u8 = 2;
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 
@@ -229,29 +227,79 @@ pub fn sys_openat(dirfd: u64, path: u64, flags: u64) -> i64 {
     }
 }
 
-/// Print to the screen, handling the few ANSI escape sequences programs use:
-/// ESC[2J / ESC[J clears the screen, ESC[H moves to the top left. Other
-/// sequences are dropped instead of being printed as garbage.
+/// Print program output, interpreting ANSI escape sequences.
 fn console_write(bytes: &[u8]) {
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'[') {
-            let mut j = i + 2;
-            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
-                j += 1;
-            }
-            if j < bytes.len() {
-                match bytes[j] {
-                    b'J' => crate::vga_buffer::clear_screen(),
-                    b'H' => crate::vga_buffer::WRITER.lock().set_cursor_pos(0, 0),
-                    _ => {}
-                }
-                i = j + 1;
-                continue;
-            }
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::vga_buffer::WRITER.lock().write_ansi(bytes);
+    });
+}
+
+// ioctl requests (Linux values)
+const TCGETS: u64 = 0x5401;
+const TCSETS: u64 = 0x5402;
+const TCSETSW: u64 = 0x5403;
+const TCSETSF: u64 = 0x5404;
+const TIOCGWINSZ: u64 = 0x5413;
+const TIOCGPGRP: u64 = 0x540F;
+const TIOCSPGRP: u64 = 0x5410;
+/// sizeof(struct termios) for the TCGETS/TCSETS ioctls: four u32 flag
+/// words, c_line, and 19 control characters.
+const TERMIOS_SIZE: u64 = 36;
+
+/// ioctl(fd, request, arg): terminal settings for the console.
+/// Anything that isn't the console is ENOTTY (how isatty() works).
+pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
+    use crate::syscall::{user_slice, user_slice_mut};
+    match get_fd(fd) {
+        Ok(OpenFile::Console) => {}
+        Ok(_) => return -ENOTTY,
+        Err(e) => return -e,
+    }
+    match request {
+        TCGETS => {
+            let Some(out) = (unsafe { user_slice_mut(arg, TERMIOS_SIZE) }) else { return -EFAULT };
+            let mode = crate::tty::mode();
+            out.fill(0);
+            out[0..4].copy_from_slice(&mode.iflag.to_le_bytes()); // c_iflag
+            out[4..8].copy_from_slice(&1u32.to_le_bytes()); // c_oflag: OPOST
+            out[8..12].copy_from_slice(&0o277u32.to_le_bytes()); // c_cflag: CS8|CREAD|B38400
+            out[12..16].copy_from_slice(&mode.lflag.to_le_bytes()); // c_lflag
+            // c_cc: VINTR ^C, VERASE DEL, VKILL ^U, VEOF ^D, VMIN 1
+            out[17] = 3;
+            out[19] = 0x7f;
+            out[20] = 0x15;
+            out[21] = 4;
+            out[23] = 1;
+            0
         }
-        crate::print!("{}", bytes[i] as char);
-        i += 1;
+        TCSETS | TCSETSW | TCSETSF => {
+            let Some(input) = (unsafe { user_slice(arg, TERMIOS_SIZE) }) else { return -EFAULT };
+            let word = |i: usize| u32::from_le_bytes(input[i..i + 4].try_into().unwrap());
+            crate::tty::set_mode(crate::tty::Mode { iflag: word(0), lflag: word(12) });
+            0
+        }
+        TIOCGPGRP => {
+            let Some(out) = (unsafe { user_slice_mut(arg, 4) }) else { return -EFAULT };
+            out.copy_from_slice(&(crate::process::foreground() as i32).to_le_bytes());
+            0
+        }
+        TIOCSPGRP => {
+            let Some(input) = (unsafe { user_slice(arg, 4) }) else { return -EFAULT };
+            let pgid = i32::from_le_bytes(input.try_into().unwrap());
+            if pgid <= 0 {
+                return -EINVAL;
+            }
+            crate::process::set_foreground(pgid as u64);
+            0
+        }
+        TIOCGWINSZ => {
+            let Some(out) = (unsafe { user_slice_mut(arg, 8) }) else { return -EFAULT };
+            out.fill(0);
+            out[0..2].copy_from_slice(&25u16.to_le_bytes()); // ws_row
+            out[2..4].copy_from_slice(&80u16.to_le_bytes()); // ws_col
+            0
+        }
+        _ => -EINVAL,
     }
 }
 
@@ -306,7 +354,7 @@ fn set_offset(fd: u64, new_offset: usize) {
 /// read(fd, buf, count)
 pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
     match get_fd(fd) {
-        Ok(OpenFile::Console) => crate::tty::read(buf) as i64,
+        Ok(OpenFile::Console) => crate::tty::read(buf),
         Ok(OpenFile::File { node, offset, readable, .. }) => {
             if !readable {
                 return -EBADF;

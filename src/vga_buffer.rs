@@ -53,6 +53,15 @@ pub struct Writer {
     column_position: usize,
     color_code: ColorCode,
     buffer: &'static mut Buffer,
+    /// ANSI text attributes (see write_ansi), as VGA color numbers.
+    fg: u8,
+    bg: u8,
+    bold: bool,
+    reverse: bool,
+    /// The start of an escape sequence that was cut off at the end of a
+    /// write; it continues with the next write (like a real terminal).
+    pending: [u8; 32],
+    pending_len: usize,
 }
 
 
@@ -63,13 +72,19 @@ impl Writer {
             0x08 => {
                 if self.column_position > 0 {
                     self.column_position -= 1;
-                    let row = self.row_position;
-                    let col = self.column_position;
-                    self.buffer.chars[row][col].write(ScreenChar {
-                        ascii_character: b' ',
-                        color_code: self.color_code,
-                    });
+                } else if self.row_position > 0 {
+                    // The line wrapped: go back to the end of the row above.
+                    self.row_position -= 1;
+                    self.column_position = BUFFER_WIDTH - 1;
+                } else {
+                    return;
                 }
+                let row = self.row_position;
+                let col = self.column_position;
+                self.buffer.chars[row][col].write(ScreenChar {
+                    ascii_character: b' ',
+                    color_code: self.color_code,
+                });
             }
             byte => {
                 if self.column_position >= BUFFER_WIDTH {
@@ -161,6 +176,12 @@ lazy_static! {
         row_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
         buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+        fg: DEFAULT_FG,
+        bg: DEFAULT_BG,
+        bold: false,
+        reverse: false,
+        pending: [0; 32],
+        pending_len: 0,
     });
 }
 
@@ -213,7 +234,9 @@ pub fn _print(args: fmt::Arguments) {
     use x86_64::instructions::interrupts;
 
     interrupts::without_interrupts(|| {
-        WRITER.lock().write_fmt(args).unwrap();
+        let mut writer = WRITER.lock();
+        writer.write_fmt(args).unwrap();
+        writer.update_hw_cursor();
     });
 }
 
@@ -227,34 +250,39 @@ pub fn erase_cursor() {
 }
 
 impl Writer {
+/// Move the blinking VGA hardware cursor to the writing position. (A drawn
+/// cursor character would hide the text underneath it, e.g. in the editor.)
 pub fn draw_cursor_inner(&mut self) {
     // At the end of a line the next character wraps (see write_byte),
     // so the cursor belongs at the start of the next line.
     if self.column_position >= BUFFER_WIDTH {
         self.new_line();
     }
-    let row = self.row_position;
-    let col = self.column_position;
-    self.buffer.chars[row][col].write(ScreenChar {
-        ascii_character: 0xDD,
-        color_code: self.color_code,
-    });
+    self.update_hw_cursor();
  }
+
+fn update_hw_cursor(&self) {
+    use x86_64::instructions::port::Port;
+    let pos = (self.row_position * BUFFER_WIDTH + self.column_position.min(BUFFER_WIDTH - 1)) as u16;
+    unsafe {
+        let mut index: Port<u8> = Port::new(0x3D4);
+        let mut data: Port<u8> = Port::new(0x3D5);
+        // Make sure the cursor is enabled, as an underline (scanlines 14-15).
+        index.write(0x0A);
+        data.write(14);
+        index.write(0x0B);
+        data.write(15);
+        index.write(0x0F);
+        data.write((pos & 0xFF) as u8);
+        index.write(0x0E);
+        data.write((pos >> 8) as u8);
+    }
+}
 }
 
 impl Writer {
-pub fn erase_cursor_inner(&mut self) {
-    if self.column_position >= BUFFER_WIDTH {
-        return; // nothing drawn past the last column
-    }
-    let row = self.row_position;
-    let col = self.column_position;
-    self.buffer.chars[row][col].write(ScreenChar {
-        ascii_character: b' ',
-        color_code: self.color_code,
-     });
-
-   }
+/// Nothing to erase with a hardware cursor; kept so callers don't change.
+pub fn erase_cursor_inner(&mut self) {}
 }
 
 pub fn clear_screen() {
@@ -285,3 +313,186 @@ impl Writer {
 }
 
 
+
+// ---- ANSI escape sequences (used by user programs through the console) ----
+
+const DEFAULT_FG: u8 = Color::Yellow as u8;
+const DEFAULT_BG: u8 = Color::Black as u8;
+
+/// ANSI color number (0-7) to VGA color number.
+const ANSI_TO_VGA: [u8; 8] = [0, 4, 2, 6, 1, 5, 3, 7];
+
+impl Writer {
+    /// Write bytes from a program, interpreting the common ANSI/VT100 CSI
+    /// sequences: cursor movement (A B C D H f), erase (J K), and text
+    /// attributes (m: 0 reset, 1 bold, 7 reverse, 30-37/40-47 colors, 39/49
+    /// defaults). Unknown sequences are dropped instead of shown as garbage.
+    pub fn write_ansi(&mut self, bytes: &[u8]) {
+        // Continue a sequence left unfinished by the previous write.
+        let joined;
+        let bytes = if self.pending_len > 0 {
+            let mut v = alloc::vec::Vec::with_capacity(self.pending_len + bytes.len());
+            v.extend_from_slice(&self.pending[..self.pending_len]);
+            v.extend_from_slice(bytes);
+            self.pending_len = 0;
+            joined = v;
+            &joined[..]
+        } else {
+            bytes
+        };
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == 0x1b && i + 1 == bytes.len() {
+                self.pending[0] = 0x1b;
+                self.pending_len = 1;
+                break;
+            }
+            if b == 0x1b && bytes.get(i + 1) == Some(&b'[') {
+                let mut params = [0u16; 8];
+                let mut count = 0;
+                let mut have_digit = false;
+                let mut j = i + 2;
+                while j < bytes.len() {
+                    match bytes[j] {
+                        d @ b'0'..=b'9' => {
+                            if count < params.len() {
+                                params[count] = params[count].saturating_mul(10).saturating_add((d - b'0') as u16);
+                            }
+                            have_digit = true;
+                        }
+                        b';' => {
+                            count += 1;
+                            have_digit = false;
+                        }
+                        b'?' => {}
+                        _ => break,
+                    }
+                    j += 1;
+                }
+                if j >= bytes.len() {
+                    // Cut off: keep it for the next write (unless absurdly long).
+                    let rest = &bytes[i..];
+                    if rest.len() <= self.pending.len() {
+                        self.pending[..rest.len()].copy_from_slice(rest);
+                        self.pending_len = rest.len();
+                    }
+                    break;
+                }
+                let n = (count + if have_digit || count > 0 { 1 } else { 0 }).min(params.len());
+                self.csi(bytes[j], &params[..n]);
+                i = j + 1;
+                continue;
+            }
+            match b {
+                b'\n' => self.new_line(),
+                b'\r' => self.column_position = 0,
+                0x08 => self.write_byte(0x08),
+                b'\t' => {
+                    let next = (self.column_position / 8 + 1) * 8;
+                    while self.column_position < next.min(BUFFER_WIDTH) {
+                        self.write_byte(b' ');
+                    }
+                }
+                0x07 => {} // bell
+                0x20..=0x7e => self.write_byte(b),
+                _ => self.write_byte(0xfe),
+            }
+            i += 1;
+        }
+        self.update_hw_cursor();
+    }
+
+    fn csi(&mut self, cmd: u8, params: &[u16]) {
+        let arg = |i: usize, default: u16| -> usize {
+            match params.get(i) {
+                Some(&0) | None => default as usize,
+                Some(&v) => v as usize,
+            }
+        };
+        let total = BUFFER_WIDTH * BUFFER_HEIGHT;
+        let pos = self.row_position * BUFFER_WIDTH + self.column_position;
+        let set_pos = |w: &mut Writer, p: usize| {
+            let p = p.min(total - 1);
+            w.row_position = p / BUFFER_WIDTH;
+            w.column_position = p % BUFFER_WIDTH;
+        };
+        match cmd {
+            // Moves wrap across lines, so line editors can move over wrapped input.
+            b'A' => self.row_position = self.row_position.saturating_sub(arg(0, 1)),
+            b'B' => self.row_position = (self.row_position + arg(0, 1)).min(BUFFER_HEIGHT - 1),
+            b'C' => set_pos(self, pos + arg(0, 1)),
+            b'D' => set_pos(self, pos.saturating_sub(arg(0, 1))),
+            b'H' | b'f' => {
+                self.row_position = (arg(0, 1) - 1).min(BUFFER_HEIGHT - 1);
+                self.column_position = (arg(1, 1) - 1).min(BUFFER_WIDTH - 1);
+            }
+            b'J' => {
+                let (from, to) = match params.first().copied().unwrap_or(0) {
+                    0 => (pos, total),
+                    1 => (0, pos + 1),
+                    _ => (0, total),
+                };
+                self.blank(from, to);
+            }
+            b'K' => {
+                let line = self.row_position * BUFFER_WIDTH;
+                let (from, to) = match params.first().copied().unwrap_or(0) {
+                    0 => (pos, line + BUFFER_WIDTH),
+                    1 => (line, pos + 1),
+                    _ => (line, line + BUFFER_WIDTH),
+                };
+                self.blank(from, to);
+            }
+            b'm' => {
+                if params.is_empty() {
+                    self.reset_attributes();
+                }
+                for &p in params {
+                    match p {
+                        0 => self.reset_attributes(),
+                        1 => self.bold = true,
+                        22 => self.bold = false,
+                        7 => self.reverse = true,
+                        27 => self.reverse = false,
+                        30..=37 => self.fg = ANSI_TO_VGA[(p - 30) as usize],
+                        39 => self.fg = DEFAULT_FG,
+                        40..=47 => self.bg = ANSI_TO_VGA[(p - 40) as usize],
+                        49 => self.bg = DEFAULT_BG,
+                        90..=97 => self.fg = ANSI_TO_VGA[(p - 90) as usize] | 8,
+                        _ => {}
+                    }
+                }
+                self.apply_attributes();
+            }
+            _ => {}
+        }
+    }
+
+    fn reset_attributes(&mut self) {
+        self.fg = DEFAULT_FG;
+        self.bg = DEFAULT_BG;
+        self.bold = false;
+        self.reverse = false;
+    }
+
+    fn apply_attributes(&mut self) {
+        let fg = if self.bold { self.fg | 8 } else { self.fg };
+        let (fg, bg) = if self.reverse { (self.bg, fg) } else { (fg, self.bg) };
+        self.color_code = ColorCode((bg & 0x7) << 4 | (fg & 0xf));
+    }
+
+    /// Blank the screen cells [from, to) (linear positions).
+    fn blank(&mut self, from: usize, to: usize) {
+        let blank = ScreenChar { ascii_character: b' ', color_code: self.color_code };
+        for p in from..to.min(BUFFER_WIDTH * BUFFER_HEIGHT) {
+            self.buffer.chars[p / BUFFER_WIDTH][p % BUFFER_WIDTH].write(blank);
+        }
+    }
+
+    /// Restore the default colors (when a program leaves them changed).
+    pub fn reset_ansi(&mut self) {
+        self.reset_attributes();
+        self.apply_attributes();
+    }
+}

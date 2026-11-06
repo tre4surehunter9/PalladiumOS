@@ -39,9 +39,12 @@ extern "x86-interrupt" fn timer_interrupt_handler(
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
+    crate::process::tick();
     // Preemptive multitasking: only when we interrupted a user program, never
-    // in the middle of kernel code (which may hold locks).
+    // in the middle of kernel code (which may hold locks). Signals (Ctrl-C)
+    // reach busy programs here too.
     if crate::usermode::from_user(stack_frame.code_segment) {
+        crate::process::handle_signals();
         crate::process::preempt();
     }
 }
@@ -53,7 +56,10 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
 
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
-    crate::task::keyboard::add_scancode(scancode); // new
+    // Ctrl-C becomes SIGINT (and isn't passed on as a key).
+    if !crate::tty::intercept_scancode(scancode) {
+        crate::task::keyboard::add_scancode(scancode);
+    }
 
     unsafe {
         PICS.lock()

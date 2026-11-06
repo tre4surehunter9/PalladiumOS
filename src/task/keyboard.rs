@@ -149,9 +149,10 @@ fn handle_editor_key(
     key_event: pc_keyboard::KeyEvent,
     keyboard: &mut Keyboard<layouts::Us104Key, ScancodeSet1>,
 ) {
-    use pc_keyboard::{KeyCode, KeyState};
-    if key_event.state != KeyState::Down { return; }
-
+    use pc_keyboard::KeyCode;
+    // Every event must reach the decoder, including key releases: otherwise
+    // it never sees Ctrl/Shift being let go, and they stay "held" (after
+    // Ctrl+S, letters turned into control codes). It returns None for releases.
     if let Some(key) = keyboard.process_keyevent(key_event) {
         match key {
             DecodedKey::Unicode('\x13') => {

@@ -8,7 +8,7 @@
 include!(concat!(env!("OUT_DIR"), "/user_programs.rs"));
 
 pub static FLAT_PROGRAMS: &[(&str, &[u8])] = &[
-    ("crash", include_bytes!("user_progs/crash.bin")),
+    ("test_crash", include_bytes!("user_progs/crash.bin")),
 ];
 
 /// Install every bundled program as /bin/<name>, so programs can be run by

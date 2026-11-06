@@ -5,6 +5,11 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use userlib::{close, eprintln, for_each_entry, open, print, println, stat, strerror, O_DIRECTORY, O_RDONLY, DT_DIR};
 
 userlib::entry!(main);
@@ -49,22 +54,26 @@ fn list(path: &str, opts: &Options) -> i32 {
         return 2;
     }
     let fd = fd as i32;
+    // Collect, then sort by name like POSIX ls.
+    let mut entries: Vec<(String, bool)> = Vec::new();
     let result = for_each_entry(fd, |entry| {
-        if !opts.all && entry.name.starts_with('.') {
-            return;
-        }
-        let is_dir = entry.d_type == DT_DIR;
-        if opts.long {
-            let mut buf = [0u8; 512];
-            let size = stat(join(&mut buf, path, entry.name)).map(|s| s.st_size).unwrap_or(0);
-            println!("{}  {:>8}  {}", if is_dir { 'd' } else { '-' }, size, entry.name);
-        } else if is_dir {
-            println!("{}/", entry.name);
-        } else {
-            println!("{}", entry.name);
+        if opts.all || !entry.name.starts_with('.') {
+            entries.push((entry.name.to_string(), entry.d_type == DT_DIR));
         }
     });
     close(fd);
+    entries.sort();
+    for (name, is_dir) in &entries {
+        if opts.long {
+            let mut buf = [0u8; 512];
+            let size = stat(join(&mut buf, path, name)).map(|s| s.st_size).unwrap_or(0);
+            println!("{}  {:>8}  {}", if *is_dir { 'd' } else { '-' }, size, name);
+        } else if *is_dir {
+            println!("{}/", name);
+        } else {
+            println!("{}", name);
+        }
+    }
     match result {
         Ok(()) => 0,
         Err(e) => {

@@ -730,3 +730,172 @@ fn sh_exits_on_ctrl_d() {
     ctrl_d();
     assert_eq!(run(prog("sh"), &["sh"]), Ok(0));
 }
+
+// ---- terminal, signals, editor (round 2 and 3 fixes) ----
+
+/// Press an extended key (scancode prefixed with 0xE0: arrows, Delete...).
+fn press_ext(code: u8) {
+    use palladiumos::task::keyboard::add_scancode;
+    add_scancode(0xe0);
+    add_scancode(code);
+    add_scancode(0xe0);
+    add_scancode(code | 0x80);
+}
+
+const EXT_UP: u8 = 0x48;
+const EXT_LEFT: u8 = 0x4b;
+const EXT_HOME: u8 = 0x47;
+const EXT_DELETE: u8 = 0x53;
+const KEY_S: u8 = 0x1f;
+const KEY_Q: u8 = 0x10;
+
+fn ctrl(code: u8) {
+    palladiumos::task::keyboard::add_scancode(KEY_LCTRL);
+    press(code);
+    palladiumos::task::keyboard::add_scancode(KEY_LCTRL | 0x80);
+}
+
+/// Type text without pressing Enter (the few characters these tests use).
+fn type_text(text: &str) {
+    for c in text.chars() {
+        let code = match c {
+            'a' => 0x1e, 'e' => 0x12, 'h' => 0x23, 'i' => 0x17, 'r' => 0x13, 't' => 0x14,
+            'x' => 0x2d, 'b' => 0x30, 'c' => 0x2e, 'o' => 0x18, ' ' => 0x39,
+            _ => panic!("type_text: {:?}", c),
+        };
+        press(code);
+    }
+}
+
+#[test_case]
+fn terminal_modes_and_ioctl() {
+    assert_eq!(run(prog("test_tty"), &["test_tty", "modes"]), Ok(0));
+}
+
+#[test_case]
+fn raw_mode_key_sequences() {
+    palladiumos::task::keyboard::init_queue();
+    press(0x1e); // a
+    press(KEY_BACKSPACE);
+    press_ext(EXT_UP);
+    press_ext(EXT_DELETE);
+    press(KEY_ENTER);
+    assert_eq!(run(prog("test_tty"), &["test_tty", "keys"]), Ok(0));
+    // the kernel puts the console back in cooked mode afterwards
+    assert_eq!(palladiumos::tty::mode(), palladiumos::tty::DEFAULT_MODE);
+}
+
+#[test_case]
+fn signals_groups_and_sleep() {
+    assert_eq!(run(prog("test_sig"), &["test_sig"]), Ok(0));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn ctrl_c_interrupts_the_foreground_program() {
+    // As if Ctrl-C was pressed while `sleep 30` runs: it gets SIGINT.
+    process::ctrl_c_pressed();
+    assert_eq!(run(prog("sleep"), &["sleep", "30"]), Ok(130));
+}
+
+#[test_case]
+fn ctrl_c_at_the_prompt_cancels_the_line() {
+    // At the prompt the line editor has the console in raw mode, so Ctrl-C
+    // is just a key: it throws away "exit 5" and the shell keeps running.
+    palladiumos::task::keyboard::init_queue();
+    type_text("exit");
+    ctrl(0x2e); // Ctrl-C
+    type_line("exit 3");
+    assert_eq!(run(prog("sh"), &["sh"]), Ok(3));
+}
+
+#[test_case]
+fn sleep_program() {
+    assert_eq!(run(prog("sleep"), &["sleep", "0.2"]), Ok(0));
+    assert_eq!(run(prog("sleep"), &["sleep", "bad"]), Ok(1));
+    assert_eq!(run(prog("sleep"), &["sleep"]), Ok(1));
+}
+
+#[test_case]
+fn kill_program_and_builtin() {
+    assert_eq!(sh("sleep 30 & kill %1; wait"), 128 + 15);
+    assert_eq!(sh("sleep 30 & kill -9 %1; wait"), 128 + 9);
+    assert_eq!(sh("kill %7"), 1, "no such job");
+    assert_eq!(sh("kill -l > /kl.txt"), 0);
+    assert!(file("/kl.txt").contains("SIGTERM"));
+    assert_eq!(run(prog("kill"), &["kill", "30000"]), Ok(1));
+    assert_eq!(run(prog("kill"), &["kill", "-l"]), Ok(0));
+    assert!(only_kernel_left());
+}
+
+#[test_case]
+fn leftover_background_jobs_are_hung_up() {
+    // The program exits while `sleep 60` still runs in the background: the
+    // kernel sends it SIGHUP instead of waiting a minute.
+    assert_eq!(sh("sleep 60 &"), 0);
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn uptime_and_about() {
+    assert_eq!(sh("uptime > /up.txt && about > /about.txt"), 0);
+    assert!(file("/up.txt").starts_with("up "));
+    assert!(file("/about.txt").contains("PalladiumOS"));
+}
+
+#[test_case]
+fn userland_editor() {
+    palladiumos::task::keyboard::init_queue();
+    filesystem::write_file("/edit.txt", "first\n").unwrap();
+    // Go to the end of "first", add a new line "hi", then on line 1 insert
+    // "x" at the start; save with Ctrl-S, quit with Ctrl-Q.
+    press_ext(0x4f); // End
+    press(KEY_ENTER);
+    type_text("hi");
+    press_ext(EXT_UP);
+    press_ext(EXT_HOME);
+    type_text("x");
+    ctrl(KEY_S);
+    ctrl(KEY_Q);
+    assert_eq!(run(prog("edit"), &["edit", "/edit.txt"]), Ok(0));
+    assert_eq!(file("/edit.txt"), "xfirst\nhi\n");
+}
+
+#[test_case]
+fn editor_warns_before_losing_changes() {
+    palladiumos::task::keyboard::init_queue();
+    type_text("abc");
+    ctrl(KEY_Q); // warns: unsaved changes
+    ctrl(KEY_Q); // quits
+    assert_eq!(run(prog("edit"), &["edit", "/never_saved.txt"]), Ok(0));
+    assert!(filesystem::read_file("/never_saved.txt").is_err());
+}
+
+#[test_case]
+fn shell_line_editing_and_history() {
+    palladiumos::task::keyboard::init_queue();
+    // "echo ab", cursor left once, type "x" -> "echo axb"; then Up recalls
+    // the line and Enter runs it again (>> appends a second line).
+    type_text("echo ab");
+    press_ext(EXT_LEFT);
+    type_text("x");
+    press_ext(0x4f); // End: the cursor was still before the "b"
+    type_line(" >> /le.txt");
+    press_ext(EXT_UP);
+    press(KEY_ENTER);
+    type_line("exit 0");
+    assert_eq!(run(prog("sh"), &["sh"]), Ok(0));
+    assert_eq!(file("/le.txt"), "axb\naxb\n");
+}
+
+#[test_case]
+fn shell_tab_completion() {
+    palladiumos::task::keyboard::init_queue();
+    // "ech<Tab>" completes to "echo "
+    type_text("ech");
+    press(0x0f); // Tab
+    type_line("done > /tab.txt");
+    type_line("exit 0");
+    assert_eq!(run(prog("sh"), &["sh"]), Ok(0));
+    assert_eq!(file("/tab.txt"), "done\n");
+}

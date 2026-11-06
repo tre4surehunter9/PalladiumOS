@@ -116,7 +116,13 @@ fn cmd_cat(args: &str) -> bool {
     }
     let path = filesystem::resolve_path(args);
     match filesystem::read_file(&path) {
-        Ok(contents) => { println!("{}", contents); true }
+        Ok(contents) => {
+            crate::print!("{}", contents);
+            if !contents.is_empty() && !contents.ends_with('\n') {
+                println!();
+            }
+            true
+        }
         Err(e)       => { println!("cat: {}", e);   false }
     }
 }

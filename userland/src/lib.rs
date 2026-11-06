@@ -30,7 +30,10 @@ pub mod sys {
     pub const FSTAT: u64 = 5;
     pub const LSEEK: u64 = 8;
     pub const BRK: u64 = 12;
+    pub const RT_SIGACTION: u64 = 13;
+    pub const IOCTL: u64 = 16;
     pub const SCHED_YIELD: u64 = 24;
+    pub const NANOSLEEP: u64 = 35;
     pub const DUP: u64 = 32;
     pub const DUP2: u64 = 33;
     pub const GETPID: u64 = 39;
@@ -38,8 +41,12 @@ pub mod sys {
     pub const EXECVE: u64 = 59;
     pub const EXIT: u64 = 60;
     pub const WAIT4: u64 = 61;
+    pub const KILL: u64 = 62;
+    pub const SETPGID: u64 = 109;
+    pub const GETPGRP: u64 = 111;
     pub const GETPPID: u64 = 110;
     pub const REBOOT: u64 = 169;
+    pub const CLOCK_GETTIME: u64 = 228;
     pub const UNAME: u64 = 63;
     pub const GETCWD: u64 = 79;
     pub const CHDIR: u64 = 80;
@@ -73,6 +80,10 @@ pub use fs::*;
 pub mod process;
 pub use process::*;
 pub mod heap;
+pub mod tty;
+pub use tty::*;
+pub mod signal;
+pub use signal::*;
 
 pub const STDIN: i32 = 0;
 pub const STDOUT: i32 = 1;

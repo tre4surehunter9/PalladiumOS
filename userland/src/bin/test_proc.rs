@@ -172,7 +172,9 @@ fn all() -> i32 {
     // ---- WNOHANG: poll until a busy child finishes ----
     let pid = fork();
     if pid == 0 {
-        spin(2);
+        // Long enough (several timer ticks) that it can't finish within a
+        // single time slice before the parent's first poll.
+        spin(300);
         exit(5);
     }
     let mut polls = 0u64;

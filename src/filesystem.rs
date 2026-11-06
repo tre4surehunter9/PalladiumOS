@@ -89,10 +89,10 @@ pub fn init_default_files() {
     FS.lock().make_dir("/features").ok();
     FS.lock().make_dir("/scripts").ok();
     FS.lock().write_file("/scripts/test.psh",
-                         "# PalladiumOS Test Script\necho This is a test of the PalladiumOS Scripting.").ok();
+                         "# PalladiumOS Test Script\necho This is a test of the PalladiumOS Scripting.\n").ok();
     FS.lock().write_file ("/features/features.txt",
-                          "Features:\n Text Editor\n Filesystem\n Scripting\n Shell").ok();
+                          "Features:\n Text Editor\n Filesystem\n Scripting\n Shell\n").ok();
     FS.lock().write_file ("/welcome.txt",
-                          "Welcome to PalladiumOS! This is my personal OS project!\nYou can find it at https://github.com/tre4surehunter9/PalladiumOS/").ok();
+                          "Welcome to PalladiumOS! This is my personal OS project!\nYou can find it at https://github.com/tre4surehunter9/PalladiumOS/\n").ok();
 }
 

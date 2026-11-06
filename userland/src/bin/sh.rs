@@ -11,7 +11,9 @@
 //!   NAME=value (shell variable), NAME=value cmd (for one command only)
 //!   cmd1 ; cmd2   cmd1 && cmd2   cmd1 || cmd2   cmd &  (background)
 //!   > file   >> file   < file   2> file   2>> file   2>&1
-//!   builtins: cd pwd exit export unset set wait . source help true false
+//!   builtins: cd pwd exit export unset set wait jobs . source help true false
+//!   interactive line editing: arrows, Home/End, history (Up/Down), Tab
+//!   completion, Ctrl-A/E/U/K/L/C
 //! Not yet: pipes, globbing, if/while/for, functions, field splitting.
 #![no_std]
 #![no_main]
@@ -387,7 +389,10 @@ struct Shell {
 }
 
 /// Builtins that must run in the shell process itself.
-const BUILTINS: &[&str] = &["cd", "pwd", "exit", "export", "unset", "set", "wait", ".", "source", "help", "true", "false"];
+const BUILTINS: &[&str] = &[
+    "cd", "pwd", "exit", "export", "unset", "set", "wait", "jobs", "kill", ".", "source", "help", "true", "false", "run",
+    "script",
+];
 
 impl Shell {
     fn new(params: Vec<String>, interactive: bool) -> Self {
@@ -520,12 +525,19 @@ impl Shell {
             return;
         }
         if pid == 0 {
+            if self.interactive {
+                // Its own process group, so Ctrl-C (sent to the terminal's
+                // foreground group) doesn't reach it.
+                setpgid(0, 0);
+                set_signal(SIGINT, SIG_DFL);
+            }
             self.interactive = false;
             self.run_and_or(&ao);
             exit(self.exit_requested.unwrap_or(self.status));
         }
         if self.interactive {
-            println!("[{}]", pid);
+            setpgid(pid as i32, pid as i32); // also in the child: whichever runs first
+            println!("[{}] {}", self.jobs.len() + 1, pid);
         }
         self.jobs.push(pid as i32);
         self.status = 0;
@@ -539,7 +551,7 @@ impl Shell {
             let pid = self.jobs[i];
             if waitpid(pid, &mut status, WNOHANG) == pid as isize {
                 if self.interactive {
-                    println!("[{}] Done ({})", pid, shell_status(status));
+                    println!("[{}] {} Done ({})", i + 1, pid, shell_status(status));
                 }
                 self.jobs.remove(i);
             } else {
@@ -600,6 +612,13 @@ impl Shell {
             return;
         }
         if pid == 0 {
+            if self.interactive {
+                // A new process group that owns the terminal, so Ctrl-C
+                // interrupts this command and not the shell.
+                setpgid(0, 0);
+                tcsetpgrp(STDIN, getpid());
+                set_signal(SIGINT, SIG_DFL);
+            }
             if self.apply_redirs(&cmd.redirs).is_err() {
                 exit(1);
             }
@@ -610,12 +629,25 @@ impl Shell {
             exit(if err == -ENOENT { 127 } else { 126 });
         }
 
+        if self.interactive {
+            setpgid(pid as i32, pid as i32);
+            tcsetpgrp(STDIN, pid as i32);
+        }
         let mut status = 0;
-        if waitpid(pid as i32, &mut status, 0) < 0 {
+        let r = waitpid(pid as i32, &mut status, 0);
+        if self.interactive {
+            tcsetpgrp(STDIN, getpgrp()); // the terminal is ours again
+        }
+        if r < 0 {
             self.status = 1;
             return;
         }
         self.status = shell_status(status);
+        if self.interactive && wifsignaled(status) && wtermsig(status) != SIGINT {
+            // Ctrl-C already printed ^C; report other killing signals.
+            let name = signal_name(wtermsig(status)).unwrap_or("?");
+            println!("[{}] killed by SIG{}", words[0], name);
+        }
     }
 
     /// Apply redirections in this process. Returns the saved original fds
@@ -720,6 +752,36 @@ impl Shell {
                 }
                 0
             }
+            "jobs" => {
+                for (i, pid) in self.jobs.iter().enumerate() {
+                    println!("[{}] {} Running", i + 1, pid);
+                }
+                0
+            }
+            "kill" => self.kill_builtin(args),
+            // Kernel-shell compatibility: `run prog args` and `script file`.
+            "run" => {
+                if args.len() < 2 {
+                    eprintln!("usage: run <program> [args...]");
+                    return 2;
+                }
+                let cmd = Command {
+                    words: args[1..].iter().map(|a| vec![Part::Text(a.clone())]).collect(),
+                    ..Default::default()
+                };
+                self.run_command(&cmd);
+                self.status
+            }
+            "script" => {
+                if args.len() < 2 {
+                    eprintln!("usage: script <file> [args...]");
+                    return 2;
+                }
+                let mut words = vec![vec![Part::Text("sh".into())]];
+                words.extend(args[1..].iter().map(|a| vec![Part::Text(a.clone())]));
+                self.run_command(&Command { words, ..Default::default() });
+                self.status
+            }
             "wait" => {
                 let mut status = 0;
                 let mut last = 0;
@@ -748,26 +810,118 @@ impl Shell {
             }
             "help" => {
                 println!("PalladiumOS sh. Builtins:");
-                println!("  {}", BUILTINS.join(" "));
+                print_wrapped(BUILTINS.iter().copied());
                 println!("Programs in /bin (run with: name [args...]):");
                 let fd = open("/bin", O_RDONLY | O_DIRECTORY);
                 if fd >= 0 {
-                    let mut line = String::from(" ");
+                    let mut names: Vec<String> = Vec::new();
                     let _ = for_each_entry(fd as i32, |e| {
                         if !e.name.starts_with('.') && !e.name.starts_with("test_") {
-                            line.push(' ');
-                            line.push_str(e.name);
+                            names.push(e.name.to_string());
                         }
                     });
                     close(fd as i32);
-                    println!("{}", line);
+                    names.sort();
+                    print_wrapped(names.iter().map(String::as_str));
                 }
                 println!("Syntax: ; && || & > >> < 2> 2>&1 'quotes' \"$VAR\" ~ # comments");
+                println!("Also: run <program>, script <file> (like the kernel shell)");
+                println!("Keys: Up/Down history, Tab completes, Ctrl-C interrupts, Ctrl-D exits");
                 println!("Type 'exit' to return to the kernel shell.");
                 0
             }
             _ => 127,
         }
+    }
+}
+
+impl Shell {
+    /// kill [-SIGNAL] PID|%JOB... (a builtin, so it understands job numbers)
+    fn kill_builtin(&mut self, args: &[String]) -> i32 {
+        let mut sig = SIGTERM;
+        let mut rest = &args[1..];
+        if let Some(first) = rest.first() {
+            if first == "-l" {
+                for (n, name) in SIGNAL_NAMES {
+                    println!("{:2}) SIG{}", n, name);
+                }
+                return 0;
+            }
+            if first == "--" {
+                rest = &rest[1..];
+            } else if let Some(spec) = first.strip_prefix('-') {
+                let name = spec.strip_prefix("SIG").unwrap_or(spec);
+                let parsed = spec.parse::<i32>().ok().or_else(|| {
+                    SIGNAL_NAMES.iter().find(|(_, n)| n.eq_ignore_ascii_case(name)).map(|(n, _)| *n)
+                });
+                match parsed {
+                    Some(s) => sig = s,
+                    None => {
+                        eprintln!("sh: kill: {}: invalid signal", spec);
+                        return 1;
+                    }
+                }
+                rest = &rest[1..];
+            }
+        }
+        if rest.is_empty() {
+            eprintln!("usage: kill [-SIGNAL] PID|%JOB...");
+            return 2;
+        }
+        let mut status = 0;
+        for target in rest {
+            // %N is job N from `jobs`; a job is its own process group.
+            let pid = match target.strip_prefix('%') {
+                Some(n) => match n.parse::<usize>().ok().and_then(|n| self.jobs.get(n.wrapping_sub(1))) {
+                    // With job control (interactive) each job is a process
+                    // group; without it, signal the job's process.
+                    Some(&pid) if self.interactive => -pid,
+                    Some(&pid) => pid,
+                    None => {
+                        eprintln!("sh: kill: {}: no such job", target);
+                        status = 1;
+                        continue;
+                    }
+                },
+                None => match target.parse::<i32>() {
+                    Ok(pid) => pid,
+                    Err(_) => {
+                        eprintln!("sh: kill: {}: arguments must be process or job IDs", target);
+                        status = 1;
+                        continue;
+                    }
+                },
+            };
+            let r = kill(pid, sig);
+            if r < 0 {
+                eprintln!("sh: kill: ({}) - {}", target, strerror(-r));
+                status = 1;
+            }
+        }
+        status
+    }
+
+    /// When the interactive shell exits, hang up its background jobs.
+    fn hang_up_jobs(&mut self) {
+        for &pid in &self.jobs {
+            kill(-pid, SIGHUP);
+        }
+    }
+}
+
+/// Print words indented, wrapping before column 80 instead of mid-word.
+fn print_wrapped<'a>(words: impl Iterator<Item = &'a str>) {
+    let mut line = String::from(" ");
+    for w in words {
+        if line.len() + 1 + w.len() > 78 {
+            println!("{}", line);
+            line = String::from(" ");
+        }
+        line.push(' ');
+        line.push_str(w);
+    }
+    if line.trim().len() > 0 {
+        println!("{}", line);
     }
 }
 
@@ -861,20 +1015,264 @@ fn main(args: Args) -> i32 {
         }
         None => {
             let mut sh = Shell::new(vec![argv.first().cloned().unwrap_or("sh".into())], true);
+            // Ctrl-C interrupts commands, not the interactive shell.
+            set_signal(SIGINT, SIG_IGN);
+            tcsetpgrp(STDIN, getpgrp());
             println!("PalladiumOS shell. Type 'help' for commands.");
+            let mut editor = LineEditor::new();
             loop {
                 sh.reap_jobs();
-                print!("PalladiumOS:{} $ ", cwd());
-                let Some(line) = read_line() else {
+                let prompt = format!("PalladiumOS:{} $ ", cwd());
+                let line = if isatty(STDIN) {
+                    editor.read_line(&prompt)
+                } else {
+                    print!("{}", prompt);
+                    read_line()
+                };
+                let Some(line) = line else {
                     println!();
                     break; // Ctrl-D
                 };
                 sh.run_line(&line);
                 if let Some(code) = sh.exit_requested {
+                    sh.hang_up_jobs();
                     return code;
                 }
             }
+            sh.hang_up_jobs();
             sh.status
         }
     }
+}
+
+// ---------------------------------------------------------------- line editor
+
+/// Interactive line editing on the console (raw mode): cursor movement,
+/// history, and Tab completion. Commands still run in cooked mode.
+struct LineEditor {
+    history: Vec<String>,
+}
+
+const HISTORY_MAX: usize = 100;
+
+impl LineEditor {
+    fn new() -> Self {
+        LineEditor { history: Vec::new() }
+    }
+
+    /// Show `prompt` and read a line. None at Ctrl-D on an empty line.
+    fn read_line(&mut self, prompt: &str) -> Option<String> {
+        let Ok(saved) = enable_raw_mode(STDIN) else {
+            print!("{}", prompt);
+            return read_line();
+        };
+        let result = self.edit(prompt);
+        tcsetattr(STDIN, &saved);
+        if let Some(line) = &result {
+            if !line.trim().is_empty() && self.history.last() != Some(line) {
+                self.history.push(line.clone());
+                if self.history.len() > HISTORY_MAX {
+                    self.history.remove(0);
+                }
+            }
+        }
+        result
+    }
+
+    fn edit(&mut self, prompt: &str) -> Option<String> {
+        let mut keys = KeyReader::new(STDIN);
+        let mut buf: Vec<char> = Vec::new();
+        let mut cur = 0usize;
+        // Index into history while browsing it; history.len() = the new line.
+        let mut hist = self.history.len();
+        let mut draft: Vec<char> = Vec::new();
+        print!("{}", prompt);
+
+        loop {
+            let (old_cur, old_len) = (cur, buf.len());
+            let Some(key) = keys.next_key() else { return None };
+            match key {
+                Key::Enter => {
+                    move_right(buf.len() - cur);
+                    print!("\n");
+                    return Some(buf.iter().collect());
+                }
+                Key::Ctrl('d') if buf.is_empty() => return None,
+                Key::Ctrl('d') | Key::Delete => {
+                    if cur < buf.len() {
+                        buf.remove(cur);
+                    }
+                }
+                Key::Ctrl('c') => {
+                    move_right(buf.len() - cur);
+                    print!("^C\n{}", prompt);
+                    buf.clear();
+                    cur = 0;
+                    hist = self.history.len();
+                    continue;
+                }
+                Key::Ctrl('l') => {
+                    print!("\x1b[H\x1b[2J{}", prompt);
+                    redraw(0, 0, &buf, cur);
+                    continue;
+                }
+                Key::Backspace => {
+                    if cur > 0 {
+                        cur -= 1;
+                        buf.remove(cur);
+                    }
+                }
+                Key::Left => cur = cur.saturating_sub(1),
+                Key::Right => cur = (cur + 1).min(buf.len()),
+                Key::Home | Key::Ctrl('a') => cur = 0,
+                Key::End | Key::Ctrl('e') => cur = buf.len(),
+                Key::Ctrl('u') => {
+                    buf.drain(..cur);
+                    cur = 0;
+                }
+                Key::Ctrl('k') => buf.truncate(cur),
+                Key::Up => {
+                    if hist > 0 {
+                        if hist == self.history.len() {
+                            draft = buf.clone();
+                        }
+                        hist -= 1;
+                        buf = self.history[hist].chars().collect();
+                        cur = buf.len();
+                    }
+                }
+                Key::Down => {
+                    if hist < self.history.len() {
+                        hist += 1;
+                        buf = if hist == self.history.len() {
+                            draft.clone()
+                        } else {
+                            self.history[hist].chars().collect()
+                        };
+                        cur = buf.len();
+                    }
+                }
+                Key::Tab => {
+                    if let Some(listing) = complete(&mut buf, &mut cur) {
+                        // Ambiguous: list the choices, then redraw the line.
+                        move_right(old_len - old_cur);
+                        print!("\n{}\n{}", listing, prompt);
+                        redraw(0, 0, &buf, cur);
+                        continue;
+                    }
+                }
+                Key::Char(c) if !c.is_control() => {
+                    if buf.len() < 1000 {
+                        buf.insert(cur, c);
+                        cur += 1;
+                    }
+                }
+                _ => continue,
+            }
+            redraw(old_cur, old_len, &buf, cur);
+        }
+    }
+}
+
+fn move_left(n: usize) {
+    if n > 0 {
+        print!("\x1b[{}D", n);
+    }
+}
+
+fn move_right(n: usize) {
+    if n > 0 {
+        print!("\x1b[{}C", n);
+    }
+}
+
+/// Repaint the input after an edit. The cursor was `old_cur` characters into
+/// an `old_len`-character line; afterwards it's `cur` characters into `buf`.
+/// Moves are relative, so this works when the line wraps.
+fn redraw(old_cur: usize, old_len: usize, buf: &[char], cur: usize) {
+    let mut out = String::new();
+    if old_cur > 0 {
+        out.push_str(&format!("\x1b[{}D", old_cur));
+    }
+    out.extend(buf.iter());
+    let extra = old_len.saturating_sub(buf.len());
+    out.extend(core::iter::repeat(' ').take(extra));
+    let back = buf.len() + extra - cur;
+    if back > 0 {
+        out.push_str(&format!("\x1b[{}D", back));
+    }
+    print!("{}", out);
+}
+
+/// Tab completion of the word before the cursor: a command name (builtins
+/// and programs in /bin) for the first word, otherwise a file name.
+/// Completes as far as is unambiguous; if that adds nothing and there are
+/// several choices, returns them for listing.
+fn complete(buf: &mut Vec<char>, cur: &mut usize) -> Option<String> {
+    let start = buf[..*cur].iter().rposition(|c| *c == ' ').map(|i| i + 1).unwrap_or(0);
+    let word: String = buf[start..*cur].iter().collect();
+    let first_word = buf[..start].iter().all(|c| *c == ' ');
+
+    // (candidate name, is a directory)
+    let mut candidates: Vec<(String, bool)> = Vec::new();
+    let (dir, prefix) = match word.rfind('/') {
+        Some(i) => (word[..=i].to_string(), word[i + 1..].to_string()),
+        None => (String::new(), word.clone()),
+    };
+    if first_word && dir.is_empty() {
+        for b in BUILTINS {
+            if b.starts_with(prefix.as_str()) {
+                candidates.push((b.to_string(), false));
+            }
+        }
+        list_dir("/bin", &prefix, &mut candidates);
+        candidates.retain(|(n, _)| !n.starts_with("test_"));
+    } else {
+        let d = if dir.is_empty() { ".".to_string() } else { dir.clone() };
+        list_dir(&d, &prefix, &mut candidates);
+    }
+    candidates.sort();
+    candidates.dedup();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Longest common prefix of all candidates.
+    let names: Vec<&str> = candidates.iter().map(|(n, _)| n.as_str()).collect();
+    let mut common = names[0].to_string();
+    for n in &names[1..] {
+        while !n.starts_with(common.as_str()) {
+            common.pop();
+        }
+    }
+    let mut insert: String = common[prefix.len()..].to_string();
+    if candidates.len() == 1 {
+        insert.push(if candidates[0].1 { '/' } else { ' ' });
+    }
+    if insert.is_empty() {
+        if candidates.len() > 1 {
+            let listing: Vec<String> =
+                candidates.iter().map(|(n, d)| if *d { format!("{}/", n) } else { n.clone() }).collect();
+            return Some(listing.join("  "));
+        }
+        return None;
+    }
+    for c in insert.chars() {
+        buf.insert(*cur, c);
+        *cur += 1;
+    }
+    None
+}
+
+fn list_dir(dir: &str, prefix: &str, out: &mut Vec<(String, bool)>) {
+    let fd = open(dir, O_RDONLY | O_DIRECTORY);
+    if fd < 0 {
+        return;
+    }
+    let _ = for_each_entry(fd as i32, |e| {
+        if e.name != "." && e.name != ".." && e.name.starts_with(prefix) && (!e.name.starts_with('.') || prefix.starts_with('.')) {
+            out.push((e.name.to_string(), e.d_type == DT_DIR));
+        }
+    });
+    close(fd as i32);
 }

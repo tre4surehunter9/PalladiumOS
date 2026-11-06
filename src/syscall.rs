@@ -25,7 +25,11 @@ pub const SYS_FSTAT: u64 = 5;
 pub const SYS_LSTAT: u64 = 6;
 pub const SYS_LSEEK: u64 = 8;
 pub const SYS_BRK: u64 = 12;
+pub const SYS_IOCTL: u64 = 16;
+pub const SYS_RT_SIGACTION: u64 = 13;
+pub const SYS_RT_SIGPROCMASK: u64 = 14;
 pub const SYS_SCHED_YIELD: u64 = 24;
+pub const SYS_NANOSLEEP: u64 = 35;
 pub const SYS_DUP: u64 = 32;
 pub const SYS_DUP2: u64 = 33;
 pub const SYS_GETPID: u64 = 39;
@@ -34,6 +38,10 @@ pub const SYS_VFORK: u64 = 58;
 pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT4: u64 = 61;
+pub const SYS_KILL: u64 = 62;
+pub const SYS_SETPGID: u64 = 109;
+pub const SYS_GETPGRP: u64 = 111;
+pub const SYS_GETPGID: u64 = 121;
 pub const SYS_GETPPID: u64 = 110;
 pub const SYS_UNAME: u64 = 63;
 pub const SYS_GETCWD: u64 = 79;
@@ -43,12 +51,15 @@ pub const SYS_RMDIR: u64 = 84;
 pub const SYS_UNLINK: u64 = 87;
 pub const SYS_REBOOT: u64 = 169;
 pub const SYS_GETDENTS64: u64 = 217;
+pub const SYS_CLOCK_GETTIME: u64 = 228;
 pub const SYS_EXIT_GROUP: u64 = 231;
 pub const SYS_OPENAT: u64 = 257;
 
 // ---- errno values (Linux) ----
 pub const EPERM: i64 = 1;
 pub const ENOENT: i64 = 2;
+pub const ESRCH: i64 = 3;
+pub const EINTR: i64 = 4;
 pub const E2BIG: i64 = 7;
 pub const ENOEXEC: i64 = 8;
 pub const EIO: i64 = 5;
@@ -64,6 +75,7 @@ pub const ENOTDIR: i64 = 20;
 pub const EISDIR: i64 = 21;
 pub const EINVAL: i64 = 22;
 pub const EMFILE: i64 = 24;
+pub const ENOTTY: i64 = 25;
 pub const EFBIG: i64 = 27;
 pub const ESPIPE: i64 = 29;
 pub const ERANGE: i64 = 34;
@@ -219,6 +231,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_MKDIR => vfs::sys_mkdir(a1),
         SYS_RMDIR => vfs::sys_remove(a1, true),
         SYS_UNLINK => vfs::sys_remove(a1, false),
+        SYS_IOCTL => vfs::sys_ioctl(a1, a2, a3),
         SYS_DUP => vfs::sys_dup(a1),
         SYS_DUP2 => vfs::sys_dup2(a1, a2),
         SYS_BRK => process::sys_brk(a1),
@@ -234,11 +247,33 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_FORK | SYS_VFORK => process::fork(frame),
         SYS_EXECVE => process::execve(frame, a1, a2, a3),
         SYS_WAIT4 => process::sys_wait4(a1, a2, a3),
+        SYS_KILL => process::sys_kill(a1, a2),
+        SYS_SETPGID => process::sys_setpgid(a1, a2),
+        SYS_GETPGID => process::sys_getpgid(a1),
+        SYS_GETPGRP => process::sys_getpgid(0),
+        SYS_RT_SIGACTION => process::sys_rt_sigaction(a1, a2, a3),
+        SYS_RT_SIGPROCMASK => sys_rt_sigprocmask(a3),
+        SYS_NANOSLEEP => process::sys_nanosleep(a1, a2),
+        SYS_CLOCK_GETTIME => process::sys_clock_gettime(a1, a2),
         SYS_EXIT | SYS_EXIT_GROUP => process::exit_current(process::ExitReason::Exited(a1 as i32)),
         _ => -ENOSYS,
     };
 
     frame.rax = ret as u64;
+    // A signal (e.g. Ctrl-C) takes effect before returning to the program.
+    process::handle_signals();
+}
+
+/// rt_sigprocmask(how, set, oldset): signal masks aren't implemented; report
+/// an empty old mask so libc code that saves/restores masks works.
+fn sys_rt_sigprocmask(oldset: u64) -> i64 {
+    if oldset != 0 {
+        match unsafe { user_slice_mut(oldset, 8) } {
+            Some(out) => out.fill(0),
+            None => return -EFAULT,
+        }
+    }
+    0
 }
 
 /// reboot(magic1, magic2, cmd): restart or power off the machine.
