@@ -195,6 +195,23 @@ pub fn read(buf: &mut [u8]) -> i64 {
     }
 }
 
+/// Is there input to read (for poll)? Processes keys typed so far, as a
+/// read would (echoing them, finishing lines).
+pub fn input_ready() -> bool {
+    crate::task::keyboard::init_queue();
+    let mut guard = TTY.lock();
+    let tty = guard.get_or_insert_with(|| Tty {
+        keyboard: Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::MapLettersToUnicode),
+        line: Vec::new(),
+        ready: VecDeque::new(),
+        eof: false,
+    });
+    while let Some(scancode) = crate::task::keyboard::pop_scancode() {
+        tty.handle_scancode(scancode);
+    }
+    !tty.ready.is_empty() || tty.eof
+}
+
 impl Tty {
     fn handle_scancode(&mut self, scancode: u8) {
         use pc_keyboard::KeyCode;

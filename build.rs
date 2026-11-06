@@ -80,6 +80,10 @@ fn main() {
         assert!(path.exists(), "userland binary {} missing", path.display());
         writeln!(out, "    ({:?}, include_bytes!({:?})),", name, path.display().to_string()).unwrap();
     }
+    for (name, path) in build_c_programs(&root) {
+        assert!(!names.contains(&name), "C program {} has the same name as a Rust one", name);
+        writeln!(out, "    ({:?}, include_bytes!({:?})),", name, path.display().to_string()).unwrap();
+    }
     out.push_str("];\n");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -140,4 +144,42 @@ fn make_disk_images(root: &std::path::Path, out_dir: &std::path::Path) {
     if !mke2fs(&image, "2M", Some(&content), &["-N", "1024"]) {
         fs::write(&image, b"").unwrap();
     }
+}
+
+/// Compile the C programs in userland-c/ with palladium-cc (gcc + musl in
+/// target/musl, made by tools/build-musl.sh): static position-independent
+/// executables.
+/// Without musl they're skipped (with a warning).
+fn build_c_programs(root: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let src = root.join("userland-c");
+    let musl_gcc = root.join("target/musl/bin/palladium-cc");
+    println!("cargo:rerun-if-changed=userland-c");
+    println!("cargo:rerun-if-changed=target/musl/lib/libc.a");
+    let Ok(entries) = fs::read_dir(&src) else { return Vec::new() };
+    let mut files: Vec<PathBuf> = entries.filter_map(|e| Some(e.ok()?.path())).filter(|p| p.extension().is_some_and(|x| x == "c")).collect();
+    files.sort();
+    if files.is_empty() {
+        return Vec::new();
+    }
+    if !musl_gcc.exists() {
+        println!("cargo:warning=musl not found: run tools/build-musl.sh to build the C programs in userland-c/");
+        return Vec::new();
+    }
+    let out = root.join("target/userland-c");
+    fs::create_dir_all(&out).unwrap();
+    let mut built = Vec::new();
+    for file in files {
+        let name = file.file_stem().unwrap().to_str().unwrap().to_string();
+        let exe = out.join(&name);
+        let status = Command::new(&musl_gcc)
+            .args(["-O2", "-Wall", "-o"])
+            .arg(&exe)
+            .arg(&file)
+            .arg("-lm")
+            .status()
+            .expect("failed to run palladium-cc");
+        assert!(status.success(), "compiling {} failed", file.display());
+        built.push((name, exe));
+    }
+    built
 }

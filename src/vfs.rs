@@ -614,6 +614,57 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
     }
 }
 
+/// pread64(fd, buf, count, offset): read at `offset` without moving the
+/// file position (regular files only).
+pub fn sys_pread(fd: u64, buf: &mut [u8], offset: u64) -> i64 {
+    let h = match get(fd) {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    let desc = h.lock();
+    match &desc.kind {
+        Kind::File { loc, readable, .. } => {
+            if !readable {
+                return -EBADF;
+            }
+            let loc = *loc;
+            match mounts::with_fs(loc.mount, |fs| fs.read(loc.ino, offset, buf)) {
+                Ok(n) => n as i64,
+                Err(e) => -e,
+            }
+        }
+        Kind::Dir { .. } => -EISDIR,
+        Kind::Zero => {
+            buf.fill(0);
+            buf.len() as i64
+        }
+        Kind::Null => 0,
+        _ => -ESPIPE,
+    }
+}
+
+/// pwrite64(fd, buf, count, offset): write at `offset` without moving the
+/// file position.
+pub fn sys_pwrite(fd: u64, bytes: &[u8], offset: u64) -> i64 {
+    let h = match get(fd) {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    let (loc, writable) = match &h.lock().kind {
+        Kind::File { loc, writable, .. } => (*loc, *writable),
+        Kind::Null => return bytes.len() as i64,
+        Kind::Dir { .. } => return -EISDIR,
+        _ => return -ESPIPE,
+    };
+    if !writable {
+        return -EBADF;
+    }
+    match mounts::with_fs(loc.mount, |fs| fs.write(loc.ino, offset, bytes)) {
+        Ok(n) => n as i64,
+        Err(e) => -e,
+    }
+}
+
 /// write(fd, buf, count)
 pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
     let h = match get(fd) {
@@ -1210,4 +1261,67 @@ pub fn sys_fchown(fd: u64, uid: u64, gid: u64) -> i64 {
 pub fn sys_sync() -> i64 {
     mounts::sync_all();
     0
+}
+
+pub const POLLIN: i16 = 0x1;
+pub const POLLOUT: i16 = 0x4;
+pub const POLLERR: i16 = 0x8;
+pub const POLLHUP: i16 = 0x10;
+pub const POLLNVAL: i16 = 0x20;
+
+/// What `fd` is ready for, out of `events` (plus POLLERR/POLLHUP/POLLNVAL,
+/// which are always reported).
+pub fn poll_ready(fd: i32, events: i16) -> i16 {
+    if fd < 0 {
+        return 0;
+    }
+    let Ok(h) = get(fd as u64) else { return POLLNVAL };
+    let kind_ready = match &h.lock().kind {
+        Kind::Console => {
+            let input = events & POLLIN != 0 && crate::tty::input_ready();
+            (if input { POLLIN } else { 0 }) | POLLOUT
+        }
+        Kind::PipeRead(r) => match pipe::read_status(&r.pipe()) {
+            (true, gone) => POLLIN | if gone { POLLHUP } else { 0 },
+            (false, true) => POLLHUP,
+            (false, false) => 0,
+        },
+        Kind::PipeWrite(w) => match pipe::write_status(&w.pipe()) {
+            (_, true) => POLLERR,
+            (room, false) => if room { POLLOUT } else { 0 },
+        },
+        // Files and devices never block.
+        _ => POLLIN | POLLOUT,
+    };
+    kind_ready & (events | POLLERR | POLLHUP | POLLNVAL)
+}
+
+/// ftruncate(fd, length)
+pub fn sys_ftruncate(fd: u64, len: u64) -> i64 {
+    let h = match get(fd) {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    let (loc, writable) = match &h.lock().kind {
+        Kind::File { loc, writable, .. } => (*loc, *writable),
+        _ => return -EINVAL,
+    };
+    if !writable {
+        return -EINVAL;
+    }
+    match mounts::with_fs(loc.mount, |fs| fs.truncate(loc.ino, len)) {
+        Ok(()) => 0,
+        Err(e) => -e,
+    }
+}
+
+/// truncate(path, length)
+pub fn sys_truncate(path: u64, len: u64) -> i64 {
+    let fd = sys_open(path, O_WRONLY as u64, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let r = sys_ftruncate(fd as u64, len);
+    sys_close(fd as u64);
+    r
 }

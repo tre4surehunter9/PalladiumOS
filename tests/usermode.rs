@@ -34,6 +34,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     *memory::MAPPER.lock() = Some(mapper);
     *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
     palladiumos::process::init();
+    palladiumos::rtc::init(); // the real date, as at boot (CLOCK_REALTIME)
     palladiumos::programs::install();
     for dir in ["/proc", "/dev"] {
         palladiumos::filesystem::make_dir(dir).unwrap();
@@ -246,8 +247,14 @@ fn elf_header_checks() {
     assert!(elf::parse(&b).is_err());
 
     let mut b = good.to_vec();
-    b[16] = 3; // ET_DYN
+    b[16] = 4; // ET_CORE
     assert!(elf::parse(&b).is_err());
+
+    // ET_DYN (static-PIE) is loaded PIE_BASE higher than its addresses.
+    let mut b = good.to_vec();
+    b[16] = 3;
+    let (exec, dyn_) = (elf::parse(good).unwrap(), elf::parse(&b).unwrap());
+    assert_eq!(dyn_.entry, exec.entry + elf::PIE_BASE);
 
     let mut b = good.to_vec();
     b[18] = 3; // EM_386
@@ -1528,4 +1535,42 @@ fn ctrl_z_stops_the_foreground_job() {
     assert_eq!(run(prog("sh"), &["sh"]), Ok(0));
     assert_eq!(file("/tmp/cz0"), "148\n"); // 128 + SIGTSTP
     assert_eq!(file("/tmp/cz"), "back\n");
+}
+
+// ---- C programs (musl libc) ----
+
+/// The C programs are only built when musl is (tools/build-musl.sh).
+fn c_program(name: &str) -> Option<&'static [u8]> {
+    let p = programs::find(name);
+    if p.is_none() {
+        palladiumos::serial_print!("(skipped: no musl) ");
+    }
+    p
+}
+
+#[test_case]
+fn musl_libc_works() {
+    let Some(test_libc) = c_program("test_libc") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let _ = filesystem::remove("/tmp/atexit.flag");
+    assert_eq!(run(test_libc, &["test_libc"]), Ok(0));
+    assert_eq!(file("/tmp/atexit.flag"), "x", "atexit handlers run at exit");
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn c_program_in_a_pipeline() {
+    let Some(_) = c_program("chello") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("USER=tester chello a b | grep -c argv > /tmp/ch; chello | grep USER >> /tmp/ch"), 0);
+    assert_eq!(file("/tmp/ch"), "2\nUSER=(unset)\n");
+}
+
+#[test_case]
+fn c_program_memory_is_freed() {
+    let Some(test_libc) = c_program("test_libc") else { return };
+    assert_eq!(run(test_libc, &["test_libc"]), Ok(0));
+    let before = frames_in_use();
+    assert_eq!(run(test_libc, &["test_libc"]), Ok(0));
+    assert_eq!(frames_in_use(), before, "mmap/brk/stack pages all freed");
 }

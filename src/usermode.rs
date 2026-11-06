@@ -39,14 +39,32 @@ pub struct Image {
     pub stack_pointer: u64,
 }
 
+/// Who a new program runs as (for the aux vector: AT_UID, AT_SECURE...).
+#[derive(Clone, Copy)]
+pub struct Ids {
+    pub uid: u32,
+    pub euid: u32,
+    pub gid: u32,
+    pub egid: u32,
+}
+
+/// What the aux vector tells the program about itself.
+struct AuxInfo {
+    entry: u64,
+    phdr: u64,
+    phnum: u64,
+    phent: u64,
+    ids: Ids,
+}
+
 /// Build a new address space holding the program and its stack.
-pub fn build_image(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<Image, &'static str> {
+pub fn build_image(bytes: &[u8], argv: &[&str], envp: &[&str], ids: Ids) -> Result<Image, &'static str> {
     let mut alloc_guard = FRAME_ALLOCATOR.lock();
     let frames = alloc_guard.as_mut().expect("FRAME_ALLOCATOR not initialized");
     let p4 = memory::new_address_space(frames).ok_or(ERR_NO_MEMORY)?;
     let mut mapper = memory::mapper_for(p4);
 
-    match load(&mut mapper, frames, bytes, argv, envp) {
+    match load(&mut mapper, frames, bytes, argv, envp, ids) {
         Ok((entry, stack_pointer)) => Ok(Image { p4, entry, stack_pointer }),
         Err(e) => {
             memory::free_address_space(p4, frames);
@@ -85,9 +103,11 @@ fn load(
     bytes: &[u8],
     argv: &[&str],
     envp: &[&str],
+    ids: Ids,
 ) -> Result<(u64, u64), &'static str> {
     use PageTableFlags as F;
     let base = F::PRESENT | F::USER_ACCESSIBLE;
+    let mut aux = AuxInfo { entry: 0, phdr: 0, phnum: 0, phent: 0, ids };
 
     let entry = if elf::is_elf(bytes) {
         let image = elf::parse(bytes)?;
@@ -96,6 +116,7 @@ fn load(
             map_range(mapper, frames, seg.vaddr, seg.memsz, flags)?;
             copy_to_user(mapper, seg.vaddr, seg.data);
         }
+        aux = AuxInfo { entry: image.entry, phdr: image.phdr, phnum: image.phnum, phent: image.phent, ids };
         image.entry
     } else {
         if bytes.is_empty() || bytes.len() > MAX_FLAT_SIZE {
@@ -108,16 +129,21 @@ fn load(
 
     let stack_bottom = STACK_TOP - STACK_PAGES * 4096;
     map_range(mapper, frames, stack_bottom, STACK_PAGES * 4096, base | F::WRITABLE)?;
-    let stack_pointer = build_initial_stack(mapper, argv, envp)?;
+    let stack_pointer = build_initial_stack(mapper, argv, envp, &aux)?;
 
     Ok((entry, stack_pointer))
 }
 
 /// Lay out the initial stack the way the System V x86_64 ABI (and libc's
 /// _start) expects, from the stack pointer upwards:
-///   argc, argv[0..argc], NULL, envp[..], NULL, auxv AT_NULL (0, 0)
-/// followed by the strings themselves near the top of the stack.
-fn build_initial_stack(mapper: &OffsetPageTable<'static>, argv: &[&str], envp: &[&str]) -> Result<u64, &'static str> {
+///   argc, argv[0..argc], NULL, envp[..], NULL, auxv pairs, AT_NULL (0, 0)
+/// followed by 16 random bytes (AT_RANDOM) and the strings near the top.
+fn build_initial_stack(
+    mapper: &OffsetPageTable<'static>,
+    argv: &[&str],
+    envp: &[&str],
+    aux: &AuxInfo,
+) -> Result<u64, &'static str> {
     let string_bytes: usize = argv.iter().chain(envp).map(|a| a.len() + 1).sum();
     if argv.len() > MAX_ARGS || envp.len() > MAX_ARGS || string_bytes > MAX_ARG_BYTES {
         return Err(ERR_TOO_MANY_ARGS);
@@ -135,6 +161,11 @@ fn build_initial_stack(mapper: &OffsetPageTable<'static>, argv: &[&str], envp: &
     };
     let argv_ptrs: Vec<u64> = argv.iter().map(|s| place(s)).collect();
     let envp_ptrs: Vec<u64> = envp.iter().map(|s| place(s)).collect();
+    // 16 random bytes, below the strings (8-byte aligned).
+    let random_at = (strings_start - 16) & !7;
+    let mut random = [0u8; 16];
+    crate::random::fill(&mut random);
+    copy_to_user(mapper, random_at, &random);
 
     let mut words: Vec<u64> = Vec::with_capacity(argv.len() + envp.len() + 5);
     words.push(argv.len() as u64); // argc
@@ -142,11 +173,38 @@ fn build_initial_stack(mapper: &OffsetPageTable<'static>, argv: &[&str], envp: &
     words.push(0); // argv terminator
     words.extend_from_slice(&envp_ptrs);
     words.push(0); // envp terminator
-    words.push(0); // auxv: AT_NULL
+    // The aux vector (as Linux gives it): what libc's startup code needs.
+    let ids = aux.ids;
+    let secure = (ids.uid != ids.euid || ids.gid != ids.egid) as u64;
+    let auxv: [(u64, u64); 15] = [
+        (3, aux.phdr),       // AT_PHDR
+        (4, aux.phent),      // AT_PHENT
+        (5, aux.phnum),      // AT_PHNUM
+        (6, 4096),           // AT_PAGESZ
+        (7, 0),              // AT_BASE: no dynamic linker
+        (8, 0),              // AT_FLAGS
+        (9, aux.entry),      // AT_ENTRY
+        (11, ids.uid as u64), // AT_UID
+        (12, ids.euid as u64), // AT_EUID
+        (13, ids.gid as u64), // AT_GID
+        (14, ids.egid as u64), // AT_EGID
+        (16, 0),             // AT_HWCAP
+        (17, 100),           // AT_CLKTCK
+        (23, secure),        // AT_SECURE: setuid/setgid program
+        (25, random_at),     // AT_RANDOM
+    ];
+    for (k, v) in auxv {
+        if k == 3 && v == 0 {
+            continue; // program headers not in memory (flat binaries)
+        }
+        words.push(k);
+        words.push(v);
+    }
+    words.push(0); // AT_NULL
     words.push(0);
 
     // rsp must be 16-byte aligned at the entry point, pointing at argc.
-    let sp = (strings_start - (words.len() * 8) as u64) & !0xf;
+    let sp = (random_at - (words.len() * 8) as u64) & !0xf;
     let mut bytes = Vec::with_capacity(words.len() * 8);
     for w in &words {
         bytes.extend_from_slice(&w.to_le_bytes());

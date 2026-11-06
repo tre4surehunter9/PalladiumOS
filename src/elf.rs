@@ -16,6 +16,9 @@ const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
 
 const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
+/// Where position-independent (static-PIE) programs are loaded.
+pub const PIE_BASE: u64 = 0x80_0000_0000;
 const EM_X86_64: u16 = 62;
 const PHDR_SIZE: usize = 56;
 
@@ -35,6 +38,11 @@ pub struct Segment<'a> {
 pub struct Elf<'a> {
     pub entry: u64,
     pub segments: Vec<Segment<'a>>,
+    /// Where the program headers are in memory (0 if not loaded), their
+    /// count and size: for the aux vector (libc finds TLS etc. there).
+    pub phdr: u64,
+    pub phnum: u64,
+    pub phent: u64,
 }
 
 pub fn is_elf(bytes: &[u8]) -> bool {
@@ -69,14 +77,18 @@ pub fn parse(b: &[u8]) -> Result<Elf<'_>, &'static str> {
     if b[5] != 1 {
         return Err("not a little-endian ELF");
     }
-    if u16_at(b, 16)? != ET_EXEC {
-        return Err("not a static executable (ET_EXEC)");
-    }
+    // ET_EXEC is loaded where it says; ET_DYN (a static-PIE, which
+    // relocates itself) at PIE_BASE.
+    let bias = match u16_at(b, 16)? {
+        ET_EXEC => 0,
+        ET_DYN => PIE_BASE,
+        _ => return Err("not an executable"),
+    };
     if u16_at(b, 18)? != EM_X86_64 {
         return Err("not an x86_64 ELF");
     }
 
-    let entry = u64_at(b, 24)?;
+    let entry = u64_at(b, 24)?.wrapping_add(bias);
     let phoff = u64_at(b, 32)? as usize;
     let phentsize = u16_at(b, 54)? as usize;
     let phnum = u16_at(b, 56)? as usize;
@@ -86,20 +98,22 @@ pub fn parse(b: &[u8]) -> Result<Elf<'_>, &'static str> {
 
     let mut segments = Vec::new();
     let mut total: u64 = 0;
+    let mut phdr = 0;
     for i in 0..phnum {
         let ph = phoff
             .checked_add(i.checked_mul(PHDR_SIZE).ok_or("bad program headers")?)
             .ok_or("bad program headers")?;
         let p_type = u32_at(b, ph)?;
         match p_type {
-            PT_INTERP | PT_DYNAMIC => return Err("dynamically linked programs are not supported"),
+            PT_INTERP => return Err("dynamically linked programs are not supported (link with -static or -static-pie)"),
+            PT_DYNAMIC => continue, // a static-PIE's own relocations: it applies them itself
             PT_LOAD => {}
             _ => continue,
         }
 
         let flags = u32_at(b, ph + 4)?;
         let offset = u64_at(b, ph + 8)?;
-        let vaddr = u64_at(b, ph + 16)?;
+        let vaddr = u64_at(b, ph + 16)?.checked_add(bias).ok_or("segment address overflow")?;
         let filesz = u64_at(b, ph + 32)?;
         let memsz = u64_at(b, ph + 40)?;
 
@@ -123,6 +137,9 @@ pub fn parse(b: &[u8]) -> Result<Elf<'_>, &'static str> {
             .and_then(|stop| b.get(start..stop))
             .ok_or("segment data outside file")?;
 
+        if (offset..offset + filesz).contains(&(phoff as u64)) && phoff as u64 + (phnum * PHDR_SIZE) as u64 <= offset + filesz {
+            phdr = vaddr + (phoff as u64 - offset);
+        }
         segments.push(Segment { vaddr, memsz, data, flags });
     }
 
@@ -136,5 +153,5 @@ pub fn parse(b: &[u8]) -> Result<Elf<'_>, &'static str> {
         return Err("entry point is not in an executable segment");
     }
 
-    Ok(Elf { entry, segments })
+    Ok(Elf { entry, segments, phdr, phnum: phnum as u64, phent: PHDR_SIZE as u64 })
 }

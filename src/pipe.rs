@@ -145,3 +145,13 @@ pub fn write(pipe: &Arc<Pipe>, data: &[u8]) -> i64 {
         process::block_on(pipe.key());
     }
 }
+
+/// For poll: (has data, every write end closed).
+pub fn read_status(pipe: &Arc<Pipe>) -> (bool, bool) {
+    (!pipe.buf.lock().is_empty(), pipe.writers.load(Ordering::SeqCst) == 0)
+}
+
+/// For poll: (has room, every read end closed).
+pub fn write_status(pipe: &Arc<Pipe>) -> (bool, bool) {
+    (pipe.buf.lock().len() < PIPE_CAPACITY, pipe.readers.load(Ordering::SeqCst) == 0)
+}

@@ -86,6 +86,8 @@ fn test_breakpoint_exception() {
 pub fn init() {
     gdt::init();
     interrupts::init_idt();
+    fpu::init();
+    syscall::init_fast_syscalls();
     unsafe { interrupts::PICS.lock().initialize() };
     x86_64::instructions::interrupts::enable();
 }
@@ -122,6 +124,9 @@ pub mod devfs;
 pub mod procfs;
 pub mod perm;
 pub mod signal;
+pub mod fpu;
+pub mod mmap;
+pub mod random;
 pub mod rtc;
 
 

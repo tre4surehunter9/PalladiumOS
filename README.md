@@ -89,12 +89,22 @@ Programs are static ELF executables loaded at `0x8000000000`, with a 64 KiB stac
 Files named `test_*` are used by the test suite and hidden from `run`.
 
 ## Syscalls
-PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`, result in `rax`, negative errno on failure), entered with `int 0x80`.
+PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`, result in `rax`, negative errno on failure), entered with `int 0x80` (PalladiumOS's own programs) or the `syscall` instruction (what Linux programs and musl use).
 
 | # | Name | Status |
 |---|------|--------|
 | 0 | read | yes (stdin is line-buffered, Ctrl-D is end-of-file) |
 | 1 | write | yes |
+| 7 / 271 | poll, ppoll | yes (pipes, the terminal; files are always ready) |
+| 9 / 10 / 11 | mmap, mprotect, munmap | anonymous and private file mappings (no writable shared file mappings) |
+| 17 / 18 | pread64, pwrite64 | yes |
+| 19 / 20 | readv, writev | yes |
+| 76 / 77 | truncate, ftruncate | yes |
+| 97 / 302 | getrlimit, prlimit64 | reports the limits (setting is ignored) |
+| 158 | arch_prctl | FS/GS base (thread-local storage) |
+| 218 | set_tid_address | yes |
+| 230 | clock_nanosleep | yes (`TIMER_ABSTIME` too) |
+| 318 | getrandom | yes (RDRAND when available) |
 | 2 | open | yes (`O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`) |
 | 3 | close | yes |
 | 4 | stat | yes |
@@ -159,6 +169,16 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 257 | openat | yes |
 | 292 | dup3 | yes (`O_CLOEXEC`) |
 | 293 | pipe2 | yes (`O_CLOEXEC`) |
+
+## C Programs (musl libc)
+C programs run on PalladiumOS with an unmodified [musl](https://musl.libc.org) libc: PalladiumOS speaks the Linux x86_64 syscall interface musl was written for, saves the SSE registers programs use, supports thread-local storage, `mmap`, and gives programs the aux vector libc's startup reads.
+
+```sh
+tools/build-musl.sh        # downloads musl 1.2.5 (checksum-verified) and builds it into target/musl
+cargo run                  # build.rs now compiles every userland-c/*.c into /bin
+```
+
+Then run `chello` or `test_libc` (a test of stdio, malloc, files, mmap, fork/exec, signals, time...) in the shell. Add a program by putting `NAME.c` in `userland-c/`, or compile one yourself with `target/musl/bin/palladium-cc prog.c -o prog -lm`. Programs are static position-independent executables (static-PIE): PalladiumOS has no dynamic linker yet.
 
 ## Processes
 Every program runs as a process with its own address space, kernel stack, open files and working directory.

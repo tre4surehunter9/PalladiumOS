@@ -14,6 +14,7 @@ use core::arch::global_asm;
 use x86_64::structures::idt::InterruptDescriptorTable;
 use x86_64::{PrivilegeLevel, VirtAddr};
 use crate::{process, vfs};
+use alloc::vec::Vec;
 
 // ---- Syscall numbers (Linux x86_64) ----
 pub const SYS_READ: u64 = 0;
@@ -42,6 +43,33 @@ pub const SYS_WAIT4: u64 = 61;
 pub const SYS_KILL: u64 = 62;
 pub const SYS_FCNTL: u64 = 72;
 pub const SYS_RT_SIGRETURN: u64 = 15;
+pub const SYS_POLL: u64 = 7;
+pub const SYS_MMAP: u64 = 9;
+pub const SYS_MPROTECT: u64 = 10;
+pub const SYS_MUNMAP: u64 = 11;
+pub const SYS_PREAD64: u64 = 17;
+pub const SYS_PWRITE64: u64 = 18;
+pub const SYS_READV: u64 = 19;
+pub const SYS_WRITEV: u64 = 20;
+pub const SYS_MREMAP: u64 = 25;
+pub const SYS_MSYNC: u64 = 26;
+pub const SYS_MADVISE: u64 = 28;
+pub const SYS_FSYNC: u64 = 74;
+pub const SYS_FDATASYNC: u64 = 75;
+pub const SYS_TRUNCATE: u64 = 76;
+pub const SYS_FTRUNCATE: u64 = 77;
+pub const SYS_GETRLIMIT: u64 = 97;
+pub const SYS_GETRUSAGE: u64 = 98;
+pub const SYS_ARCH_PRCTL: u64 = 158;
+pub const SYS_SETRLIMIT: u64 = 160;
+pub const SYS_SCHED_GETAFFINITY: u64 = 204;
+pub const SYS_SET_TID_ADDRESS: u64 = 218;
+pub const SYS_FADVISE64: u64 = 221;
+pub const SYS_CLOCK_NANOSLEEP: u64 = 230;
+pub const SYS_PPOLL: u64 = 271;
+pub const SYS_SET_ROBUST_LIST: u64 = 273;
+pub const SYS_PRLIMIT64: u64 = 302;
+pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_PAUSE: u64 = 34;
 pub const SYS_GETITIMER: u64 = 36;
 pub const SYS_ALARM: u64 = 37;
@@ -122,6 +150,7 @@ pub const EBADF: i64 = 9;
 pub const ECHILD: i64 = 10;
 pub const EAGAIN: i64 = 11;
 pub const ENOMEM: i64 = 12;
+pub const ENODEV: i64 = 19;
 pub const EACCES: i64 = 13;
 pub const EFAULT: i64 = 14;
 pub const EBUSY: i64 = 16;
@@ -233,9 +262,80 @@ global_asm!(
     "iretq",
 );
 
+// The `syscall` instruction (what Linux programs and musl use; ours use
+// `int 0x80`). Unlike an interrupt, it doesn't switch stacks or save
+// anything but rip (in rcx) and rflags (in r11), so this builds the same
+// SyscallFrame by hand on the kernel stack, and returns with iretq like
+// the int 0x80 path. Interrupts stay off on entry (SFMASK clears IF), and
+// there's one CPU, so two statics hold the stack pointers.
+global_asm!(
+    ".global syscall_fast_entry",
+    "syscall_fast_entry:",
+    "mov [rip + SYSCALL_USER_RSP], rsp",
+    "mov rsp, [rip + SYSCALL_KERNEL_RSP]",
+    "push qword ptr [rip + SYSCALL_USER_SS]",
+    "push qword ptr [rip + SYSCALL_USER_RSP]",
+    "push r11",              // rflags
+    "push qword ptr [rip + SYSCALL_USER_CS]",
+    "push rcx",              // rip
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    "push rbx",
+    "push rbp",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    "cld",
+    "mov rdi, rsp",
+    "call syscall_dispatch",
+    "jmp syscall_return",
+);
+
+/// Top of the running process's kernel stack, for `syscall` (kept equal to
+/// the TSS's RSP0 by gdt::set_kernel_stack).
+#[unsafe(no_mangle)]
+pub static mut SYSCALL_KERNEL_RSP: u64 = 0;
+#[unsafe(no_mangle)]
+static mut SYSCALL_USER_RSP: u64 = 0;
+#[unsafe(no_mangle)]
+static mut SYSCALL_USER_CS: u64 = 0;
+#[unsafe(no_mangle)]
+static mut SYSCALL_USER_SS: u64 = 0;
+
 unsafe extern "C" {
     fn syscall_entry();
     fn syscall_return();
+    fn syscall_fast_entry();
+}
+
+/// Turn on the `syscall` instruction: EFER.SCE, its entry point (LSTAR),
+/// the kernel segments (STAR) and the flags to clear on entry (SFMASK).
+pub fn init_fast_syscalls() {
+    use x86_64::registers::model_specific::Msr;
+    let (code, data) = crate::gdt::user_selectors();
+    unsafe {
+        SYSCALL_USER_CS = (code.0 | 3) as u64;
+        SYSCALL_USER_SS = (data.0 | 3) as u64;
+        if SYSCALL_KERNEL_RSP == 0 {
+            SYSCALL_KERNEL_RSP = crate::gdt::kernel_stack_top();
+        }
+        let mut efer = Msr::new(0xC000_0080);
+        efer.write(efer.read() | 1); // SCE: syscall enable
+        // STAR[47:32]: kernel CS (SS = CS + 8). The sysret half is unused
+        // (we return with iretq).
+        Msr::new(0xC000_0081).write(0x08u64 << 32);
+        Msr::new(0xC000_0082).write(syscall_fast_entry as *const () as u64); // LSTAR
+        // SFMASK: clear TF, IF, DF, IOPL, NT and AC on entry.
+        Msr::new(0xC000_0084).write(0x100 | 0x200 | 0x400 | 0x3000 | 0x4000 | 0x40000);
+    }
 }
 
 /// Address new processes start at (see the asm above).
@@ -374,7 +474,57 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_NANOSLEEP => process::sys_nanosleep(a1, a2),
         SYS_CLOCK_GETTIME => process::sys_clock_gettime(a1, a2),
         SYS_EXIT | SYS_EXIT_GROUP => process::exit_current(process::ExitReason::Exited(a1 as i32)),
-        _ => -ENOSYS,
+        // memory
+        SYS_MMAP => crate::mmap::sys_mmap(a1, a2, a3, a4, a5, frame.r9),
+        SYS_MUNMAP => crate::mmap::sys_munmap(a1, a2),
+        SYS_MPROTECT => crate::mmap::sys_mprotect(a1, a2, a3),
+        SYS_MREMAP => -ENOMEM, // libc falls back to allocate + copy
+        SYS_MADVISE | SYS_MSYNC => 0,
+        // files
+        SYS_PREAD64 => match unsafe { user_slice_mut(a2, a3) } {
+            Some(buf) => vfs::sys_pread(a1, buf, a4),
+            None => -EFAULT,
+        },
+        SYS_PWRITE64 => match unsafe { user_slice(a2, a3) } {
+            Some(buf) => vfs::sys_pwrite(a1, buf, a4),
+            None => -EFAULT,
+        },
+        SYS_READV => sys_iov(a1, a2, a3, false),
+        SYS_WRITEV => sys_iov(a1, a2, a3, true),
+        SYS_POLL => sys_poll(a1, a2, a3 as i32 as i64),
+        SYS_PPOLL => sys_ppoll(a1, a2, a3),
+        SYS_FTRUNCATE => vfs::sys_ftruncate(a1, a2),
+        SYS_TRUNCATE => vfs::sys_truncate(a1, a2),
+        SYS_FSYNC | SYS_FDATASYNC => vfs::sys_sync(),
+        SYS_FADVISE64 => 0,
+        // threads (one per process) and TLS
+        SYS_ARCH_PRCTL => process::sys_arch_prctl(a1, a2),
+        SYS_SET_TID_ADDRESS => process::current_pid() as i64,
+        SYS_SET_ROBUST_LIST => 0,
+        SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(a2, a3),
+        // limits, time, randomness
+        SYS_GETRLIMIT => sys_prlimit(a1, 0, a2),
+        SYS_PRLIMIT64 => sys_prlimit(a2, a3, a4),
+        SYS_SETRLIMIT => 0,
+        SYS_GETRUSAGE => match unsafe { user_slice_mut(a2, 144) } {
+            Some(out) => {
+                out.fill(0);
+                0
+            }
+            None => -EFAULT,
+        },
+        SYS_CLOCK_NANOSLEEP => process::sys_clock_nanosleep(a1, a2, a3, a4),
+        SYS_GETRANDOM => match unsafe { user_slice_mut(a1, a2.min(1 << 20)) } {
+            Some(buf) => {
+                crate::random::fill(buf);
+                buf.len() as i64
+            }
+            None => -EFAULT,
+        },
+        _ => {
+            report_unimplemented(num);
+            -ENOSYS
+        }
     };
 
     frame.rax = ret as u64;
@@ -382,6 +532,143 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
     // run first). After sigreturn, there's no syscall to restart.
     let syscall = (num != SYS_RT_SIGRETURN).then_some((num, ret));
     process::handle_signals(frame, syscall);
+}
+
+/// Say once per syscall number that a program used one we don't have
+/// (handy when porting software).
+fn report_unimplemented(num: u64) {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static SEEN: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+    if num < 512 {
+        let (word, bit) = ((num / 64) as usize, 1u64 << (num % 64));
+        if SEEN[word].fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+            crate::serial_println!("[syscall {} not implemented, used by pid {}]", num, process::current_pid());
+            crate::println!("[syscall {} not implemented, used by pid {}]", num, process::current_pid());
+        }
+    }
+}
+
+/// readv/writev(fd, iov, iovcnt): one read/write per buffer, stopping at
+/// a short one.
+fn sys_iov(fd: u64, iov: u64, count: u64, write: bool) -> i64 {
+    if count > 1024 {
+        return -EINVAL;
+    }
+    let Some(list) = (unsafe { user_slice(iov, count * 16) }) else { return -EFAULT };
+    let list: Vec<(u64, u64)> = list
+        .chunks(16)
+        .map(|c| (u64::from_le_bytes(c[0..8].try_into().unwrap()), u64::from_le_bytes(c[8..16].try_into().unwrap())))
+        .collect();
+    let mut total = 0i64;
+    for (base, len) in list {
+        if len == 0 {
+            continue;
+        }
+        let r = if write {
+            match unsafe { user_slice(base, len) } {
+                Some(buf) => vfs::sys_write(fd, buf),
+                None => -EFAULT,
+            }
+        } else {
+            match unsafe { user_slice_mut(base, len) } {
+                Some(buf) => vfs::sys_read(fd, buf),
+                None => -EFAULT,
+            }
+        };
+        if r < 0 {
+            return if total > 0 { total } else { r };
+        }
+        total += r;
+        if (r as u64) < len {
+            break;
+        }
+    }
+    total
+}
+
+/// poll(fds, nfds, timeout ms; -1 = forever)
+fn sys_poll(fds: u64, nfds: u64, timeout_ms: i64) -> i64 {
+    let deadline = (timeout_ms > 0).then(|| process::ticks() + (timeout_ms as u64 * 1_000_000).div_ceil(process::TICK_NS));
+    poll_until(fds, nfds, timeout_ms == 0, deadline)
+}
+
+/// ppoll(fds, nfds, timeout timespec or NULL, sigmask, size) (the mask is
+/// not applied)
+fn sys_ppoll(fds: u64, nfds: u64, ts: u64) -> i64 {
+    if ts == 0 {
+        return poll_until(fds, nfds, false, None);
+    }
+    let Some(t) = (unsafe { user_slice(ts, 16) }) else { return -EFAULT };
+    let sec = u64::from_le_bytes(t[0..8].try_into().unwrap());
+    let nsec = u64::from_le_bytes(t[8..16].try_into().unwrap());
+    let ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
+    let deadline = (ns > 0).then(|| process::ticks() + ns.div_ceil(process::TICK_NS));
+    poll_until(fds, nfds, ns == 0, deadline)
+}
+
+fn poll_until(fds: u64, nfds: u64, no_wait: bool, deadline: Option<u64>) -> i64 {
+    if nfds > vfs::MAX_FDS as u64 * 4 {
+        return -EINVAL;
+    }
+    loop {
+        let Some(list) = (unsafe { user_slice_mut(fds, nfds * 8) }) else { return -EFAULT };
+        let mut ready = 0;
+        for entry in list.chunks_mut(8) {
+            let fd = i32::from_le_bytes(entry[0..4].try_into().unwrap());
+            let events = i16::from_le_bytes(entry[4..6].try_into().unwrap());
+            let revents = vfs::poll_ready(fd, events);
+            entry[6..8].copy_from_slice(&revents.to_le_bytes());
+            if revents != 0 {
+                ready += 1;
+            }
+        }
+        if ready > 0 || no_wait {
+            return ready;
+        }
+        if deadline.is_some_and(|d| process::ticks() >= d) {
+            return 0;
+        }
+        if process::signal_pending() {
+            return -EINTR;
+        }
+        if process::others_ready() {
+            process::yield_now();
+        } else {
+            process::idle_halt();
+        }
+    }
+}
+
+/// getrlimit / prlimit64(pid, resource, new, old): report the limits we
+/// have (open files, stack); everything else is unlimited. Setting is
+/// accepted and ignored.
+fn sys_prlimit(resource: u64, _new: u64, old: u64) -> i64 {
+    const RLIMIT_STACK: u64 = 3;
+    const RLIMIT_NOFILE: u64 = 7;
+    if resource >= 16 {
+        return -EINVAL;
+    }
+    if old != 0 {
+        let limit = match resource {
+            RLIMIT_STACK => crate::usermode::STACK_MAX,
+            RLIMIT_NOFILE => vfs::MAX_FDS as u64,
+            _ => u64::MAX, // RLIM_INFINITY
+        };
+        let Some(out) = (unsafe { user_slice_mut(old, 16) }) else { return -EFAULT };
+        out[0..8].copy_from_slice(&limit.to_le_bytes());
+        out[8..16].copy_from_slice(&limit.to_le_bytes());
+    }
+    0
+}
+
+/// sched_getaffinity(pid, size, mask): one CPU.
+fn sys_sched_getaffinity(size: u64, mask: u64) -> i64 {
+    if size < 8 {
+        return -EINVAL;
+    }
+    let Some(out) = (unsafe { user_slice_mut(mask, 8) }) else { return -EFAULT };
+    out.copy_from_slice(&1u64.to_le_bytes());
+    8
 }
 
 /// reboot(magic1, magic2, cmd): restart or power off the machine.

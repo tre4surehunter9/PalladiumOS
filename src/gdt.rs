@@ -34,7 +34,15 @@ pub fn set_kernel_stack(top: VirtAddr) {
     unsafe {
         // The TSS is packed, so this field isn't 8-byte aligned.
         core::ptr::write_unaligned(&raw mut (*(&raw mut TSS)).privilege_stack_table[0], top);
+        // The `syscall` instruction doesn't use the TSS: it reads this.
+        crate::syscall::SYSCALL_KERNEL_RSP = top.as_u64();
     }
+}
+
+/// The current RSP0 (the kernel stack for entries from ring 3).
+pub fn kernel_stack_top() -> u64 {
+    tss();
+    unsafe { core::ptr::read_unaligned(&raw const (*(&raw const TSS)).privilege_stack_table[0]).as_u64() }
 }
 
 pub fn init() {

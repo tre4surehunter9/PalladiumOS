@@ -118,6 +118,13 @@ pub struct Process {
     running_since: u64,
     /// Who the process runs as.
     pub cred: Cred,
+    /// FPU/SSE registers while the process isn't running.
+    fpu: Box<crate::fpu::FpuState>,
+    /// FS and GS base addresses (thread-local storage, see arch_prctl).
+    fs_base: u64,
+    gs_base: u64,
+    /// Memory mapped with mmap (start, end), sorted.
+    pub maps: Vec<(u64, u64)>,
 }
 
 /// Credentials: real, effective and saved user and group IDs, and the
@@ -229,6 +236,10 @@ pub fn init() {
         cpu_ticks: 0,
         running_since: 0,
         cred: Cred::ROOT,
+        fpu: Box::new(crate::fpu::FpuState::initial()),
+        fs_base: 0,
+        gs_base: 0,
+        maps: Vec::new(),
     }));
     CURRENT.store(0, Ordering::SeqCst);
 }
@@ -360,8 +371,11 @@ pub fn schedule() {
                         current.cpu_ticks += now.saturating_sub(current.running_since);
                     }
                     let save: *mut u64 = &mut current.kernel_rsp;
+                    crate::fpu::save(&mut current.fpu);
 
                     let target = table.get_mut(&next).unwrap();
+                    crate::fpu::restore(&target.fpu);
+                    set_fs_gs(target.fs_base, target.gs_base);
                     target.state = State::Running;
                     target.running_since = now;
                     if let Some(top) = target.kernel_stack_top() {
@@ -514,13 +528,16 @@ pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u64, ExitReason)>, i64> {
 /// fork(): duplicate the current process. Returns the child's pid to the
 /// parent; the child returns from the same syscall with 0.
 pub fn fork(frame: &SyscallFrame) -> i64 {
-    let (p4, files, name, ppid, brk, pgid, (actions, blocked), argv, exe, cred) = {
+    // The child gets the FPU registers as they are now.
+    let mut fpu = Box::new(crate::fpu::FpuState::initial());
+    crate::fpu::save(&mut fpu);
+    let (p4, files, name, ppid, brk, pgid, (actions, blocked), argv, exe, cred, (fs_base, gs_base, maps)) = {
         let table = TABLE.lock();
         if table.len() >= MAX_PROCESSES {
             return -EAGAIN;
         }
         let cur = table.get(&current_pid()).unwrap();
-        (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid, cur.brk, cur.pgid, (cur.actions.clone(), cur.blocked), cur.argv.clone(), cur.exe.clone(), cur.cred.clone())
+        (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid, cur.brk, cur.pgid, (cur.actions.clone(), cur.blocked), cur.argv.clone(), cur.exe.clone(), cur.cred.clone(), (cur.fs_base, cur.gs_base, cur.maps.clone()))
     };
 
     let child_p4 = {
@@ -560,6 +577,10 @@ pub fn fork(frame: &SyscallFrame) -> i64 {
         cpu_ticks: 0,
         running_since: 0,
         cred,
+        fpu,
+        fs_base,
+        gs_base,
+        maps,
     };
     match add_process(child) {
         Ok(pid) => pid as i64,
@@ -674,7 +695,12 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
 
     let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     let envp_refs: Vec<&str> = envp.iter().map(String::as_str).collect();
-    let image = match usermode::build_image(&bytes, &argv_refs, &envp_refs) {
+    // A setuid/setgid program runs as the file's owner/group.
+    let setuid = exe_meta.as_ref().filter(|m| m.perm & crate::perm::S_ISUID != 0).map(|m| m.uid);
+    let setgid = exe_meta.as_ref().filter(|m| m.perm & crate::perm::S_ISGID != 0).map(|m| m.gid);
+    let c = current_cred();
+    let ids = usermode::Ids { uid: c.ruid, euid: setuid.unwrap_or(c.euid), gid: c.rgid, egid: setgid.unwrap_or(c.egid) };
+    let image = match usermode::build_image(&bytes, &argv_refs, &envp_refs, ids) {
         Ok(image) => image,
         Err(e) => return -load_error_errno(e),
     };
@@ -688,6 +714,9 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
         p.argv = argv.clone();
         p.exe = crate::filesystem::normalize(&p.files.cwd, &path);
         p.brk = HEAP_BASE; // the new program starts with an empty heap
+        p.maps.clear();
+        p.fs_base = 0;
+        p.gs_base = 0;
         // Handlers are gone with the old program: back to the default action
         // (ignored signals stay ignored; the mask and pending signals stay).
         for a in p.actions.iter_mut() {
@@ -697,12 +726,11 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
         }
         core::mem::replace(&mut p.p4, image.p4)
     };
-    // A setuid/setgid program runs as the file's owner/group.
-    let setuid = exe_meta.filter(|m| m.perm & crate::perm::S_ISUID != 0).map(|m| m.uid);
-    let setgid = exe_meta.filter(|m| m.perm & crate::perm::S_ISGID != 0).map(|m| m.gid);
     apply_exec_ids(setuid, setgid);
     let (_, flags) = Cr3::read();
     unsafe { Cr3::write(image.p4, flags) };
+    crate::fpu::reset();
+    set_fs_gs(0, 0);
     {
         let mut alloc = FRAME_ALLOCATOR.lock();
         memory::free_address_space(old_p4, alloc.as_mut().unwrap());
@@ -799,7 +827,9 @@ fn program_path(name: &str) -> String {
 /// Start a program as a child of the kernel, with the kernel shell's
 /// working directory. Returns its pid.
 pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static str> {
-    let image = usermode::build_image(bytes, argv, envp)?;
+    let c = current_cred();
+    let ids = usermode::Ids { uid: c.ruid, euid: c.euid, gid: c.rgid, egid: c.egid };
+    let image = usermode::build_image(bytes, argv, envp, ids)?;
     let frame = SyscallFrame::new_user(image.entry, image.stack_pointer);
     let (kernel_stack, kernel_rsp) = new_kernel_stack(&frame);
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
@@ -830,6 +860,10 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         cpu_ticks: 0,
         running_since: 0,
         cred: current_cred(), // programs the kernel starts run as root
+        fpu: Box::new(crate::fpu::FpuState::initial()),
+        fs_base: 0,
+        gs_base: 0,
+        maps: Vec::new(),
     };
     add_process(process).map_err(|_| {
         let mut alloc = FRAME_ALLOCATOR.lock();
@@ -1585,6 +1619,34 @@ pub fn sys_nanosleep(req: u64, rem: u64) -> i64 {
         return -EINVAL;
     }
     let total = (sec as u64).saturating_mul(1_000_000_000).saturating_add(nsec as u64);
+    sleep_ns(total, rem)
+}
+
+/// clock_nanosleep(clock, flags, req, rem): like nanosleep, on any clock;
+/// with TIMER_ABSTIME, `req` is the time to wake up at.
+pub fn sys_clock_nanosleep(clock: u64, flags: u64, req: u64, rem: u64) -> i64 {
+    const TIMER_ABSTIME: u64 = 1;
+    if !matches!(clock, 0 | 1 | 4 | 7) {
+        return -EINVAL;
+    }
+    let Some(ts) = (unsafe { user_slice(req, 16) }) else { return -EFAULT };
+    let sec = i64::from_le_bytes(ts[0..8].try_into().unwrap());
+    let nsec = i64::from_le_bytes(ts[8..16].try_into().unwrap());
+    if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+        return -EINVAL;
+    }
+    let mut total = (sec as u64).saturating_mul(1_000_000_000).saturating_add(nsec as u64);
+    if flags & TIMER_ABSTIME != 0 {
+        let now = if clock == 0 { crate::rtc::now_ns() } else { ticks() * TICK_NS };
+        total = total.saturating_sub(now);
+        return sleep_ns(total, 0); // nothing "remains" of an absolute time
+    }
+    sleep_ns(total, rem)
+}
+
+/// Sleep `total` nanoseconds (rounded up to ticks); EINTR (with the time
+/// left in `rem`, if given) when a signal interrupts it.
+fn sleep_ns(total: u64, rem: u64) -> i64 {
     let wake_at = ticks() + total.div_ceil(TICK_NS);
     loop {
         if ticks() >= wake_at {
@@ -1905,4 +1967,62 @@ pub fn apply_exec_ids(setuid: Option<u32>, setgid: Option<u32>) {
         c.suid = c.euid;
         c.sgid = c.egid;
     });
+}
+
+// ---- thread-local storage ----
+
+fn set_fs_gs(fs: u64, gs: u64) {
+    use x86_64::registers::model_specific::Msr;
+    unsafe {
+        Msr::new(0xC000_0100).write(fs); // FS_BASE
+        Msr::new(0xC000_0101).write(gs); // GS_BASE (the kernel never uses GS)
+    }
+}
+
+/// arch_prctl(code, addr): set or get the FS/GS base. libc points FS at
+/// the thread's control block (thread-local variables, errno, ...).
+pub fn sys_arch_prctl(code: u64, addr: u64) -> i64 {
+    const ARCH_SET_GS: u64 = 0x1001;
+    const ARCH_SET_FS: u64 = 0x1002;
+    const ARCH_GET_FS: u64 = 0x1003;
+    const ARCH_GET_GS: u64 = 0x1004;
+    let mut table = TABLE.lock();
+    let p = table.get_mut(&current_pid()).unwrap();
+    match code {
+        ARCH_SET_FS | ARCH_SET_GS => {
+            if addr >= memory::USER_SPACE_END {
+                return -EPERM;
+            }
+            if code == ARCH_SET_FS {
+                p.fs_base = addr;
+            } else {
+                p.gs_base = addr;
+            }
+            set_fs_gs(p.fs_base, p.gs_base);
+            0
+        }
+        ARCH_GET_FS | ARCH_GET_GS => {
+            let v = if code == ARCH_GET_FS { p.fs_base } else { p.gs_base };
+            drop(table);
+            match unsafe { user_slice_mut(addr, 8) } {
+                Some(out) => {
+                    out.copy_from_slice(&v.to_le_bytes());
+                    0
+                }
+                None => -EFAULT,
+            }
+        }
+        _ => -EINVAL,
+    }
+}
+
+/// Run `f` on the current process (for mmap.rs).
+pub fn with_current<T>(f: impl FnOnce(&mut Process) -> T) -> T {
+    let mut table = TABLE.lock();
+    f(table.get_mut(&current_pid()).unwrap())
+}
+
+/// The current address space.
+pub fn current_p4() -> PhysFrame {
+    TABLE.lock()[&current_pid()].p4
 }
