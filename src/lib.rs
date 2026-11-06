@@ -112,6 +112,7 @@ pub mod syscall;
 pub mod elf;
 pub mod tty;
 pub mod programs;
+pub mod vfs;
 
 
 extern crate alloc;

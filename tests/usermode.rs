@@ -344,3 +344,102 @@ fn user_range_accepts_valid_user_pointers() {
     assert_eq!(launch_program(include_bytes!("user_progs/uname.bin")), 0);
     assert!(memory::is_user_range(0, 0, false), "empty range is always fine");
 }
+
+// ---- file syscalls (milestone B) ----
+
+use palladiumos::filesystem;
+
+#[test_case]
+fn file_syscalls() {
+    // test_fs exits with the line number of the first failed check.
+    assert_eq!(run(prog("test_fs"), &["test_fs", "all"]), Ok(0));
+}
+
+#[test_case]
+fn fds_are_closed_when_a_program_exits() {
+    // Each run opens a file and exits without closing it: it must get fd 3
+    // every time, so nothing leaked from the previous run.
+    for _ in 0..3 {
+        assert_eq!(run(prog("test_fs"), &["test_fs", "leak"]), Ok(3));
+    }
+}
+
+#[test_case]
+fn program_chdir_does_not_change_shell_cwd() {
+    filesystem::make_dir("/cwdtest").unwrap();
+    *filesystem::CWD.lock() = "/cwdtest".into();
+    assert_eq!(run(prog("test_fs"), &["test_fs", "chdir"]), Ok(0));
+    assert_eq!(*filesystem::CWD.lock(), "/cwdtest");
+    *filesystem::CWD.lock() = "/".into();
+}
+
+#[test_case]
+fn programs_inherit_shell_cwd() {
+    filesystem::make_dir("/inherit").unwrap();
+    *filesystem::CWD.lock() = "/inherit".into();
+    // relative path, resolved against the inherited cwd
+    assert_eq!(run(prog("test_fs"), &["test_fs", "write", "rel.txt", "relative"]), Ok(0));
+    *filesystem::CWD.lock() = "/".into();
+    assert_eq!(filesystem::read_file("/inherit/rel.txt").unwrap(), "relative");
+}
+
+#[test_case]
+fn files_written_by_programs_are_visible_to_the_kernel() {
+    assert_eq!(run(prog("test_fs"), &["test_fs", "write", "/fromuser.txt", "hello kernel"]), Ok(0));
+    assert_eq!(filesystem::read_file("/fromuser.txt").unwrap(), "hello kernel");
+}
+
+#[test_case]
+fn coreutils_end_to_end() {
+    assert_eq!(run(prog("mkdir"), &["mkdir", "-p", "/e2e/a/b"]), Ok(0));
+    assert!(filesystem::is_dir("/e2e/a/b"));
+    assert_eq!(run(prog("mkdir"), &["mkdir", "/e2e/a"]), Ok(1), "already exists");
+    assert_eq!(run(prog("mkdir"), &["mkdir", "-p", "/e2e/a"]), Ok(0), "-p tolerates existing");
+
+    assert_eq!(run(prog("touch"), &["touch", "/e2e/a/b/f1", "/e2e/a/f2"]), Ok(0));
+    assert_eq!(filesystem::read_file("/e2e/a/f2").unwrap(), "");
+    filesystem::write_file("/e2e/a/f2", "keep").unwrap();
+    assert_eq!(run(prog("touch"), &["touch", "/e2e/a/f2"]), Ok(0));
+    assert_eq!(filesystem::read_file("/e2e/a/f2").unwrap(), "keep", "touch must not truncate");
+
+    assert_eq!(run(prog("cat"), &["cat", "/e2e/a/f2"]), Ok(0));
+    assert_eq!(run(prog("cat"), &["cat", "/e2e/missing"]), Ok(1));
+    assert_eq!(run(prog("ls"), &["ls", "-la", "/e2e/a"]), Ok(0));
+    assert_eq!(run(prog("ls"), &["ls", "/e2e/missing"]), Ok(2));
+    assert_eq!(run(prog("ls"), &["ls", "/e2e/a/f2"]), Ok(0), "ls on a file");
+    assert_eq!(run(prog("pwd"), &["pwd"]), Ok(0));
+
+    assert_eq!(run(prog("rmdir"), &["rmdir", "/e2e/a"]), Ok(1), "not empty");
+    assert_eq!(run(prog("rm"), &["rm", "/e2e/a"]), Ok(1), "rm without -r on a dir");
+    assert_eq!(run(prog("rm"), &["rm", "/e2e/a/f2"]), Ok(0));
+    assert!(filesystem::read_file("/e2e/a/f2").is_err());
+    assert_eq!(run(prog("rm"), &["rm", "-f", "/e2e/nothing"]), Ok(0));
+    assert_eq!(run(prog("rm"), &["rm", "-r", "/e2e"]), Ok(0));
+    assert!(!filesystem::is_dir("/e2e"));
+}
+
+#[test_case]
+fn deep_rm_r_does_not_overflow_the_stack() {
+    let mut path = alloc::string::String::from("/deep");
+    filesystem::make_dir(&path).unwrap();
+    for i in 0..20 {
+        path.push_str(&alloc::format!("/d{}", i));
+        filesystem::make_dir(&path).unwrap();
+        filesystem::write_file(&alloc::format!("{}/file", path), "x").unwrap();
+    }
+    assert_eq!(run(prog("rm"), &["rm", "-r", "/deep"]), Ok(0));
+    assert!(!filesystem::is_dir("/deep"));
+}
+
+#[test_case]
+fn errno_mapping_covers_every_fdfs_error() {
+    use palladiumos::syscall::*;
+    use palladiumos::vfs::errno_for;
+    assert_eq!(errno_for("File not found"), ENOENT);
+    assert_eq!(errno_for("Parent directory not found"), ENOENT);
+    assert_eq!(errno_for("Not a directory"), ENOTDIR);
+    assert_eq!(errno_for("Parent is not a directory"), ENOTDIR);
+    assert_eq!(errno_for("Is a directory"), EISDIR);
+    assert_eq!(errno_for("Already exists"), EEXIST);
+    assert_eq!(errno_for("Directory is not empty"), ENOTEMPTY);
+}

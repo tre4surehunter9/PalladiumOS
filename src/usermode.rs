@@ -148,7 +148,13 @@ pub fn run(bytes: &[u8], argv: &[&str]) -> Result<i32, &'static str> {
     let cs = (code_sel.0 as u64) | 3;
     let ss = (data_sel.0 as u64) | 3;
 
+    // Fresh fds (0/1/2 = console) and a copy of the shell's working directory.
+    let cwd = crate::filesystem::CWD.lock().clone();
+    crate::vfs::start_process(&cwd);
+
     let status = unsafe { usermode_enter(&raw mut KERNEL_CTX, entry, stack_pointer, cs, ss) };
+
+    crate::vfs::end_process();
 
     {
         let mut mapper_guard = MAPPER.lock();

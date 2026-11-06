@@ -13,20 +13,47 @@
 use core::arch::global_asm;
 use x86_64::structures::idt::InterruptDescriptorTable;
 use x86_64::{PrivilegeLevel, VirtAddr};
+use crate::vfs;
 
 // ---- Syscall numbers (Linux x86_64) ----
 pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
+pub const SYS_OPEN: u64 = 2;
+pub const SYS_CLOSE: u64 = 3;
+pub const SYS_STAT: u64 = 4;
+pub const SYS_FSTAT: u64 = 5;
+pub const SYS_LSTAT: u64 = 6;
+pub const SYS_LSEEK: u64 = 8;
 pub const SYS_SCHED_YIELD: u64 = 24;
 pub const SYS_GETPID: u64 = 39;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_UNAME: u64 = 63;
+pub const SYS_GETCWD: u64 = 79;
+pub const SYS_CHDIR: u64 = 80;
+pub const SYS_MKDIR: u64 = 83;
+pub const SYS_RMDIR: u64 = 84;
+pub const SYS_UNLINK: u64 = 87;
+pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_EXIT_GROUP: u64 = 231;
+pub const SYS_OPENAT: u64 = 257;
 
 // ---- errno values (Linux) ----
+pub const ENOENT: i64 = 2;
+pub const EIO: i64 = 5;
 pub const EBADF: i64 = 9;
 pub const EFAULT: i64 = 14;
+pub const EBUSY: i64 = 16;
+pub const EEXIST: i64 = 17;
+pub const ENOTDIR: i64 = 20;
+pub const EISDIR: i64 = 21;
+pub const EINVAL: i64 = 22;
+pub const EMFILE: i64 = 24;
+pub const EFBIG: i64 = 27;
+pub const ESPIPE: i64 = 29;
+pub const ERANGE: i64 = 34;
+pub const ENAMETOOLONG: i64 = 36;
 pub const ENOSYS: i64 = 38;
+pub const ENOTEMPTY: i64 = 39;
 
 /// Registers saved by `syscall_entry`, lowest address first.
 /// Must match the push order in the assembly below (pushed in reverse).
@@ -90,41 +117,46 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
     let (a1, a2, a3) = (frame.rdi, frame.rsi, frame.rdx);
 
     let ret: i64 = match frame.rax {
-        SYS_WRITE => sys_write(a1, a2, a3),
+        SYS_READ => match unsafe { user_slice_mut(a2, a3) } {
+            Some(buf) => vfs::sys_read(a1, buf),
+            None => -EFAULT,
+        },
+        SYS_WRITE => match unsafe { user_slice(a2, a3) } {
+            Some(buf) => vfs::sys_write(a1, buf),
+            None => -EFAULT,
+        },
+        SYS_OPEN => vfs::sys_open(a1, a2),
+        SYS_OPENAT => vfs::sys_openat(a1, a2, a3),
+        SYS_CLOSE => vfs::sys_close(a1),
+        SYS_LSEEK => vfs::sys_lseek(a1, a2, a3),
+        SYS_STAT | SYS_LSTAT => match unsafe { user_slice_mut(a2, vfs::STAT_SIZE) } {
+            Some(buf) => vfs::sys_stat(a1, buf),
+            None => -EFAULT,
+        },
+        SYS_FSTAT => match unsafe { user_slice_mut(a2, vfs::STAT_SIZE) } {
+            Some(buf) => vfs::sys_fstat(a1, buf),
+            None => -EFAULT,
+        },
+        SYS_GETDENTS64 => match unsafe { user_slice_mut(a2, a3) } {
+            Some(buf) => vfs::sys_getdents64(a1, buf),
+            None => -EFAULT,
+        },
+        SYS_GETCWD => match unsafe { user_slice_mut(a1, a2) } {
+            Some(buf) => vfs::sys_getcwd(buf),
+            None => -EFAULT,
+        },
+        SYS_CHDIR => vfs::sys_chdir(a1),
+        SYS_MKDIR => vfs::sys_mkdir(a1),
+        SYS_RMDIR => vfs::sys_remove(a1, true),
+        SYS_UNLINK => vfs::sys_remove(a1, false),
         SYS_SCHED_YIELD => 0,
         SYS_GETPID => 1, // only one process exists for now
         SYS_UNAME => sys_uname(a1),
         SYS_EXIT | SYS_EXIT_GROUP => crate::usermode::exit_current(a1 as i32),
-        SYS_READ => sys_read(a1, a2, a3),
         _ => -ENOSYS,
     };
 
     frame.rax = ret as u64;
-}
-
-/// read(fd, buf, count): fd 0 reads a line from the console TTY.
-fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
-    if fd != 0 {
-        return -EBADF; // only stdin exists until there's an fd table
-    }
-    let Some(bytes) = (unsafe { user_slice_mut(buf, count) }) else {
-        return -EFAULT;
-    };
-    crate::tty::read(bytes) as i64
-}
-
-/// write(fd, buf, count)
-fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
-    if fd != 1 && fd != 2 {
-        return -EBADF; // only stdout/stderr exist until there's an fd table
-    }
-    let Some(bytes) = (unsafe { user_slice(buf, count) }) else {
-        return -EFAULT;
-    };
-    for &byte in bytes {
-        crate::print!("{}", byte as char);
-    }
-    count as i64
 }
 
 /// uname(struct utsname *buf)

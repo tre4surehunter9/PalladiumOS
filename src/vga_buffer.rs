@@ -228,6 +228,11 @@ pub fn erase_cursor() {
 
 impl Writer {
 pub fn draw_cursor_inner(&mut self) {
+    // At the end of a line the next character wraps (see write_byte),
+    // so the cursor belongs at the start of the next line.
+    if self.column_position >= BUFFER_WIDTH {
+        self.new_line();
+    }
     let row = self.row_position;
     let col = self.column_position;
     self.buffer.chars[row][col].write(ScreenChar {
@@ -239,6 +244,9 @@ pub fn draw_cursor_inner(&mut self) {
 
 impl Writer {
 pub fn erase_cursor_inner(&mut self) {
+    if self.column_position >= BUFFER_WIDTH {
+        return; // nothing drawn past the last column
+    }
     let row = self.row_position;
     let col = self.column_position;
     self.buffer.chars[row][col].write(ScreenChar {

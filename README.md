@@ -31,7 +31,13 @@ i used AI for
 User programs run in ring 3 and are started with `run <name> [args...]` (`run` alone lists them):
 * hello - prints a greeting
 * echo - prints its arguments (`-n` for no newline)
-* cat - copies what you type to the screen until Ctrl-D
+* cat - prints files, or what you type until Ctrl-D
+* ls - lists directories (`-a` for hidden entries, `-l` for type and size)
+* mkdir - creates directories (`-p` for parents)
+* rmdir - removes empty directories
+* rm - removes files (`-r` for directories, `-f` to ignore missing files)
+* touch - creates empty files
+* pwd - prints the working directory
 * uname - prints system info (`-a`, `-s`, `-n`, `-r`, `-v`, `-m`)
 * crash - checks that bad pointers return EFAULT and that a segfault only kills the program
 
@@ -61,20 +67,28 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 
 | # | Name | Status |
 |---|------|--------|
-| 0 | read | stdin only (line-buffered, Ctrl-D is end-of-file) |
-| 1 | write | stdout/stderr only |
+| 0 | read | yes (stdin is line-buffered, Ctrl-D is end-of-file) |
+| 1 | write | yes |
+| 2 | open | yes (`O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`) |
+| 3 | close | yes |
+| 4 | stat | yes |
+| 5 | fstat | yes |
+| 6 | lstat | yes (same as stat, no symlinks) |
+| 8 | lseek | yes |
 | 24 | sched_yield | yes |
 | 39 | getpid | yes (always 1) |
 | 60 | exit | yes |
 | 63 | uname | yes |
+| 79 | getcwd | yes |
+| 80 | chdir | yes |
+| 83 | mkdir | yes |
+| 84 | rmdir | yes |
+| 87 | unlink | yes |
+| 217 | getdents64 | yes |
 | 231 | exit_group | yes |
+| 257 | openat | yes |
 
-## Building from Source
-The repo includes a `rust-toolchain.toml`, so `rustup` installs the right nightly toolchain and components automatically.
-* Install [rustup](https://rustup.rs) and QEMU
-* Install bootimage: `cargo install bootimage`
-* Build: `cargo bootimage`
-* Run: `cargo run` (boots it in QEMU)
+Each program gets its own file descriptors (0, 1 and 2 are the console) and a copy of the shell's working directory. Files left open are closed when it exits.
 
 ## Running the Tests
 `cargo test` boots each test kernel in QEMU (no window) and reports results over serial.

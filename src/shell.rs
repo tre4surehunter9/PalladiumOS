@@ -151,17 +151,8 @@ fn cmd_cd(args: &str) -> bool {
         return true;
     }
 
-    let target = if args == ".." {
-        let cwd = filesystem::CWD.lock().clone();
-        if cwd == "/" {
-            "/".to_string()
-        } else {
-            let parent = cwd.rsplitn(2, '/').nth(1).unwrap_or("/");
-            if parent.is_empty() { "/".to_string() } else { parent.to_string() }
-        }
-    } else {
-        filesystem::resolve_path(args)
-    };
+    // resolve_path handles "..", "." and relative paths like "../scripts".
+    let target = filesystem::resolve_path(args);
 
     if filesystem::is_dir(&target) {
         *filesystem::CWD.lock() = target;

@@ -14,19 +14,41 @@ lazy_static! {
     pub static ref CWD: Mutex<String> = Mutex::new("/".to_string());
 }
 
-/// Resolve a path relative to the CWD into an absolute path.
-/// If the path starts with '/' it's already absolute.
+/// Resolve a path relative to the CWD into a normalized absolute path.
 pub fn resolve_path(path: &str) -> String {
-    if path.starts_with('/') {
-        path.to_string()
-    } else {
-        let cwd = CWD.lock().clone();
-        if cwd == "/" {
-            alloc::format!("/{}", path)
-        } else {
-            alloc::format!("{}/{}", cwd, path)
+    let cwd = CWD.lock().clone();
+    normalize(&cwd, path)
+}
+
+/// Turn `path` (absolute, or relative to `cwd`) into a clean absolute path:
+/// "." components and repeated slashes are dropped, and ".." removes the
+/// previous component (".." at the root stays at the root, as in POSIX).
+///
+///   normalize("/a/b", "../c")   == "/a/c"
+///   normalize("/", "./x//y/")   == "/x/y"
+pub fn normalize(cwd: &str, path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let full = if path.starts_with('/') { [path, ""] } else { [cwd, path] };
+    for piece in full {
+        for component in piece.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                name => parts.push(name),
+            }
         }
     }
+    if parts.is_empty() {
+        return "/".to_string();
+    }
+    let mut out = String::new();
+    for part in parts {
+        out.push('/');
+        out.push_str(part);
+    }
+    out
 }
 
 pub fn list_dir(path: &str) -> Vec<(String, bool)> {

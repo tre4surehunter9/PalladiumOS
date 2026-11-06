@@ -202,6 +202,8 @@ fn resolve_path_uses_cwd() {
     *filesystem::CWD.lock() = "/rp".to_string();
     assert_eq!(filesystem::resolve_path("rel"), "/rp/rel");
     assert_eq!(filesystem::resolve_path("/abs"), "/abs");
+    assert_eq!(filesystem::resolve_path(".."), "/");
+    assert_eq!(filesystem::resolve_path("../rp/x"), "/rp/x");
     *filesystem::CWD.lock() = "/".to_string();
 }
 
@@ -220,6 +222,32 @@ fn shell_mkdir_cd_pwd() {
     assert!(process_command("cd .."), "cd .. at root stays at root");
     assert_eq!(cwd(), "/");
     assert!(process_command("pwd"));
+}
+
+#[test_case]
+fn normalize_paths() {
+    use filesystem::normalize;
+    assert_eq!(normalize("/", "a"), "/a");
+    assert_eq!(normalize("/a/b", "c"), "/a/b/c");
+    assert_eq!(normalize("/a/b", "../c"), "/a/c");
+    assert_eq!(normalize("/a/b", "../../.."), "/");
+    assert_eq!(normalize("/a", "./x//y/"), "/a/x/y");
+    assert_eq!(normalize("/a", "/abs/./p/.."), "/abs");
+    assert_eq!(normalize("/", ".."), "/");
+    assert_eq!(normalize("/", ""), "/");
+}
+
+#[test_case]
+fn shell_cd_relative_paths() {
+    assert!(process_command("mkdir /rel1"));
+    assert!(process_command("mkdir /rel1/x"));
+    assert!(process_command("mkdir /rel2"));
+    assert!(process_command("cd /rel1/x"));
+    assert!(process_command("cd ../../rel2"));
+    assert_eq!(cwd(), "/rel2");
+    assert!(process_command("cd ./../rel1/./x/"));
+    assert_eq!(cwd(), "/rel1/x");
+    assert!(process_command("cd /"));
 }
 
 #[test_case]

@@ -22,10 +22,22 @@ pub mod sys {
 
     pub const READ: u64 = 0;
     pub const WRITE: u64 = 1;
+    pub const OPEN: u64 = 2;
+    pub const CLOSE: u64 = 3;
+    pub const STAT: u64 = 4;
+    pub const FSTAT: u64 = 5;
+    pub const LSEEK: u64 = 8;
     pub const SCHED_YIELD: u64 = 24;
     pub const GETPID: u64 = 39;
     pub const EXIT: u64 = 60;
     pub const UNAME: u64 = 63;
+    pub const GETCWD: u64 = 79;
+    pub const CHDIR: u64 = 80;
+    pub const MKDIR: u64 = 83;
+    pub const RMDIR: u64 = 84;
+    pub const UNLINK: u64 = 87;
+    pub const GETDENTS64: u64 = 217;
+    pub const OPENAT: u64 = 257;
 
     /// Invoke syscall `n` with up to three arguments. The kernel preserves
     /// every register except rax, which holds the result (-errno on failure).
@@ -45,6 +57,9 @@ pub mod sys {
         ret
     }
 }
+
+pub mod fs;
+pub use fs::*;
 
 pub const STDIN: i32 = 0;
 pub const STDOUT: i32 = 1;

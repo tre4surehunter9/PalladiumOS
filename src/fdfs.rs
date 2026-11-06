@@ -208,6 +208,93 @@ impl Fdfs {
         Ok(())
     }
 
+    // ---- node-level access, used by file descriptors ----
+    // Removed nodes stay in the Vec as tombstones, so an index taken while a
+    // file was open keeps working after it is unlinked (as POSIX requires).
+
+    pub fn node(&self, idx: usize) -> Option<&Node> {
+        self.nodes.get(idx)
+    }
+
+    /// Create an empty file and return its index. Fails if the path exists.
+    pub fn create_file(&mut self, path: &str) -> Result<usize, &'static str> {
+        let (parent_path, filename) = split_path(path)?;
+        let parent_idx = self.resolve(parent_path).ok_or("Parent directory not found")?;
+        if !self.nodes[parent_idx].is_dir() {
+            return Err("Parent is not a directory");
+        }
+        if self.find_child(parent_idx, filename).is_some() {
+            return Err("Already exists");
+        }
+        let new_idx = self.nodes.len();
+        self.nodes.push(Node::File { name: filename.to_string(), data: Vec::new() });
+        if let Node::Dir { children, .. } = &mut self.nodes[parent_idx] {
+            children.push(new_idx);
+        }
+        Ok(new_idx)
+    }
+
+    /// Size of a file in bytes (None if idx isn't a file).
+    pub fn file_size(&self, idx: usize) -> Option<usize> {
+        match self.nodes.get(idx)? {
+            Node::File { data, .. } => Some(data.len()),
+            Node::Dir { .. } => None,
+        }
+    }
+
+    /// Read from a file at `offset`. Returns the number of bytes copied
+    /// (0 at or past the end of the file).
+    pub fn read_at(&self, idx: usize, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+        match self.nodes.get(idx).ok_or("Not found")? {
+            Node::File { data, .. } => {
+                if offset >= data.len() {
+                    return Ok(0);
+                }
+                let n = buf.len().min(data.len() - offset);
+                buf[..n].copy_from_slice(&data[offset..offset + n]);
+                Ok(n)
+            }
+            Node::Dir { .. } => Err("Is a directory"),
+        }
+    }
+
+    /// Write to a file at `offset`, growing it (zero-filled) if needed.
+    pub fn write_at(&mut self, idx: usize, offset: usize, bytes: &[u8]) -> Result<usize, &'static str> {
+        match self.nodes.get_mut(idx).ok_or("Not found")? {
+            Node::File { data, .. } => {
+                let end = offset.checked_add(bytes.len()).ok_or("File too large")?;
+                if data.len() < end {
+                    data.resize(end, 0);
+                }
+                data[offset..end].copy_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            Node::Dir { .. } => Err("Is a directory"),
+        }
+    }
+
+    /// Shrink or grow a file to exactly `len` bytes.
+    pub fn truncate(&mut self, idx: usize, len: usize) -> Result<(), &'static str> {
+        match self.nodes.get_mut(idx).ok_or("Not found")? {
+            Node::File { data, .. } => {
+                data.resize(len, 0);
+                Ok(())
+            }
+            Node::Dir { .. } => Err("Is a directory"),
+        }
+    }
+
+    /// (name, node index, is_dir) for each entry of a directory node.
+    pub fn dir_entries(&self, idx: usize) -> Result<Vec<(String, usize, bool)>, &'static str> {
+        match self.nodes.get(idx).ok_or("Not found")? {
+            Node::Dir { children, .. } => Ok(children
+                .iter()
+                .map(|&c| (self.nodes[c].name().to_string(), c, self.nodes[c].is_dir()))
+                .collect()),
+            Node::File { .. } => Err("Not a directory"),
+        }
+    }
+
     /// Check whether a path exists and is a directory.
     pub fn is_dir(&self, path: &str) -> bool {
         match self.resolve(path) {
