@@ -1756,3 +1756,19 @@ fn busybox_tools_work() {
     assert_eq!(f("ash"), "ash 3\n");
     assert!(only_kernel_left(), "{:?}", process::list());
 }
+
+#[test_case]
+fn sh_help_has_topics() {
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("help > /tmp/h0; help files > /tmp/h1; help ls > /tmp/h2; help cd > /tmp/h3; help other > /tmp/h4"), 0);
+    let index = file("/tmp/h0");
+    for topic in ["files", "text", "processes", "system", "users", "builtins", "syntax", "keys"] {
+        assert!(index.contains(&alloc::format!("  {} ", topic)), "{} missing:\n{}", topic, index);
+    }
+    assert!(index.lines().all(|l| l.len() <= 80), "fits the screen:\n{}", index);
+    assert!(file("/tmp/h1").contains("  ls ") && file("/tmp/h1").contains("  chmod "));
+    assert!(file("/tmp/h2").starts_with("ls: list a directory"));
+    assert!(file("/tmp/h3").starts_with("cd: shell builtin"));
+    assert_eq!(file("/tmp/h4").trim(), "", "every program in /bin has a category");
+    assert_eq!(sh("help nosuchthing 2> /dev/null"), 1);
+}

@@ -27,6 +27,7 @@ extern crate alloc;
 
 mod builtins;
 mod editor;
+mod help;
 mod expand;
 mod lex;
 mod parse;

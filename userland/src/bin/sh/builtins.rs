@@ -264,29 +264,7 @@ impl Shell {
                 self.run_cmd(&cmd);
                 self.status
             }
-            "help" => {
-                println!("PalladiumOS sh. Builtins:");
-                print_wrapped(BUILTINS.iter().copied());
-                println!("Programs in /bin (type the name to run one, e.g. ls -l /bin):");
-                let fd = open("/bin", O_RDONLY | O_DIRECTORY);
-                if fd >= 0 {
-                    let mut names: Vec<String> = Vec::new();
-                    let _ = for_each_entry(fd as i32, |e| {
-                        if !e.name.starts_with('.') && !e.name.starts_with("test_") {
-                            names.push(e.name.to_string());
-                        }
-                    });
-                    close(fd as i32);
-                    names.sort();
-                    print_wrapped(names.iter().map(String::as_str));
-                }
-                println!("Syntax: | ; && || & > >> < 2> 2>&1 'quotes' \"$VAR\" $(cmd) $((1+2)) * ? [ ]");
-                println!("Scripting: if/then/elif/else/fi, while/until/do/done, for/in, case/esac,");
-                println!("  name() {{ ... }}, test or [ ], read, break, continue, return, shift");
-                println!("Keys: Up/Down history, Tab completes, Ctrl-C interrupts, Ctrl-Z stops (fg/bg), Ctrl-D exits");
-                println!("Type 'exit' to return to the kernel shell.");
-                0
-            }
+            "help" => crate::help::help(args),
             _ => 127,
         }
     }

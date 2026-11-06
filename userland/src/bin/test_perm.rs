@@ -152,12 +152,20 @@ fn as_user() -> i32 {
         exit(1);
     }
     close(w);
+    // Read to the end: a pipe may deliver the line in pieces.
     let mut buf = [0u8; 32];
-    let n = read(r, &mut buf);
+    let mut n = 0usize;
+    loop {
+        let got = read(r, &mut buf[n..]);
+        if got <= 0 {
+            break;
+        }
+        n += got as usize;
+    }
     close(r);
     let mut status = 0;
     waitpid(pid as i32, &mut status, 0);
-    check!(n > 0 && &buf[..n as usize] == b"1000 0\n");
+    check!(&buf[..n] == b"1000 0\n");
 
     // ---- signals ----
     // An unprivileged process may signal its own processes, not root's.

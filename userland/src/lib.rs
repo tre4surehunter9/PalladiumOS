@@ -278,9 +278,43 @@ impl fmt::Write for Fd {
     }
 }
 
+/// Collects formatted output on the stack and writes it in one go, so a
+/// line from print!/println! reaches a pipe or the screen whole (writing
+/// each formatted piece separately let readers see half a line).
+struct LineBuf {
+    fd: i32,
+    buf: [u8; 512],
+    len: usize,
+}
+
+impl LineBuf {
+    fn flush(&mut self) -> fmt::Result {
+        let r = fmt::Write::write_str(&mut Fd(self.fd), unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) });
+        self.len = 0;
+        r
+    }
+}
+
+impl fmt::Write for LineBuf {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        if self.len + s.len() > self.buf.len() {
+            self.flush()?;
+            if s.len() > self.buf.len() {
+                return Fd(self.fd).write_str(s); // too big to collect
+            }
+        }
+        self.buf[self.len..self.len + s.len()].copy_from_slice(s.as_bytes());
+        self.len += s.len();
+        Ok(())
+    }
+}
+
 #[doc(hidden)]
 pub fn _print(fd: i32, args: fmt::Arguments) {
-    let _ = fmt::Write::write_fmt(&mut Fd(fd), args);
+    let mut out = LineBuf { fd, buf: [0; 512], len: 0 };
+    if fmt::Write::write_fmt(&mut out, args).is_ok() {
+        let _ = out.flush();
+    }
 }
 
 #[macro_export]
