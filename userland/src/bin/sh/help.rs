@@ -153,6 +153,12 @@ fn exists(path: &str) -> bool {
     stat(path).is_ok()
 }
 
+/// Is /bin/NAME a link to BusyBox (one of the tools it provides instead)?
+fn is_busybox_link(name: &str) -> bool {
+    let mut buf = [0u8; 64];
+    readlink(&alloc::format!("/bin/{}", name), &mut buf).is_ok_and(|t| t == "/bin/busybox")
+}
+
 /// The names in a directory (sorted).
 fn dir_names(path: &str) -> Vec<String> {
     let fd = open(path, O_RDONLY | O_DIRECTORY);
@@ -175,7 +181,10 @@ fn known(name: &str) -> bool {
 
 /// Programs in /bin that no category lists (tests are their own topic).
 fn others() -> Vec<String> {
-    dir_names("/bin").into_iter().filter(|n| !known(n) && !n.starts_with("test_")).collect()
+    dir_names("/bin")
+        .into_iter()
+        .filter(|n| !known(n) && !n.starts_with("test_") && !stat(&alloc::format!("/bin/{}", n)).is_ok_and(|s| s.is_dir()))
+        .collect()
 }
 
 fn index() {
@@ -274,11 +283,17 @@ fn busybox() {
         println!("BusyBox isn't installed (build it with tools/ports/busybox.sh).");
         return;
     }
-    let shadowed: Vec<&String> = tools.iter().filter(|t| exists(&alloc::format!("/bin/{}", t))).collect();
+    let ours = |t: &String| exists(&alloc::format!("/bin/{}", t)) && !is_busybox_link(t);
+    let shadowed: Vec<&String> = tools.iter().filter(|t| ours(t)).collect();
     println!("BusyBox tools in /usr/bin ({}):", tools.len());
-    print_wrapped(tools.iter().filter(|t| !shadowed.contains(t)).map(String::as_str));
-    println!("These have PalladiumOS versions that come first in PATH; use 'busybox NAME' for BusyBox's:");
+    print_wrapped(tools.iter().filter(|t| !ours(t)).map(String::as_str));
+    println!("PalladiumOS's versions come first for these ('busybox NAME' runs BusyBox's):");
     print_wrapped(shadowed.iter().map(|s| s.as_str()));
+    let replaced = dir_names("/bin/palladium");
+    if !replaced.is_empty() {
+        println!("BusyBox's versions are the defaults for these (originals: /bin/palladium):");
+        print_wrapped(replaced.iter().map(String::as_str));
+    }
     println!("Most tools explain themselves with --help (e.g. awk --help).");
 }
 

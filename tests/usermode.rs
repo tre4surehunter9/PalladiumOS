@@ -506,8 +506,19 @@ fn exec_and_fork_do_not_leak_memory() {
 
 #[test_case]
 fn programs_are_installed_in_bin() {
+    let busybox = programs::find("busybox").is_some();
     for (name, bytes) in programs::USER_PROGRAMS {
-        let path = alloc::format!("/bin/{}", name);
+        // With BusyBox, its better versions of some tools take their place
+        // (as links) and PalladiumOS's own move to /bin/palladium.
+        let replaced = busybox && programs::BUSYBOX_PREFERRED.contains(name);
+        let path = if replaced {
+            let link = alloc::format!("/bin/{}", name);
+            let (_, meta) = palladiumos::mounts::lstat(&link).expect("link missing");
+            assert_eq!(meta.kind, palladiumos::mounts::FileType::Symlink, "{} is a link to BusyBox", link);
+            alloc::format!("{}/{}", programs::REPLACED_DIR, name)
+        } else {
+            alloc::format!("/bin/{}", name)
+        };
         assert_eq!(filesystem::read_bytes(&path).as_deref(), Ok(*bytes), "{}", path);
     }
 }
@@ -1771,4 +1782,24 @@ fn sh_help_has_topics() {
     assert!(file("/tmp/h3").starts_with("cd: shell builtin"));
     assert_eq!(file("/tmp/h4").trim(), "", "every program in /bin has a category");
     assert_eq!(sh("help nosuchthing 2> /dev/null"), 1);
+}
+
+#[test_case]
+fn busybox_versions_are_the_defaults() {
+    if programs::find("busybox").is_none() {
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    let script = "cd /tmp && date +%Y > d1 && echo abcdef | head -c 3 > h && \
+        printf 'b 2\\na 3\\nc 1\\n' | sort -k2 -n > s && echo foo123bar | grep -oE '[0-9]+' > g && \
+        env GREETING=hi sh -c 'echo $GREETING' > e && readlink -f /bin/date > r && \
+        /bin/palladium/date +%s > d2";
+    assert_eq!(sh(script), 0);
+    assert_eq!(file("/tmp/d1").trim().len(), 4, "a year: {}", file("/tmp/d1"));
+    assert_eq!(file("/tmp/h"), "abc");
+    assert_eq!(file("/tmp/s"), "c 1\nb 2\na 3\n");
+    assert_eq!(file("/tmp/g"), "123\n");
+    assert_eq!(file("/tmp/e"), "hi\n");
+    assert_eq!(file("/tmp/r"), "/bin/busybox\n");
+    assert!(file("/tmp/d2").trim().parse::<u64>().is_ok(), "the original still runs");
 }

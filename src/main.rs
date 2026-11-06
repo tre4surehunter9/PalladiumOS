@@ -114,6 +114,13 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         mount_filesystems();
         let (count, bytes) = palladiumos::programs::install();
         boot_ok!("Installed {} programs in /bin ({} KiB)", count, bytes / 1024);
+        if palladiumos::programs::find("busybox").is_some() {
+            boot_ok!(
+                "Made {} BusyBox tools the defaults (originals: {})",
+                palladiumos::programs::BUSYBOX_PREFERRED.len(),
+                palladiumos::programs::REPLACED_DIR
+            );
+        }
         palladiumos::filesystem::init_default_files();
         boot_ok!("Checked the system files (/etc: accounts, os-release)");
 

@@ -11,21 +11,40 @@ pub static FLAT_PROGRAMS: &[(&str, &[u8])] = &[
     ("test_crash", include_bytes!("user_progs/crash.bin")),
 ];
 
+/// Tools where BusyBox's version is clearly better (more options, closer
+/// to POSIX). When BusyBox is bundled, /bin/NAME is a link to it and
+/// PalladiumOS's own version moves to /bin/palladium/NAME. The others (ls,
+/// ps, the account tools...) stay PalladiumOS's: they match its /proc,
+/// password format and tests.
+pub const BUSYBOX_PREFERRED: &[&str] =
+    &["cp", "date", "env", "grep", "head", "mv", "readlink", "sort", "tail", "touch", "uniq"];
+
+/// Where PalladiumOS's own versions of BUSYBOX_PREFERRED tools go.
+pub const REPLACED_DIR: &str = "/bin/palladium";
+
 /// Install every bundled program as /bin/<name>, so programs can be run by
-/// path (execve("/bin/ls", ...)) like on any Unix.
-/// Put every bundled program in /bin. Returns how many (and their size).
+/// path (execve("/bin/ls", ...)) like on any Unix. Returns how many (and
+/// their size).
 pub fn install() -> (usize, usize) {
     let _ = crate::filesystem::make_dir("/bin");
+    let busybox = find("busybox").is_some();
+    if busybox {
+        let _ = crate::filesystem::make_dir(REPLACED_DIR);
+    }
     let (mut count, mut bytes_total) = (0, 0);
     for (name, bytes) in USER_PROGRAMS.iter().chain(FLAT_PROGRAMS) {
         count += 1;
         bytes_total += bytes.len();
-        let path = alloc::format!("/bin/{}", name);
+        let replaced = busybox && BUSYBOX_PREFERRED.contains(name);
+        let path = if replaced { alloc::format!("{}/{}", REPLACED_DIR, name) } else { alloc::format!("/bin/{}", name) };
         crate::filesystem::write_bytes(&path, bytes).expect("can't write /bin entry");
         // Executable; su and passwd are setuid root (they switch users and
         // edit /etc/shadow on behalf of ordinary users).
         let mode = if matches!(*name, "su" | "passwd") { 0o4755 } else { 0o755 };
         let _ = crate::filesystem::chmod(&path, mode);
+        if replaced {
+            let _ = crate::mounts::symlink("/bin/busybox", &alloc::format!("/bin/{}", name));
+        }
     }
     (count, bytes_total)
 }
