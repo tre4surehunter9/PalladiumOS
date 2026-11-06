@@ -59,6 +59,16 @@ pub fn read_file(path: &str) -> Result<String, &'static str> {
     FS.lock().read_file(path)
 }
 
+/// Read a whole file as bytes (programs aren't UTF-8).
+pub fn read_bytes(path: &str) -> Result<Vec<u8>, &'static str> {
+    let fs = FS.lock();
+    let idx = fs.resolve(path).ok_or("File not found")?;
+    let size = fs.file_size(idx).ok_or("Is a directory")?;
+    let mut data = alloc::vec![0u8; size];
+    fs.read_at(idx, 0, &mut data)?;
+    Ok(data)
+}
+
 pub fn write_file(path: &str, contents: &str) -> Result<(), &'static str> {
     FS.lock().write_file(path, contents)
 }

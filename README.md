@@ -59,7 +59,7 @@ fn main(args: userlib::Args) -> i32 {
 }
 ```
 
-Programs are static ELF executables loaded at `0x40000000`, with a 64 KiB stack (plus a guard page) and the standard System V startup stack (`argc`, `argv`, `envp`, `auxv`).
+Programs are static ELF executables loaded at `0x8000000000`, with a 64 KiB stack (plus a guard page) and the standard System V startup stack (`argc`, `argv`, `envp`, `auxv`).
 Files named `test_*` are used by the test suite and hidden from `run`.
 
 ## Syscalls
@@ -76,19 +76,31 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 6 | lstat | yes (same as stat, no symlinks) |
 | 8 | lseek | yes |
 | 24 | sched_yield | yes |
-| 39 | getpid | yes (always 1) |
+| 39 | getpid | yes |
+| 57 | fork | yes (copies the whole address space) |
+| 58 | vfork | yes (same as fork, which POSIX allows) |
+| 59 | execve | yes (static ELF executables) |
 | 60 | exit | yes |
+| 61 | wait4 | yes (`WNOHANG`; no process groups or rusage yet) |
 | 63 | uname | yes |
 | 79 | getcwd | yes |
 | 80 | chdir | yes |
 | 83 | mkdir | yes |
 | 84 | rmdir | yes |
 | 87 | unlink | yes |
+| 110 | getppid | yes |
 | 217 | getdents64 | yes |
 | 231 | exit_group | yes |
 | 257 | openat | yes |
 
-Each program gets its own file descriptors (0, 1 and 2 are the console) and a copy of the shell's working directory. Files left open are closed when it exits.
+## Processes
+Every program runs as a process with its own address space, kernel stack, open files and working directory.
+The scheduler is preemptive round-robin: the timer switches between processes running in ring 3.
+Programs can start other programs with `fork` + `execve` and wait for them with `wait4` (`userlib::spawn` wraps this).
+The kernel shell is task 0: `run` starts a program as its child and waits for it (and anything it started) to finish.
+Orphaned processes are handed to the kernel, which reaps them. Up to 32 processes can exist at once.
+
+Programs live in `/bin` as ordinary files, installed at boot: `run ls` runs `/bin/ls`, and `run /path/to/program` runs any ELF file.
 
 ## Running the Tests
 `cargo test` boots each test kernel in QEMU (no window) and reports results over serial.

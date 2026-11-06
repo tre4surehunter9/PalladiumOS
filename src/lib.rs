@@ -113,6 +113,7 @@ pub mod elf;
 pub mod tty;
 pub mod programs;
 pub mod vfs;
+pub mod process;
 
 
 extern crate alloc;

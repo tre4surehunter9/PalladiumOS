@@ -22,8 +22,14 @@ pub const SEEK_END: u64 = 2;
 
 // errno values
 pub const ENOENT: isize = 2;
+pub const E2BIG: isize = 7;
+pub const ENOEXEC: isize = 8;
 pub const EIO: isize = 5;
 pub const EBADF: isize = 9;
+pub const ECHILD: isize = 10;
+pub const EAGAIN: isize = 11;
+pub const ENOMEM: isize = 12;
+pub const EACCES: isize = 13;
 pub const EFAULT: isize = 14;
 pub const EBUSY: isize = 16;
 pub const EEXIST: isize = 17;
@@ -42,6 +48,12 @@ pub const ENOTEMPTY: isize = 39;
 pub fn strerror(errno: isize) -> &'static str {
     match errno {
         ENOENT => "No such file or directory",
+        E2BIG => "Argument list too long",
+        ENOEXEC => "Exec format error",
+        ECHILD => "No child processes",
+        EAGAIN => "Resource temporarily unavailable",
+        ENOMEM => "Cannot allocate memory",
+        EACCES => "Permission denied",
         EIO => "Input/output error",
         EBADF => "Bad file descriptor",
         EFAULT => "Bad address",

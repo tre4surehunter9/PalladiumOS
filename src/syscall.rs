@@ -13,7 +13,7 @@
 use core::arch::global_asm;
 use x86_64::structures::idt::InterruptDescriptorTable;
 use x86_64::{PrivilegeLevel, VirtAddr};
-use crate::vfs;
+use crate::{process, vfs};
 
 // ---- Syscall numbers (Linux x86_64) ----
 pub const SYS_READ: u64 = 0;
@@ -26,7 +26,12 @@ pub const SYS_LSTAT: u64 = 6;
 pub const SYS_LSEEK: u64 = 8;
 pub const SYS_SCHED_YIELD: u64 = 24;
 pub const SYS_GETPID: u64 = 39;
+pub const SYS_FORK: u64 = 57;
+pub const SYS_VFORK: u64 = 58;
+pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
+pub const SYS_WAIT4: u64 = 61;
+pub const SYS_GETPPID: u64 = 110;
 pub const SYS_UNAME: u64 = 63;
 pub const SYS_GETCWD: u64 = 79;
 pub const SYS_CHDIR: u64 = 80;
@@ -39,8 +44,14 @@ pub const SYS_OPENAT: u64 = 257;
 
 // ---- errno values (Linux) ----
 pub const ENOENT: i64 = 2;
+pub const E2BIG: i64 = 7;
+pub const ENOEXEC: i64 = 8;
 pub const EIO: i64 = 5;
 pub const EBADF: i64 = 9;
+pub const ECHILD: i64 = 10;
+pub const EAGAIN: i64 = 11;
+pub const ENOMEM: i64 = 12;
+pub const EACCES: i64 = 13;
 pub const EFAULT: i64 = 14;
 pub const EBUSY: i64 = 16;
 pub const EEXIST: i64 = 17;
@@ -55,10 +66,19 @@ pub const ENAMETOOLONG: i64 = 36;
 pub const ENOSYS: i64 = 38;
 pub const ENOTEMPTY: i64 = 39;
 
-/// Registers saved by `syscall_entry`, lowest address first.
-/// Must match the push order in the assembly below (pushed in reverse).
+/// The full user register state saved on the kernel stack by
+/// `syscall_entry`, lowest address first: the 15 general-purpose registers
+/// we push (in reverse order), then the 5 words the CPU pushed on entry.
+/// fork() copies this to the child; execve() rewrites it.
 #[repr(C)]
+#[derive(Clone, Copy, Default)]
 pub struct SyscallFrame {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub rbp: u64,
+    pub rbx: u64,
     pub r11: u64,
     pub r10: u64,
     pub r9: u64,
@@ -68,14 +88,40 @@ pub struct SyscallFrame {
     pub rdx: u64,
     pub rcx: u64,
     pub rax: u64,
+    // pushed by the CPU
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
+
+impl SyscallFrame {
+    /// A frame that "returns" to ring 3 at `rip` with stack `rsp` and all
+    /// other registers zero (used for new programs).
+    pub fn new_user(rip: u64, rsp: u64) -> Self {
+        let (code_sel, data_sel) = crate::gdt::user_selectors();
+        SyscallFrame {
+            rip,
+            rsp,
+            // RPL 3 = "requested privilege level 3", the low 2 bits of the selector
+            cs: (code_sel.0 as u64) | 3,
+            ss: (data_sel.0 as u64) | 3,
+            rflags: 0x202, // IF set (+ reserved bit 1)
+            ..Default::default()
+        }
+    }
 }
 
 // The CPU has already pushed SS, RSP, RFLAGS, CS, RIP (40 bytes) onto the
-// 16-byte-aligned RSP0 stack. We push 9 more registers (72 bytes), for 112 bytes
-// in total, so RSP is still 16-byte aligned at the `call` as SysV requires.
-// rbx, rbp, r12-r15 are callee-saved, so syscall_dispatch keeps them intact.
+// 16-byte-aligned RSP0 stack. We push all 15 general-purpose registers
+// (120 bytes), 160 in total, so RSP is still 16-byte aligned at the `call`.
+//
+// `syscall_return` is also where brand-new processes start: the scheduler
+// builds a SyscallFrame on their kernel stack and "returns" through here.
 global_asm!(
     ".global syscall_entry",
+    ".global syscall_return",
     "syscall_entry:",
     "push rax",
     "push rcx",
@@ -86,8 +132,21 @@ global_asm!(
     "push r9",
     "push r10",
     "push r11",
+    "push rbx",
+    "push rbp",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
     "mov rdi, rsp",          // arg0 = &mut SyscallFrame
     "call syscall_dispatch",
+    "syscall_return:",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop rbp",
+    "pop rbx",
     "pop r11",
     "pop r10",
     "pop r9",
@@ -102,6 +161,12 @@ global_asm!(
 
 unsafe extern "C" {
     fn syscall_entry();
+    fn syscall_return();
+}
+
+/// Address new processes start at (see the asm above).
+pub fn syscall_return_addr() -> u64 {
+    syscall_return as *const () as u64
 }
 
 pub fn init_syscalls(idt: &mut InterruptDescriptorTable) {
@@ -149,10 +214,18 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_MKDIR => vfs::sys_mkdir(a1),
         SYS_RMDIR => vfs::sys_remove(a1, true),
         SYS_UNLINK => vfs::sys_remove(a1, false),
-        SYS_SCHED_YIELD => 0,
-        SYS_GETPID => 1, // only one process exists for now
+        SYS_SCHED_YIELD => {
+            process::yield_now();
+            0
+        }
+        SYS_GETPID => process::current_pid() as i64,
+        SYS_GETPPID => process::current_ppid() as i64,
         SYS_UNAME => sys_uname(a1),
-        SYS_EXIT | SYS_EXIT_GROUP => crate::usermode::exit_current(a1 as i32),
+        // vfork may be implemented as fork (POSIX allows it).
+        SYS_FORK | SYS_VFORK => process::fork(frame),
+        SYS_EXECVE => process::execve(frame, a1, a2, a3),
+        SYS_WAIT4 => process::sys_wait4(a1, a2, a3),
+        SYS_EXIT | SYS_EXIT_GROUP => process::exit_current(process::ExitReason::Exited(a1 as i32)),
         _ => -ENOSYS,
     };
 
@@ -182,9 +255,9 @@ fn sys_uname(buf: u64) -> i64 {
     0
 }
 
-/// Borrow a user buffer for reading, after checking that every page in it
+/// Borrow a user buffer for reading (pub: used by process.rs and vfs.rs), after checking that every page in it
 /// is mapped and user-accessible. Returns None for bad pointers.
-unsafe fn user_slice(ptr: u64, len: u64) -> Option<&'static [u8]> {
+pub unsafe fn user_slice(ptr: u64, len: u64) -> Option<&'static [u8]> {
     if !crate::memory::is_user_range(ptr, len, false) {
         return None;
     }
@@ -195,7 +268,7 @@ unsafe fn user_slice(ptr: u64, len: u64) -> Option<&'static [u8]> {
 }
 
 /// Same as `user_slice`, but the pages must also be writable.
-unsafe fn user_slice_mut(ptr: u64, len: u64) -> Option<&'static mut [u8]> {
+pub unsafe fn user_slice_mut(ptr: u64, len: u64) -> Option<&'static mut [u8]> {
     if !crate::memory::is_user_range(ptr, len, true) {
         return None;
     }

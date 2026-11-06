@@ -33,12 +33,16 @@ use crate::hlt_loop;
 
 
 extern "x86-interrupt" fn timer_interrupt_handler(
-    _stack_frame: InterruptStackFrame)
+    stack_frame: InterruptStackFrame)
 {
-
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    }
+    // Preemptive multitasking: only when we interrupted a user program, never
+    // in the middle of kernel code (which may hold locks).
+    if crate::usermode::from_user(stack_frame.code_segment) {
+        crate::process::preempt();
     }
 }
 
@@ -83,7 +87,7 @@ extern "x86-interrupt" fn page_fault_handler(
     if crate::usermode::from_user(stack_frame.code_segment) {
         println!("Segmentation fault (address {:?}, rip {:?})",
                  Cr2::read(), stack_frame.instruction_pointer);
-        crate::usermode::exit_current(128 + SIGSEGV);
+        crate::process::kill_current(SIGSEGV);
     }
 
     println!("EXCEPTION: PAGE FAULT");
@@ -99,7 +103,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 ) {
     if crate::usermode::from_user(stack_frame.code_segment) {
         println!("General protection fault (rip {:?})", stack_frame.instruction_pointer);
-        crate::usermode::exit_current(128 + SIGSEGV);
+        crate::process::kill_current(SIGSEGV);
     }
     panic!("EXCEPTION: GENERAL PROTECTION FAULT (error {:#x})\n{:#?}", error_code, stack_frame);
 }
@@ -107,7 +111,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     if crate::usermode::from_user(stack_frame.code_segment) {
         println!("Illegal instruction (rip {:?})", stack_frame.instruction_pointer);
-        crate::usermode::exit_current(128 + SIGILL);
+        crate::process::kill_current(SIGILL);
     }
     panic!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
 }

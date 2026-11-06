@@ -2,10 +2,10 @@
 //! File syscalls: the file descriptor table and the POSIX file API on top of
 //! the in-memory filesystem (Fdfs).
 //!
-//! Each running program gets a fresh `Process` state: fds 0/1/2 on the
-//! console, and a copy of the shell's working directory. A program's chdir
-//! doesn't affect the shell, and everything it leaves open is closed when it
-//! exits. (When real processes arrive, this state moves into the process.)
+//! Each process has its own `Files`: the fd table (0/1/2 start on the
+//! console) and working directory. A child gets a copy at fork, so a
+//! program's chdir doesn't affect its parent, and everything a process
+//! leaves open is closed when it exits.
 
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -57,30 +57,43 @@ enum OpenFile {
     Dir { node: usize, path: String, pos: usize },
 }
 
-struct Process {
+/// A process's open files and working directory. Copied by fork, kept
+/// across execve, and dropped (closing everything) when the process exits.
+#[derive(Clone)]
+pub struct Files {
     fds: Vec<Option<OpenFile>>,
-    cwd: String,
+    pub cwd: String,
 }
 
-static PROCESS: Mutex<Option<Process>> = Mutex::new(None);
-
-/// Set up fds and cwd for a program about to start.
-pub fn start_process(cwd: &str) {
-    let mut fds = vec![None; MAX_FDS];
-    fds[0] = Some(OpenFile::Console);
-    fds[1] = Some(OpenFile::Console);
-    fds[2] = Some(OpenFile::Console);
-    *PROCESS.lock() = Some(Process { fds, cwd: cwd.to_string() });
+impl Files {
+    /// fds 0, 1 and 2 on the console, and the given working directory.
+    pub fn new(cwd: &str) -> Self {
+        let mut fds = vec![None; MAX_FDS];
+        fds[0] = Some(OpenFile::Console);
+        fds[1] = Some(OpenFile::Console);
+        fds[2] = Some(OpenFile::Console);
+        Files { fds, cwd: cwd.to_string() }
+    }
 }
 
-/// Close everything the program left open.
-pub fn end_process() {
-    *PROCESS.lock() = None;
+fn with_process<T>(f: impl FnOnce(&mut Files) -> T) -> T {
+    crate::process::with_current_files(f)
 }
 
-fn with_process<T>(f: impl FnOnce(&mut Process) -> T) -> T {
-    let mut guard = PROCESS.lock();
-    f(guard.as_mut().expect("file syscall with no process"))
+/// Read a whole file into memory (for execve). Directories are EACCES.
+pub fn read_whole_file(path: &str) -> Result<Vec<u8>, i64> {
+    let abs = absolute(path);
+    let fs = FS.lock();
+    let idx = fs.resolve(&abs).ok_or(ENOENT)?;
+    let size = fs.file_size(idx).ok_or(EACCES)?;
+    let mut data = vec![0u8; size];
+    fs.read_at(idx, 0, &mut data).map_err(errno_for)?;
+    Ok(data)
+}
+
+/// Read a NUL-terminated string from user memory (paths, argv entries).
+pub fn user_string(ptr: u64) -> Result<String, i64> {
+    user_cstr(ptr)
 }
 
 /// Map Fdfs error messages to errno values.
@@ -100,6 +113,13 @@ pub fn errno_for(msg: &str) -> i64 {
 
 /// Read a NUL-terminated path from user memory, validating every page.
 fn user_path(ptr: u64) -> Result<String, i64> {
+    match user_cstr(ptr)? {
+        p if p.is_empty() => Err(ENOENT), // POSIX: empty path
+        p => Ok(p),
+    }
+}
+
+fn user_cstr(ptr: u64) -> Result<String, i64> {
     let mut bytes = Vec::new();
     let mut addr = ptr;
     loop {
@@ -111,9 +131,6 @@ fn user_path(ptr: u64) -> Result<String, i64> {
         while addr < page_end {
             let b = unsafe { *(addr as *const u8) };
             if b == 0 {
-                if bytes.is_empty() {
-                    return Err(ENOENT); // POSIX: empty path
-                }
                 return String::from_utf8(bytes).map_err(|_| EINVAL);
             }
             bytes.push(b);
@@ -131,7 +148,7 @@ fn absolute(path: &str) -> String {
     filesystem::normalize(&cwd, path)
 }
 
-fn alloc_fd(p: &mut Process, file: OpenFile) -> Result<usize, i64> {
+fn alloc_fd(p: &mut Files, file: OpenFile) -> Result<usize, i64> {
     let fd = p.fds.iter().position(|f| f.is_none()).ok_or(EMFILE)?;
     p.fds[fd] = Some(file);
     Ok(fd)

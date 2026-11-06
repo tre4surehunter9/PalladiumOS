@@ -6,29 +6,36 @@ use x86_64::structures::gdt::{GlobalDescriptorTable, Descriptor};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
-lazy_static! {
-    static ref TSS: TaskStateSegment = {
-        let mut tss = TaskStateSegment::new();
+const STACK_SIZE: usize = 4096 * 5;
+static mut DOUBLE_FAULT_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+/// Kernel stack used for interrupts from ring 3 before any process exists.
+static mut BOOT_RING0_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
-        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-            const STACK_SIZE: usize = 4096 * 5;
-            static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-            let stack_start = VirtAddr::from_ptr(&raw const STACK);
-            let stack_end = stack_start + STACK_SIZE;
-            stack_end
-        };
+/// The TSS lives in a static (not a lazy_static) because the scheduler
+/// rewrites RSP0 on every switch: the CPU loads RSP0 when an interrupt or
+/// syscall arrives from ring 3, so it must point at the running process's
+/// kernel stack.
+static mut TSS: TaskStateSegment = TaskStateSegment::new();
 
-        tss.privilege_stack_table[0] = {
-            const STACK_SIZE: usize = 4096 * 5;
-            static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-            let stack_start = VirtAddr::from_ptr(&raw const STACK);
-            stack_start + STACK_SIZE
-        };
-
-        tss
-    };
+fn tss() -> &'static TaskStateSegment {
+    unsafe {
+        let tss = &mut *(&raw mut TSS);
+        if tss.privilege_stack_table[0].is_null() {
+            tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] =
+                VirtAddr::from_ptr(&raw const DOUBLE_FAULT_STACK) + STACK_SIZE;
+            tss.privilege_stack_table[0] = VirtAddr::from_ptr(&raw const BOOT_RING0_STACK) + STACK_SIZE;
+        }
+        &*(&raw const TSS)
+    }
 }
 
+/// Set the stack the CPU switches to on interrupts/syscalls from ring 3.
+pub fn set_kernel_stack(top: VirtAddr) {
+    unsafe {
+        // The TSS is packed, so this field isn't 8-byte aligned.
+        core::ptr::write_unaligned(&raw mut (*(&raw mut TSS)).privilege_stack_table[0], top);
+    }
+}
 
 pub fn init() {
     use x86_64::instructions::tables::load_tss;
@@ -69,7 +76,7 @@ lazy_static! {
         let data_selector = gdt.add_entry(Descriptor::kernel_data_segment());
         let user_code_selector = gdt.add_entry(Descriptor::user_code_segment());
         let user_data_selector = gdt.add_entry(Descriptor::user_data_segment());
-        let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
+        let tss_selector = gdt.add_entry(Descriptor::tss_segment(tss()));
         (gdt, Selectors {
             code_selector,
          data_selector,

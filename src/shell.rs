@@ -226,13 +226,22 @@ fn cmd_run(args: &str) -> bool {
         return false;
     };
 
-    let Some(bytes) = crate::programs::find(name) else {
-        println!("run: no such program '{}'", name);
-        return false;
+    // Programs are files: "ls" means /bin/ls, a name with a '/' is a path.
+    let path = if name.contains('/') {
+        filesystem::resolve_path(name)
+    } else {
+        alloc::format!("/bin/{}", name)
+    };
+    let bytes = match filesystem::read_bytes(&path) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            println!("run: no such program '{}'", name);
+            return false;
+        }
     };
 
     let argv: Vec<&str> = core::iter::once(name).chain(words).collect();
-    match crate::usermode::run(bytes, &argv) {
+    match crate::usermode::run(&bytes, &argv) {
         Ok(0) => true,
         Ok(status) => {
             println!("[{} exited with status {}]", name, status);

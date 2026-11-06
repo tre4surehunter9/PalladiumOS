@@ -8,6 +8,6 @@ use userlib::println;
 userlib::entry!(main);
 
 fn main(_args: userlib::Args) -> i32 {
-    println!("Hello from Rust in ring 3! (pid {})", userlib::getpid());
+    println!("Hello from Rust in ring 3! (pid {}, parent {})", userlib::getpid(), userlib::getppid());
     0
 }

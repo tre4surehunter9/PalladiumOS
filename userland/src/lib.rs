@@ -29,7 +29,11 @@ pub mod sys {
     pub const LSEEK: u64 = 8;
     pub const SCHED_YIELD: u64 = 24;
     pub const GETPID: u64 = 39;
+    pub const FORK: u64 = 57;
+    pub const EXECVE: u64 = 59;
     pub const EXIT: u64 = 60;
+    pub const WAIT4: u64 = 61;
+    pub const GETPPID: u64 = 110;
     pub const UNAME: u64 = 63;
     pub const GETCWD: u64 = 79;
     pub const CHDIR: u64 = 80;
@@ -60,6 +64,8 @@ pub mod sys {
 
 pub mod fs;
 pub use fs::*;
+pub mod process;
+pub use process::*;
 
 pub const STDIN: i32 = 0;
 pub const STDOUT: i32 = 1;

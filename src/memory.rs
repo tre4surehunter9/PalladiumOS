@@ -200,40 +200,6 @@ pub fn phys_ptr(phys: PhysAddr) -> *mut u8 {
 
 
 
-pub fn map_user_vga(mapper: &mut impl Mapper<Size4KiB>) {
-    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(0xb8000));
-    unsafe {
-        mapper
-        .update_flags(
-            page,
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-        )
-        .expect("update_flags failed")
-        .flush();
-    }
-}
-
-pub fn ensure_user_accessible(addr: VirtAddr, physical_memory_offset: VirtAddr) {
-    use x86_64::registers::control::Cr3;
-    use x86_64::structures::paging::PageTableFlags as Flags;
-
-    let (level_4_frame, _) = Cr3::read();
-    let table_indexes = [addr.p4_index(), addr.p3_index(), addr.p2_index()];
-    let mut frame = level_4_frame;
-
-    for &index in &table_indexes {
-        let virt = physical_memory_offset + frame.start_address().as_u64();
-        let table_ptr: *mut PageTable = virt.as_mut_ptr();
-        let table = unsafe { &mut *table_ptr };
-        let entry = &mut table[index];
-
-        let flags = entry.flags() | Flags::USER_ACCESSIBLE;
-        entry.set_flags(flags);
-
-        frame = entry.frame().expect("expected a table frame, found huge page or missing entry");
-    }
-}
-
 /// Highest address (exclusive) of the lower, user half of the address space.
 pub const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
 
@@ -293,4 +259,159 @@ fn is_user_page(addr: VirtAddr, write: bool) -> bool {
         table_phys = entry.addr().as_u64();
     }
     true
+}
+
+// ---- per-process address spaces ----
+//
+// Every process has its own level-4 page table. The entries the kernel uses
+// (kernel image, heap, physical memory map, ...) are copied from the kernel's
+// table, so they point at the same lower-level tables and the kernel is
+// mapped identically in every process. All other lower-half entries are
+// "user slots": they belong to the process alone and are freed with it.
+
+use x86_64::structures::paging::{OffsetPageTable as Opt, PageTableIndex};
+
+/// Physical address of the kernel's own level-4 table (set by init_address_spaces).
+static KERNEL_P4: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Remember the boot page table as the kernel's. Call once after PHYS_MEM_OFFSET is set.
+pub fn init_address_spaces() {
+    use x86_64::registers::control::Cr3;
+    let (frame, _) = Cr3::read();
+    KERNEL_P4.store(frame.start_address().as_u64(), core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn kernel_p4() -> PhysFrame {
+    PhysFrame::containing_address(PhysAddr::new(KERNEL_P4.load(core::sync::atomic::Ordering::Relaxed)))
+}
+
+fn table_at(frame: PhysFrame) -> &'static mut PageTable {
+    unsafe { &mut *(phys_to_virt(frame.start_address().as_u64()) as *mut PageTable) }
+}
+
+/// True if level-4 index `i` may hold user mappings (lower half, unused by the kernel).
+pub fn is_user_slot(i: usize) -> bool {
+    i < 256 && table_at(kernel_p4())[i].is_unused()
+}
+
+/// A page-table mapper for the address space rooted at `p4`
+/// (it doesn't have to be the active one).
+pub fn mapper_for(p4: PhysFrame) -> Opt<'static> {
+    let offset = VirtAddr::new(PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Relaxed));
+    unsafe { Opt::new(table_at(p4), offset) }
+}
+
+/// Create an empty address space: only the kernel's mappings.
+pub fn new_address_space(frames: &mut BootInfoFrameAllocator) -> Option<PhysFrame> {
+    let frame = frames.allocate_frame()?;
+    zero_frame(frame);
+    let new = table_at(frame);
+    let kernel = table_at(kernel_p4());
+    for i in 0..512 {
+        if !kernel[i].is_unused() {
+            new[i] = kernel[i].clone();
+        }
+    }
+    Some(frame)
+}
+
+/// Free every user page and page table of an address space, then the
+/// level-4 table itself. It must not be the active address space.
+pub fn free_address_space(p4: PhysFrame, frames: &mut BootInfoFrameAllocator) {
+    fn free_table(table: PhysFrame, level: u8, frames: &mut BootInfoFrameAllocator) {
+        for entry in table_at(table).iter() {
+            if entry.is_unused() {
+                continue;
+            }
+            let child = PhysFrame::containing_address(entry.addr());
+            if level > 1 {
+                free_table(child, level - 1, frames);
+            } else {
+                unsafe { frames.deallocate_frame(child) };
+            }
+        }
+        unsafe { frames.deallocate_frame(table) };
+    }
+
+    let root = table_at(p4);
+    for i in 0..256 {
+        if is_user_slot(i) && !root[i].is_unused() {
+            free_table(PhysFrame::containing_address(root[i].addr()), 3, frames);
+        }
+    }
+    unsafe { frames.deallocate_frame(p4) };
+}
+
+/// Call `f(virtual address, frame, flags)` for every user page in an address space.
+fn for_each_user_page(p4: PhysFrame, mut f: impl FnMut(u64, PhysFrame, PageTableFlags) -> Result<(), &'static str>) -> Result<(), &'static str> {
+    let l4 = table_at(p4);
+    for i4 in 0..256 {
+        if !is_user_slot(i4) || l4[i4].is_unused() {
+            continue;
+        }
+        let l3 = table_at(PhysFrame::containing_address(l4[i4].addr()));
+        for i3 in 0..512 {
+            if l3[i3].is_unused() {
+                continue;
+            }
+            let l2 = table_at(PhysFrame::containing_address(l3[i3].addr()));
+            for i2 in 0..512 {
+                if l2[i2].is_unused() {
+                    continue;
+                }
+                let l1 = table_at(PhysFrame::containing_address(l2[i2].addr()));
+                for i1 in 0..512 {
+                    let entry = &l1[i1];
+                    if entry.is_unused() {
+                        continue;
+                    }
+                    let va = ((i4 as u64) << 39) | ((i3 as u64) << 30) | ((i2 as u64) << 21) | ((i1 as u64) << 12);
+                    f(va, PhysFrame::containing_address(entry.addr()), entry.flags())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Make a full copy of an address space (for fork): every user page is
+/// duplicated into a new frame with the same permissions.
+pub fn copy_address_space(src: PhysFrame, frames: &mut BootInfoFrameAllocator) -> Result<PhysFrame, &'static str> {
+    let dst = new_address_space(frames).ok_or("out of memory")?;
+    let mut mapper = mapper_for(dst);
+    let keep = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
+
+    let result = for_each_user_page(src, |va, frame, flags| {
+        let copy = frames.allocate_frame().ok_or("out of memory")?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                phys_ptr(frame.start_address()) as *const u8,
+                phys_ptr(copy.start_address()),
+                4096,
+            );
+            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+            match mapper.map_to(page, copy, flags & keep, frames) {
+                // The new address space is not active, so no TLB flush is needed.
+                Ok(flush) => flush.ignore(),
+                Err(_) => {
+                    frames.deallocate_frame(copy);
+                    return Err("map_to failed");
+                }
+            }
+        }
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => Ok(dst),
+        Err(e) => {
+            free_address_space(dst, frames);
+            Err(e)
+        }
+    }
+}
+
+/// Level-4 index of a virtual address.
+pub fn p4_index(addr: u64) -> usize {
+    usize::from(PageTableIndex::new(((addr >> 39) & 0x1ff) as u16))
 }

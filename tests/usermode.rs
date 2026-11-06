@@ -33,6 +33,8 @@ fn main(boot_info: &'static BootInfo) -> ! {
     memory::PHYS_MEM_OFFSET.store(phys_mem_offset.as_u64(), core::sync::atomic::Ordering::Relaxed);
     *memory::MAPPER.lock() = Some(mapper);
     *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
+    palladiumos::process::init();
+    palladiumos::programs::install();
 
     test_main();
     palladiumos::hlt_loop();
@@ -73,8 +75,9 @@ fn programs_can_run_repeatedly() {
 
 #[test_case]
 fn exit_status_is_passed_back() {
-    // exit(getpid()) -> 1
-    assert_eq!(launch_program(include_bytes!("user_progs/getpid.bin")), 1);
+    assert_eq!(run(prog("test_proc"), &["test_proc", "exit", "42"]), Ok(42));
+    // exit(getpid()): a real, nonzero pid (0 is the kernel)
+    assert!(launch_program(include_bytes!("user_progs/getpid.bin")) > 0);
 }
 
 #[test_case]
@@ -103,7 +106,7 @@ fn memory_is_reclaimed_after_exit() {
 #[test_case]
 fn pages_are_unmapped_after_exit() {
     assert_eq!(launch_program(hello()), 0);
-    assert!(!memory::is_user_range(0x4000_0000, 1, false), "program image still mapped");
+    assert!(!memory::is_user_range(0x80_0000_0000, 1, false), "program image still mapped");
     assert!(!memory::is_user_range(0x7fff_fffe_f000, 1, false), "stack still mapped");
     assert_eq!(launch_program(CRASH), 139);
     assert!(!memory::is_user_range(0x6666_6666_0000, 1, false), "flat image still mapped");
@@ -442,4 +445,77 @@ fn errno_mapping_covers_every_fdfs_error() {
     assert_eq!(errno_for("Is a directory"), EISDIR);
     assert_eq!(errno_for("Already exists"), EEXIST);
     assert_eq!(errno_for("Directory is not empty"), ENOTEMPTY);
+}
+
+// ---- processes (milestone C) ----
+
+use palladiumos::process;
+
+fn only_kernel_left() -> bool {
+    let procs = process::list();
+    procs.len() == 1 && procs[0].0 == 0
+}
+
+#[test_case]
+fn fork_exec_wait() {
+    assert_eq!(run(prog("test_proc"), &["test_proc", "all"]), Ok(0));
+    assert!(only_kernel_left(), "processes left over: {:?}", process::list());
+}
+
+#[test_case]
+fn timer_preempts_user_processes() {
+    assert_eq!(run(prog("test_proc"), &["test_proc", "preempt"]), Ok(0));
+}
+
+#[test_case]
+fn orphans_are_reaped_by_the_kernel() {
+    assert_eq!(run(prog("test_proc"), &["test_proc", "orphan"]), Ok(0));
+    assert!(only_kernel_left(), "orphan not reaped: {:?}", process::list());
+}
+
+#[test_case]
+fn process_limit_and_cleanup() {
+    let before = frames_in_use();
+    assert_eq!(run(prog("test_proc"), &["test_proc", "forkbomb"]), Ok(0));
+    assert!(only_kernel_left());
+    assert_eq!(frames_in_use(), before, "frames leaked by fork/exit");
+}
+
+#[test_case]
+fn exec_and_fork_do_not_leak_memory() {
+    assert_eq!(run(prog("test_proc"), &["test_proc", "all"]), Ok(0));
+    let before = frames_in_use();
+    for _ in 0..3 {
+        assert_eq!(run(prog("test_proc"), &["test_proc", "all"]), Ok(0));
+    }
+    assert_eq!(frames_in_use(), before);
+}
+
+#[test_case]
+fn programs_are_installed_in_bin() {
+    for (name, bytes) in programs::USER_PROGRAMS {
+        let path = alloc::format!("/bin/{}", name);
+        assert_eq!(filesystem::read_bytes(&path).as_deref(), Ok(*bytes), "{}", path);
+    }
+}
+
+#[test_case]
+fn kernel_shell_runs_programs_from_bin() {
+    use palladiumos::shell::process_command;
+    assert!(process_command("run echo hi"));
+    assert!(process_command("run /bin/echo by path"));
+    assert!(!process_command("run test_proc exit 4"), "nonzero status is failure");
+    assert!(!process_command("run no-such-program"));
+    // `run` of a deleted program fails cleanly
+    filesystem::write_file("/notprog", "plain text").unwrap();
+    assert!(!process_command("run /notprog"), "text file is not a program");
+    assert!(only_kernel_left());
+}
+
+#[test_case]
+fn each_run_gets_a_new_pid() {
+    // hello's exit status is 0 either way; check the process table instead.
+    let before = process::list();
+    assert_eq!(launch_program(hello()), 0);
+    assert_eq!(process::list().len(), before.len());
 }

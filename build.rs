@@ -10,9 +10,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Load address of user programs. Must not overlap the kernel (0x200000..),
-/// the heap, or the bootloader's mappings; see src/usermode.rs.
-const USER_IMAGE_BASE: &str = "0x40000000";
+/// Load address of user programs: 512 GiB, the second level-4 page-table
+/// slot. Slot 0 holds the kernel (0x200000), and each process's user slots
+/// must be separate from the kernel's (see memory::is_user_slot).
+const USER_IMAGE_BASE: &str = "0x8000000000";
 
 fn main() {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -43,8 +44,12 @@ fn main() {
             cmd.env_remove(key);
         }
     }
+    // Code is position-independent (RIP-relative), which works at any
+    // address; static relocations would limit programs to the low 2 GiB.
+    // The result is still a static, non-PIE executable at USER_IMAGE_BASE.
     let rustflags = [
-        "-Crelocation-model=static".to_string(),
+        "-Crelocation-model=pic".to_string(),
+        "-Clink-arg=--no-pie".to_string(),
         format!("-Clink-arg=--image-base={}", USER_IMAGE_BASE),
     ];
     cmd.env("CARGO_ENCODED_RUSTFLAGS", rustflags.join("\x1f"));
