@@ -68,6 +68,9 @@ pub enum State {
     Waiting,
     /// In nanosleep until the timer reaches `Process::wake_at`.
     Sleeping,
+    /// Waiting for something identified by a key (e.g. a pipe to have data
+    /// or room); `wake(key)` makes it Ready again.
+    Blocked(u64),
     Zombie(ExitReason),
 }
 
@@ -240,9 +243,12 @@ pub fn schedule() {
             let cur = current_pid();
             deliver_ctrl_c(&mut table);
             let now = ticks();
+            let woken = core::mem::take(&mut *WAKE_QUEUE.lock());
             for p in table.values_mut() {
-                if p.state == State::Sleeping && now >= p.wake_at {
-                    p.state = State::Ready;
+                match p.state {
+                    State::Sleeping if now >= p.wake_at => p.state = State::Ready,
+                    State::Blocked(key) if woken.contains(&key) => p.state = State::Ready,
+                    _ => {}
                 }
             }
             let next = table
@@ -322,7 +328,7 @@ pub fn exit_current(reason: ExitReason) -> ! {
         let ppid = {
             let p = table.get_mut(&cur).unwrap();
             p.state = State::Zombie(reason);
-            p.files = Files::new("/"); // closes everything
+            p.files = Files::empty(); // closes everything (pipe ends included)
             p.ppid
         };
         for p in table.values_mut() {
@@ -517,6 +523,7 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
     let old_p4 = {
         let mut table = TABLE.lock();
         let p = table.get_mut(&current_pid()).unwrap();
+        p.files.close_on_exec();
         p.name = basename(&path);
         p.brk = HEAP_BASE; // the new program starts with an empty heap
         core::mem::replace(&mut p.p4, image.p4)
@@ -703,6 +710,7 @@ pub fn sys_brk(addr: u64) -> i64 {
 
 pub const SIGHUP: i32 = 1;
 pub const SIGINT: i32 = 2;
+pub const SIGPIPE: i32 = 13;
 pub const SIGKILL: i32 = 9;
 pub const SIGSTOP: i32 = 19;
 const MAX_SIGNAL: i32 = 64;
@@ -758,7 +766,7 @@ fn signal_locked(table: &mut BTreeMap<u64, Box<Process>>, pid: u64, sig: i32) ->
         return true;
     }
     p.pending |= bit(sig);
-    if matches!(p.state, State::Waiting | State::Sleeping) {
+    if matches!(p.state, State::Waiting | State::Sleeping | State::Blocked(_)) {
         p.state = State::Ready; // so it notices
     }
     true
@@ -942,4 +950,41 @@ pub fn sys_clock_gettime(clock: u64, tp: u64) -> i64 {
     out[0..8].copy_from_slice(&((ns / 1_000_000_000) as i64).to_le_bytes());
     out[8..16].copy_from_slice(&((ns % 1_000_000_000) as i64).to_le_bytes());
     0
+}
+
+// ---- blocking on events ----
+
+/// Keys to wake up, collected until the scheduler next runs. A queue (with
+/// its own lock) instead of waking directly, so it's safe to call from
+/// anywhere, including while the process table is locked (e.g. a pipe end
+/// closed as a process exits).
+static WAKE_QUEUE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// Wake every process blocked on `key`.
+pub fn wake(key: u64) {
+    let mut queue = WAKE_QUEUE.lock();
+    if !queue.contains(&key) {
+        queue.push(key);
+    }
+}
+
+/// Sleep until someone calls `wake(key)` (or a signal arrives). Callers
+/// re-check their condition afterwards.
+pub fn block_on(key: u64) {
+    {
+        let mut table = TABLE.lock();
+        let cur = current_pid();
+        if has_pending_locked(&table, cur) {
+            return;
+        }
+        table.get_mut(&cur).unwrap().state = State::Blocked(key);
+    }
+    schedule();
+}
+
+/// Send a signal to the current process (e.g. SIGPIPE).
+pub fn raise(sig: i32) {
+    let mut table = TABLE.lock();
+    let cur = current_pid();
+    signal_locked(&mut table, cur, sig);
 }

@@ -13,6 +13,7 @@ pub const O_EXCL: u64 = 0o200;
 pub const O_TRUNC: u64 = 0o1000;
 pub const O_APPEND: u64 = 0o2000;
 pub const O_DIRECTORY: u64 = 0o200000;
+pub const O_CLOEXEC: u64 = 0o2000000;
 
 pub const AT_FDCWD: i32 = -100;
 
@@ -42,6 +43,7 @@ pub const EMFILE: isize = 24;
 pub const ENOTTY: isize = 25;
 pub const EFBIG: isize = 27;
 pub const ESPIPE: isize = 29;
+pub const EPIPE: isize = 32;
 pub const ERANGE: isize = 34;
 pub const ENAMETOOLONG: isize = 36;
 pub const ENOSYS: isize = 38;
@@ -71,6 +73,7 @@ pub fn strerror(errno: isize) -> &'static str {
         ENOTTY => "Inappropriate ioctl for device",
         EFBIG => "File too large",
         ESPIPE => "Illegal seek",
+        EPIPE => "Broken pipe",
         ERANGE => "Result too large",
         ENAMETOOLONG => "File name too long",
         ENOSYS => "Function not implemented",
@@ -235,6 +238,29 @@ pub fn for_each_entry(fd: i32, mut f: impl FnMut(&DirEntry)) -> Result<(), isize
             f(&entry);
         }
     }
+}
+
+/// pipe(2): returns (read end, write end).
+pub fn pipe() -> Result<(i32, i32), isize> {
+    pipe2(0)
+}
+
+/// pipe2(2), e.g. with O_CLOEXEC.
+pub fn pipe2(flags: u64) -> Result<(i32, i32), isize> {
+    let mut fds = [0i32; 2];
+    let r = unsafe { syscall3(sys::PIPE2, fds.as_mut_ptr() as u64, flags, 0) } as isize;
+    if r < 0 { Err(r) } else { Ok((fds[0], fds[1])) }
+}
+
+pub const F_DUPFD: u64 = 0;
+pub const F_GETFD: u64 = 1;
+pub const F_SETFD: u64 = 2;
+pub const F_GETFL: u64 = 3;
+pub const FD_CLOEXEC: u64 = 1;
+
+/// fcntl(2)
+pub fn fcntl(fd: i32, cmd: u64, arg: u64) -> isize {
+    unsafe { syscall3(sys::FCNTL, fd as u64, cmd, arg) as isize }
 }
 
 /// Write all of `data` to `fd`, retrying short writes.

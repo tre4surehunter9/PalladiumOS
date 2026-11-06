@@ -2,17 +2,26 @@
 //! File syscalls: the file descriptor table and the POSIX file API on top of
 //! the in-memory filesystem (Fdfs).
 //!
-//! Each process has its own `Files`: the fd table (0/1/2 start on the
-//! console) and working directory. A child gets a copy at fork, so a
-//! program's chdir doesn't affect its parent, and everything a process
-//! leaves open is closed when it exits.
+//! Each process has its own `Files`: the fd table and working directory.
+//! An fd points to an *open file description* (`Handle`): the open file
+//! and its offset. Like POSIX, descriptions are shared: fork gives the
+//! child the same descriptions, and dup/dup2 make two fds share one, so
+//! they share the file offset. (That's what makes `(echo a; echo b) > f`
+//! and pipes work.) Each fd also has its own close-on-exec flag.
+//!
+//! A child gets a copy of the table at fork, so a program's chdir doesn't
+//! affect its parent; everything a process leaves open is closed when it
+//! exits.
 
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use spin::Mutex;
 
 use crate::fdfs::Node;
 use crate::filesystem::{self, FS};
+use crate::pipe::{self, PipeReader, PipeWriter};
 use crate::syscall::*;
 
 pub const MAX_FDS: usize = 64;
@@ -30,6 +39,7 @@ pub const O_EXCL: u64 = 0o200;
 pub const O_TRUNC: u64 = 0o1000;
 pub const O_APPEND: u64 = 0o2000;
 pub const O_DIRECTORY: u64 = 0o200000;
+pub const O_CLOEXEC: u64 = 0o2000000;
 
 pub const AT_FDCWD: i64 = -100;
 
@@ -37,7 +47,17 @@ pub const SEEK_SET: u64 = 0;
 pub const SEEK_CUR: u64 = 1;
 pub const SEEK_END: u64 = 2;
 
+// fcntl commands
+const F_DUPFD: u64 = 0;
+const F_GETFD: u64 = 1;
+const F_SETFD: u64 = 2;
+const F_GETFL: u64 = 3;
+const F_SETFL: u64 = 4;
+const F_DUPFD_CLOEXEC: u64 = 1030;
+const FD_CLOEXEC: u64 = 1;
+
 // st_mode bits
+const S_IFIFO: u32 = 0o010000;
 const S_IFCHR: u32 = 0o020000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
@@ -46,20 +66,41 @@ const S_IFREG: u32 = 0o100000;
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 
-#[derive(Clone)]
-enum OpenFile {
+enum Kind {
     /// The console: reads come from the TTY, writes go to the screen.
     Console,
-    File { node: usize, offset: usize, readable: bool, writable: bool, append: bool },
-    /// `pos` counts entries already returned by getdents64 ("." and ".." first).
-    Dir { node: usize, path: String, pos: usize },
+    File { node: usize, readable: bool, writable: bool, append: bool },
+    Dir { node: usize, path: String },
+    PipeRead(PipeReader),
+    PipeWrite(PipeWriter),
 }
 
-/// A process's open files and working directory. Copied by fork, kept
-/// across execve, and dropped (closing everything) when the process exits.
+/// An open file description.
+struct Description {
+    kind: Kind,
+    /// Byte offset for files; for directories, the number of entries
+    /// getdents64 has returned ("." and ".." first).
+    offset: usize,
+}
+
+type Handle = Arc<Mutex<Description>>;
+
+fn handle(kind: Kind) -> Handle {
+    Arc::new(Mutex::new(Description { kind, offset: 0 }))
+}
+
+#[derive(Clone)]
+struct Slot {
+    handle: Handle,
+    cloexec: bool,
+}
+
+/// A process's open files and working directory. Copied by fork (sharing
+/// the descriptions), kept across execve except close-on-exec fds, and
+/// dropped (closing everything) when the process exits.
 #[derive(Clone)]
 pub struct Files {
-    fds: Vec<Option<OpenFile>>,
+    fds: Vec<Option<Slot>>,
     pub cwd: String,
 }
 
@@ -67,10 +108,25 @@ impl Files {
     /// fds 0, 1 and 2 on the console, and the given working directory.
     pub fn new(cwd: &str) -> Self {
         let mut fds = vec![None; MAX_FDS];
-        fds[0] = Some(OpenFile::Console);
-        fds[1] = Some(OpenFile::Console);
-        fds[2] = Some(OpenFile::Console);
+        let console = handle(Kind::Console);
+        for slot in &mut fds[..3] {
+            *slot = Some(Slot { handle: console.clone(), cloexec: false });
+        }
         Files { fds, cwd: cwd.to_string() }
+    }
+
+    /// A table with nothing open (for exiting processes).
+    pub fn empty() -> Self {
+        Files { fds: vec![None; MAX_FDS], cwd: "/".to_string() }
+    }
+
+    /// Close the close-on-exec fds (done by execve).
+    pub fn close_on_exec(&mut self) {
+        for slot in &mut self.fds {
+            if slot.as_ref().is_some_and(|s| s.cloexec) {
+                *slot = None;
+            }
+        }
     }
 }
 
@@ -146,10 +202,15 @@ fn absolute(path: &str) -> String {
     filesystem::normalize(&cwd, path)
 }
 
-fn alloc_fd(p: &mut Files, file: OpenFile) -> Result<usize, i64> {
-    let fd = p.fds.iter().position(|f| f.is_none()).ok_or(EMFILE)?;
-    p.fds[fd] = Some(file);
+/// Put `handle` in the lowest free fd at or above `min`.
+fn alloc_fd_from(p: &mut Files, handle: Handle, cloexec: bool, min: usize) -> Result<usize, i64> {
+    let fd = (min..MAX_FDS).find(|&i| p.fds[i].is_none()).ok_or(EMFILE)?;
+    p.fds[fd] = Some(Slot { handle, cloexec });
     Ok(fd)
+}
+
+fn alloc_fd(p: &mut Files, handle: Handle, cloexec: bool) -> Result<usize, i64> {
+    alloc_fd_from(p, handle, cloexec, 0)
 }
 
 fn open_path(abs: &str, flags: u64) -> i64 {
@@ -175,11 +236,11 @@ fn open_path(abs: &str, flags: u64) -> i64 {
         None => return -ENOENT,
     };
 
-    let file = if fs.node(node).is_some_and(Node::is_dir) {
+    let kind = if fs.node(node).is_some_and(Node::is_dir) {
         if writable {
             return -EISDIR;
         }
-        OpenFile::Dir { node, path: abs.to_string(), pos: 0 }
+        Kind::Dir { node, path: abs.to_string() }
     } else {
         if flags & O_DIRECTORY != 0 {
             return -ENOTDIR;
@@ -187,11 +248,11 @@ fn open_path(abs: &str, flags: u64) -> i64 {
         if flags & O_TRUNC != 0 && writable {
             let _ = fs.truncate(node, 0);
         }
-        OpenFile::File { node, offset: 0, readable, writable, append: flags & O_APPEND != 0 }
+        Kind::File { node, readable, writable, append: flags & O_APPEND != 0 }
     };
     drop(fs);
 
-    match with_process(|p| alloc_fd(p, file)) {
+    match with_process(|p| alloc_fd(p, handle(kind), flags & O_CLOEXEC != 0)) {
         Ok(fd) => fd as i64,
         Err(e) => -e,
     }
@@ -216,10 +277,9 @@ pub fn sys_openat(dirfd: u64, path: u64, flags: u64) -> i64 {
     if path.starts_with('/') || dirfd as i64 == AT_FDCWD {
         return open_path(&absolute(&path), flags);
     }
-    let base = with_process(|p| match p.fds.get(dirfd as usize) {
-        Some(Some(OpenFile::Dir { path, .. })) => Ok(path.clone()),
-        Some(Some(_)) => Err(ENOTDIR),
-        _ => Err(EBADF),
+    let base = get(dirfd).and_then(|h| match &h.lock().kind {
+        Kind::Dir { path, .. } => Ok(path.clone()),
+        _ => Err(ENOTDIR),
     });
     match base {
         Ok(base) => open_path(&filesystem::normalize(&base, &path), flags),
@@ -250,8 +310,8 @@ const TERMIOS_SIZE: u64 = 36;
 /// Anything that isn't the console is ENOTTY (how isatty() works).
 pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
     use crate::syscall::{user_slice, user_slice_mut};
-    match get_fd(fd) {
-        Ok(OpenFile::Console) => {}
+    match get(fd) {
+        Ok(h) if matches!(h.lock().kind, Kind::Console) => {}
         Ok(_) => return -ENOTTY,
         Err(e) => return -e,
     }
@@ -303,10 +363,15 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
     }
 }
 
-/// dup(fd): copy an fd to the lowest free slot.
+/// The open file description behind `fd`.
+fn get(fd: u64) -> Result<Handle, i64> {
+    with_process(|p| p.fds.get(fd as usize).cloned().flatten().map(|s| s.handle).ok_or(EBADF))
+}
+
+/// dup(fd): another fd for the same open file (sharing the offset).
 pub fn sys_dup(fd: u64) -> i64 {
-    match get_fd(fd) {
-        Ok(file) => match with_process(|p| alloc_fd(p, file)) {
+    match get(fd) {
+        Ok(h) => match with_process(|p| alloc_fd(p, h, false)) {
             Ok(new) => new as i64,
             Err(e) => -e,
         },
@@ -314,129 +379,210 @@ pub fn sys_dup(fd: u64) -> i64 {
     }
 }
 
-/// dup2(oldfd, newfd): make newfd refer to the same file as oldfd,
-/// closing whatever newfd was. Used for redirections like `> file`.
-pub fn sys_dup2(old: u64, new: u64) -> i64 {
-    let file = match get_fd(old) {
-        Ok(f) => f,
+/// dup2(oldfd, newfd) / dup3(oldfd, newfd, flags): make newfd refer to the
+/// same open file as oldfd, closing whatever newfd was. Used for
+/// redirections like `> file` and for pipes.
+pub fn sys_dup3(old: u64, new: u64, flags: u64, is_dup3: bool) -> i64 {
+    if flags & !O_CLOEXEC != 0 || (is_dup3 && old == new) {
+        return -EINVAL;
+    }
+    let h = match get(old) {
+        Ok(h) => h,
         Err(e) => return -e,
     };
     if new as usize >= MAX_FDS {
         return -EBADF;
     }
-    with_process(|p| p.fds[new as usize] = Some(file));
+    if old != new {
+        with_process(|p| p.fds[new as usize] = Some(Slot { handle: h, cloexec: flags & O_CLOEXEC != 0 }));
+    }
     new as i64
 }
 
 /// close(fd)
 pub fn sys_close(fd: u64) -> i64 {
-    with_process(|p| match p.fds.get_mut(fd as usize) {
-        Some(slot @ Some(_)) => {
-            *slot = None;
-            0
-        }
-        _ => -EBADF,
-    })
+    // The description is dropped after the process table is unlocked (it
+    // may be the last end of a pipe, which wakes other processes).
+    let slot = with_process(|p| p.fds.get_mut(fd as usize).and_then(Option::take));
+    if slot.is_some() { 0 } else { -EBADF }
 }
 
-fn get_fd(fd: u64) -> Result<OpenFile, i64> {
-    with_process(|p| p.fds.get(fd as usize).cloned().flatten().ok_or(EBADF))
-}
-
-fn set_offset(fd: u64, new_offset: usize) {
-    with_process(|p| {
-        if let Some(Some(OpenFile::File { offset, .. })) = p.fds.get_mut(fd as usize) {
-            *offset = new_offset;
+/// pipe2(fds, flags): fds[0] is the read end, fds[1] the write end.
+pub fn sys_pipe2(fds_out: u64, flags: u64) -> i64 {
+    if flags & !O_CLOEXEC != 0 {
+        return -EINVAL; // O_NONBLOCK and O_DIRECT aren't supported
+    }
+    let Some(out) = (unsafe { user_slice_mut(fds_out, 8) }) else { return -EFAULT };
+    let cloexec = flags & O_CLOEXEC != 0;
+    let (reader, writer) = pipe::new_pipe();
+    let result = with_process(|p| {
+        let r = alloc_fd(p, handle(Kind::PipeRead(reader)), cloexec)?;
+        match alloc_fd(p, handle(Kind::PipeWrite(writer)), cloexec) {
+            Ok(w) => Ok((r, w)),
+            Err(e) => {
+                p.fds[r] = None;
+                Err(e)
+            }
         }
     });
+    match result {
+        Ok((r, w)) => {
+            out[0..4].copy_from_slice(&(r as i32).to_le_bytes());
+            out[4..8].copy_from_slice(&(w as i32).to_le_bytes());
+            0
+        }
+        Err(e) => -e,
+    }
+}
+
+/// fcntl(fd, cmd, arg): duplicate fds, and get/set FD_CLOEXEC and the
+/// status flags.
+pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
+    let fd = fd as usize;
+    with_process(|p| {
+        let Some(Some(slot)) = p.fds.get(fd).cloned() else { return -EBADF };
+        match cmd {
+            F_DUPFD | F_DUPFD_CLOEXEC => {
+                if arg as usize >= MAX_FDS {
+                    return -EINVAL;
+                }
+                match alloc_fd_from(p, slot.handle, cmd == F_DUPFD_CLOEXEC, arg as usize) {
+                    Ok(new) => new as i64,
+                    Err(e) => -e,
+                }
+            }
+            F_GETFD => if slot.cloexec { FD_CLOEXEC as i64 } else { 0 },
+            F_SETFD => {
+                p.fds[fd].as_mut().unwrap().cloexec = arg & FD_CLOEXEC != 0;
+                0
+            }
+            F_GETFL => match &slot.handle.lock().kind {
+                Kind::File { readable, writable, append, .. } => {
+                    let mode = match (readable, writable) {
+                        (true, true) => O_RDWR,
+                        (false, true) => O_WRONLY,
+                        _ => O_RDONLY,
+                    };
+                    (mode | if *append { O_APPEND } else { 0 }) as i64
+                }
+                Kind::Console => O_RDWR as i64,
+                Kind::PipeWrite(_) => O_WRONLY as i64,
+                Kind::Dir { .. } | Kind::PipeRead(_) => O_RDONLY as i64,
+            },
+            F_SETFL => 0, // O_APPEND/O_NONBLOCK changes aren't supported; accepted
+            _ => -EINVAL,
+        }
+    })
 }
 
 /// read(fd, buf, count)
 pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
-    match get_fd(fd) {
-        Ok(OpenFile::Console) => crate::tty::read(buf),
-        Ok(OpenFile::File { node, offset, readable, .. }) => {
+    let h = match get(fd) {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    let mut desc = h.lock();
+    match &desc.kind {
+        Kind::Console => {
+            drop(desc); // don't hold it while waiting for a key
+            crate::tty::read(buf)
+        }
+        Kind::PipeRead(r) => {
+            let pipe = r.pipe();
+            drop(desc); // or while waiting for data
+            pipe::read(&pipe, buf)
+        }
+        Kind::File { node, readable, .. } => {
             if !readable {
                 return -EBADF;
             }
-            match FS.lock().read_at(node, offset, buf) {
+            let node = *node;
+            match FS.lock().read_at(node, desc.offset, buf) {
                 Ok(n) => {
-                    set_offset(fd, offset + n);
+                    desc.offset += n;
                     n as i64
                 }
                 Err(e) => -errno_for(e),
             }
         }
-        Ok(OpenFile::Dir { .. }) => -EISDIR,
-        Err(e) => -e,
+        Kind::Dir { .. } => -EISDIR,
+        Kind::PipeWrite(_) => -EBADF,
     }
 }
 
 /// write(fd, buf, count)
 pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
-    match get_fd(fd) {
-        Ok(OpenFile::Console) => {
+    let h = match get(fd) {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    let mut desc = h.lock();
+    match &desc.kind {
+        Kind::Console => {
+            drop(desc);
             console_write(bytes);
             bytes.len() as i64
         }
-        Ok(OpenFile::File { node, offset, writable, append, .. }) => {
+        Kind::PipeWrite(w) => {
+            let pipe = w.pipe();
+            drop(desc);
+            pipe::write(&pipe, bytes)
+        }
+        Kind::File { node, writable, append, .. } => {
             if !writable {
                 return -EBADF;
             }
+            let (node, append) = (*node, *append);
             let mut fs = FS.lock();
-            let offset = if append { fs.file_size(node).unwrap_or(0) } else { offset };
+            let offset = if append { fs.file_size(node).unwrap_or(0) } else { desc.offset };
             if offset.saturating_add(bytes.len()) > MAX_FILE_SIZE {
                 return -EFBIG;
             }
             match fs.write_at(node, offset, bytes) {
                 Ok(n) => {
-                    drop(fs);
-                    set_offset(fd, offset + n);
+                    desc.offset = offset + n;
                     n as i64
                 }
                 Err(e) => -errno_for(e),
             }
         }
-        Ok(OpenFile::Dir { .. }) => -EISDIR,
-        Err(e) => -e,
+        Kind::Dir { .. } => -EISDIR,
+        Kind::PipeRead(_) => -EBADF,
     }
 }
 
 /// lseek(fd, offset, whence)
 pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
     let delta = delta as i64;
-    match get_fd(fd) {
-        Ok(OpenFile::File { node, offset, .. }) => {
-            let size = FS.lock().file_size(node).unwrap_or(0) as i64;
+    let h = match get(fd) {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    let mut desc = h.lock();
+    match &desc.kind {
+        Kind::File { node, .. } => {
+            let size = FS.lock().file_size(*node).unwrap_or(0) as i64;
             let base = match whence {
                 SEEK_SET => 0,
-                SEEK_CUR => offset as i64,
+                SEEK_CUR => desc.offset as i64,
                 SEEK_END => size,
                 _ => return -EINVAL,
             };
             match base.checked_add(delta) {
                 Some(pos) if pos >= 0 && pos as usize <= MAX_FILE_SIZE => {
-                    set_offset(fd, pos as usize);
+                    desc.offset = pos as usize;
                     pos
                 }
                 _ => -EINVAL,
             }
         }
-        Ok(OpenFile::Dir { .. }) => {
-            // Only rewinding a directory is supported.
-            if whence == SEEK_SET && delta == 0 {
-                with_process(|p| {
-                    if let Some(Some(OpenFile::Dir { pos, .. })) = p.fds.get_mut(fd as usize) {
-                        *pos = 0;
-                    }
-                });
-                0
-            } else {
-                -EINVAL
-            }
+        // Only rewinding a directory is supported.
+        Kind::Dir { .. } if whence == SEEK_SET && delta == 0 => {
+            desc.offset = 0;
+            0
         }
-        Ok(OpenFile::Console) => -ESPIPE,
-        Err(e) => -e,
+        Kind::Dir { .. } => -EINVAL,
+        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) => -ESPIPE,
     }
 }
 
@@ -466,13 +612,21 @@ fn stat_node(node: usize, out: &mut [u8]) -> i64 {
 
 /// fstat(fd, statbuf)
 pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
-    match get_fd(fd) {
-        Ok(OpenFile::Console) => {
+    let h = match get(fd) {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    let desc = h.lock();
+    match &desc.kind {
+        Kind::Console => {
             fill_stat(out, 0, S_IFCHR | 0o620, 0);
             0
         }
-        Ok(OpenFile::File { node, .. }) | Ok(OpenFile::Dir { node, .. }) => stat_node(node, out),
-        Err(e) => -e,
+        Kind::PipeRead(_) | Kind::PipeWrite(_) => {
+            fill_stat(out, 0, S_IFIFO | 0o600, 0);
+            0
+        }
+        Kind::File { node, .. } | Kind::Dir { node, .. } => stat_node(*node, out),
     }
 }
 
@@ -491,11 +645,16 @@ pub fn sys_stat(path: u64, out: &mut [u8]) -> i64 {
 
 /// getdents64(fd, dirp, count): fill `out` with linux_dirent64 records.
 pub fn sys_getdents64(fd: u64, out: &mut [u8]) -> i64 {
-    let (node, path, pos) = match get_fd(fd) {
-        Ok(OpenFile::Dir { node, path, pos }) => (node, path, pos),
-        Ok(_) => return -ENOTDIR,
+    let h = match get(fd) {
+        Ok(h) => h,
         Err(e) => return -e,
     };
+    let mut desc = h.lock();
+    let (node, path) = match &desc.kind {
+        Kind::Dir { node, path } => (*node, path.clone()),
+        _ => return -ENOTDIR,
+    };
+    let pos = desc.offset;
 
     let fs = FS.lock();
     let parent = fs.resolve(&filesystem::normalize(&path, "..")).unwrap_or(node);
@@ -529,12 +688,7 @@ pub fn sys_getdents64(fd: u64, out: &mut [u8]) -> i64 {
         written += reclen;
         next += 1;
     }
-
-    with_process(|p| {
-        if let Some(Some(OpenFile::Dir { pos, .. })) = p.fds.get_mut(fd as usize) {
-            *pos = next;
-        }
-    });
+    desc.offset = next;
     written as i64
 }
 

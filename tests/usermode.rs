@@ -662,7 +662,9 @@ fn sh_scripts_and_source() {
 
 #[test_case]
 fn sh_syntax_errors() {
-    assert_eq!(sh("echo a | cat"), 2, "pipes are not supported yet");
+    assert_eq!(sh("| cat"), 2);
+    assert_eq!(sh("echo a |"), 2);
+    assert_eq!(sh("echo a | | cat"), 2);
     assert_eq!(sh("&& echo"), 2);
     assert_eq!(sh("echo 'unterminated"), 2);
     assert_eq!(sh("echo \"unterminated"), 2);
@@ -898,4 +900,137 @@ fn shell_tab_completion() {
     type_line("exit 0");
     assert_eq!(run(prog("sh"), &["sh"]), Ok(0));
     assert_eq!(file("/tab.txt"), "done\n");
+}
+
+// ---- pipes ----
+
+#[test_case]
+fn pipe_syscalls() {
+    let before = frames_in_use();
+    assert_eq!(run(prog("test_pipe"), &["test_pipe", "all"]), Ok(0));
+    assert!(only_kernel_left(), "{:?}", process::list());
+    assert_eq!(frames_in_use(), before);
+}
+
+#[test_case]
+fn sh_pipelines() {
+    assert_eq!(sh("ls /bin | grep ^s > /p1.txt"), 0);
+    assert_eq!(file("/p1.txt"), "sh\nsleep\nsort\n");
+    assert_eq!(sh("echo hello | cat | cat | cat > /p2.txt"), 0);
+    assert_eq!(file("/p2.txt"), "hello\n");
+    assert_eq!(sh("false | true"), 0, "status is the last command's");
+    assert_eq!(sh("true | false"), 1);
+    assert_eq!(sh("echo x | no-such-cmd"), 127);
+    assert_eq!(sh("echo x | test_stack"), 139);
+    assert_eq!(sh("echo b | grep a || echo none > /p3.txt"), 0);
+    assert_eq!(file("/p3.txt"), "none\n");
+    // builtins work in pipelines (in a child process)
+    assert_eq!(sh("cd /bin; pwd | cat > /p4.txt"), 0);
+    assert_eq!(file("/p4.txt"), "/bin\n");
+    // redirections combine with pipes
+    filesystem::write_file("/p_in.txt", "c\na\nb\n").unwrap();
+    assert_eq!(sh("sort < /p_in.txt | head -n 2 > /p5.txt"), 0);
+    assert_eq!(file("/p5.txt"), "a\nb\n");
+    assert_eq!(sh("cat /missing 2>&1 | grep -c 'No such' > /p6.txt"), 0);
+    assert_eq!(file("/p6.txt"), "1\n");
+    assert!(only_kernel_left());
+}
+
+#[test_case]
+fn sh_pipeline_ends_when_reader_exits() {
+    // yes would run forever; head exits after 3 lines and SIGPIPE ends yes.
+    assert_eq!(sh("yes | head -n 3 > /y.txt"), 0);
+    assert_eq!(file("/y.txt"), "y\ny\ny\n");
+    assert_eq!(sh("yes abc | head -n 1000 | wc -l > /y2.txt"), 0);
+    assert_eq!(file("/y2.txt").trim(), "1000");
+    assert!(only_kernel_left());
+}
+
+#[test_case]
+fn sh_background_pipeline() {
+    assert_eq!(sh("yes | head -n 5 | wc -l > /bgp.txt & wait"), 0);
+    assert_eq!(file("/bgp.txt").trim(), "5");
+}
+
+#[test_case]
+fn ctrl_c_stops_a_whole_pipeline() {
+    process::ctrl_c_pressed();
+    assert_eq!(sh("yes | grep never-matches"), 130);
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn pipelines_do_not_leak() {
+    assert_eq!(sh("yes | head -n 10 | sort | uniq -c > /leak.txt"), 0);
+    let before = frames_in_use();
+    for _ in 0..5 {
+        assert_eq!(sh("yes | head -n 100 | sort | uniq -c | wc -l > /leak.txt"), 0);
+    }
+    assert_eq!(frames_in_use(), before);
+    assert!(only_kernel_left());
+}
+
+// ---- text tools ----
+
+fn setup_words() {
+    filesystem::write_file("/w.txt", "banana\napple\ncherry\napple\nBanana split\n10 ten\n9 nine\n").unwrap();
+}
+
+#[test_case]
+fn grep_tool() {
+    setup_words();
+    assert_eq!(sh("grep apple /w.txt > /g.txt"), 0);
+    assert_eq!(file("/g.txt"), "apple\napple\n");
+    assert_eq!(sh("grep -i banana /w.txt > /g.txt"), 0);
+    assert_eq!(file("/g.txt"), "banana\nBanana split\n");
+    assert_eq!(sh("grep -c an /w.txt > /g.txt"), 0);
+    assert_eq!(file("/g.txt"), "2\n");
+    assert_eq!(sh("grep -vn a /w.txt > /g.txt"), 0);
+    assert_eq!(file("/g.txt"), "3:cherry\n6:10 ten\n7:9 nine\n");
+    assert_eq!(sh("grep '^b.n.*a$' /w.txt > /g.txt"), 0, "regex . * ^ $");
+    assert_eq!(file("/g.txt"), "banana\n");
+    assert_eq!(sh("grep -F 'n.' /w.txt"), 1, "-F: no match for the literal 'n.'");
+    assert_eq!(sh("grep -q cherry /w.txt"), 0);
+    assert_eq!(sh("grep zzz /w.txt"), 1);
+    assert_eq!(sh("grep x /missing"), 2);
+    assert_eq!(sh("grep"), 2);
+}
+
+#[test_case]
+fn wc_head_tail_tools() {
+    setup_words();
+    assert_eq!(sh("wc /w.txt > /o.txt"), 0);
+    assert_eq!(file("/o.txt"), "      7      10      53 /w.txt\n");
+    assert_eq!(sh("wc -l < /w.txt > /o.txt"), 0);
+    assert_eq!(file("/o.txt"), "      7\n");
+    assert_eq!(sh("head -n 2 /w.txt > /o.txt"), 0);
+    assert_eq!(file("/o.txt"), "banana\napple\n");
+    assert_eq!(sh("head -1 /w.txt > /o.txt"), 0);
+    assert_eq!(file("/o.txt"), "banana\n");
+    assert_eq!(sh("tail -n 2 /w.txt > /o.txt"), 0);
+    assert_eq!(file("/o.txt"), "10 ten\n9 nine\n");
+    assert_eq!(sh("tail -n 0 /w.txt > /o.txt"), 0);
+    assert_eq!(file("/o.txt"), "");
+    assert_eq!(sh("head -n x /w.txt"), 1);
+}
+
+#[test_case]
+fn sort_uniq_tee_tools() {
+    setup_words();
+    assert_eq!(sh("sort /w.txt > /o.txt"), 0);
+    assert_eq!(file("/o.txt"), "10 ten\n9 nine\nBanana split\napple\napple\nbanana\ncherry\n");
+    assert_eq!(sh("tail -n 2 /w.txt | sort -n > /o.txt"), 0);
+    assert_eq!(file("/o.txt"), "9 nine\n10 ten\n");
+    assert_eq!(sh("sort -u /w.txt | wc -l > /o.txt"), 0);
+    assert_eq!(file("/o.txt").trim(), "6");
+    assert_eq!(sh("sort -r /w.txt | head -1 > /o.txt"), 0);
+    assert_eq!(file("/o.txt"), "cherry\n");
+    assert_eq!(sh("sort /w.txt | uniq -c | grep apple > /o.txt"), 0);
+    assert_eq!(file("/o.txt"), "      2 apple\n");
+    assert_eq!(sh("sort /w.txt | uniq -d > /o.txt"), 0);
+    assert_eq!(file("/o.txt"), "apple\n");
+    assert_eq!(sh("echo teed | tee /t1.txt /t2.txt > /o.txt"), 0);
+    assert_eq!((file("/t1.txt"), file("/t2.txt"), file("/o.txt")), ("teed\n".into(), "teed\n".into(), "teed\n".into()));
+    assert_eq!(sh("echo more | tee -a /t1.txt > /o.txt"), 0);
+    assert_eq!(file("/t1.txt"), "teed\nmore\n");
 }

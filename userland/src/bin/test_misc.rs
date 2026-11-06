@@ -115,10 +115,8 @@ fn dup_test() -> i32 {
     let fd = open("/dup_test.txt", O_RDONLY) as i32;
     let n = read(fd, &mut buf);
     close(fd);
-    // dup'ed fds have separate offsets here (not shared as in POSIX), so the
-    // second write lands at offset 0 of its own copy... check what we got:
-    check!(n > 0);
-    check!(&buf[..n as usize] == b"via stdout" || &buf[..n as usize] == b"via dup via stdout");
+    // dup'ed fds share one offset (POSIX), so the writes follow each other.
+    check!(&buf[..n.max(0) as usize] == b"via dup via stdout");
 
     check!(dup(99) == -EBADF as isize);
     check!(dup2(99, 5) == -EBADF as isize);

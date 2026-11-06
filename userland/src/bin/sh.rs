@@ -14,7 +14,8 @@
 //!   builtins: cd pwd exit export unset set wait jobs . source help true false
 //!   interactive line editing: arrows, Home/End, history (Up/Down), Tab
 //!   completion, Ctrl-A/E/U/K/L/C
-//! Not yet: pipes, globbing, if/while/for, functions, field splitting.
+//!   cmd1 | cmd2 | cmd3   (pipelines)
+//! Not yet: globbing, if/while/for, functions, field splitting.
 #![no_std]
 #![no_main]
 
@@ -279,11 +280,14 @@ enum Connector {
     Or,
 }
 
-/// cmd1 && cmd2 || cmd3 ...
+/// cmd1 | cmd2 | ... (a single command is a pipeline of one)
+type Pipeline = Vec<Command>;
+
+/// pipeline1 && pipeline2 || pipeline3 ...
 #[derive(Debug)]
 struct AndOr {
-    first: Command,
-    rest: Vec<(Connector, Command)>,
+    first: Pipeline,
+    rest: Vec<(Connector, Pipeline)>,
     background: bool,
 }
 
@@ -306,18 +310,44 @@ fn as_assignment(word: &Word) -> Option<(String, Word)> {
 fn parse(tokens: Vec<Token>) -> Result<Vec<AndOr>, String> {
     let mut list = Vec::new();
     let mut cmd = Command::default();
+    let mut pipeline: Pipeline = Vec::new();
     let mut current: Option<AndOr> = None;
     let mut pending: Option<Connector> = None;
 
-    fn finish(cmd: &mut Command, current: &mut Option<AndOr>, pending: &mut Option<Connector>) -> Result<(), String> {
-        let done = core::mem::take(cmd);
-        let empty = done.words.is_empty() && done.assignments.is_empty() && done.redirs.is_empty();
+    fn is_empty(c: &Command) -> bool {
+        c.words.is_empty() && c.assignments.is_empty() && c.redirs.is_empty()
+    }
+
+    // End the current command at a `|`.
+    fn end_command(cmd: &mut Command, pipeline: &mut Pipeline) -> Result<(), String> {
+        if is_empty(cmd) {
+            return Err("syntax error near |".into());
+        }
+        pipeline.push(core::mem::take(cmd));
+        Ok(())
+    }
+
+    // End the current pipeline (at && || ; & or the end of the line).
+    fn end_pipeline(
+        cmd: &mut Command,
+        pipeline: &mut Pipeline,
+        current: &mut Option<AndOr>,
+        pending: &mut Option<Connector>,
+    ) -> Result<(), String> {
+        if is_empty(cmd) {
+            if !pipeline.is_empty() {
+                return Err("syntax error: missing command after |".into());
+            }
+        } else {
+            pipeline.push(core::mem::take(cmd));
+        }
+        let done = core::mem::take(pipeline);
         match (current.as_mut(), pending.take()) {
-            (None, _) if empty => {}
+            (None, _) if done.is_empty() => {}
             (None, _) => *current = Some(AndOr { first: done, rest: Vec::new(), background: false }),
-            (Some(_), Some(_)) if empty => return Err("syntax error: missing command after && or ||".into()),
+            (Some(_), Some(_)) if done.is_empty() => return Err("syntax error: missing command after && or ||".into()),
             (Some(ao), Some(conn)) => ao.rest.push((conn, done)),
-            (Some(_), None) if empty => {}
+            (Some(_), None) if done.is_empty() => {}
             (Some(_), None) => return Err("syntax error".into()),
         }
         Ok(())
@@ -335,15 +365,16 @@ fn parse(tokens: Vec<Token>) -> Result<Vec<AndOr>, String> {
                 cmd.words.push(w);
             }
             Token::Redirect(r) => cmd.redirs.push(r),
+            Token::Pipe => end_command(&mut cmd, &mut pipeline)?,
             Token::AndAnd | Token::OrOr => {
-                if cmd.words.is_empty() && cmd.assignments.is_empty() {
+                if is_empty(&cmd) {
                     return Err("syntax error near && or ||".into());
                 }
-                finish(&mut cmd, &mut current, &mut pending)?;
+                end_pipeline(&mut cmd, &mut pipeline, &mut current, &mut pending)?;
                 pending = Some(if tok == Token::AndAnd { Connector::And } else { Connector::Or });
             }
             Token::Semi | Token::Amp => {
-                finish(&mut cmd, &mut current, &mut pending)?;
+                end_pipeline(&mut cmd, &mut pipeline, &mut current, &mut pending)?;
                 if pending.is_some() {
                     return Err("syntax error: missing command after && or ||".into());
                 }
@@ -356,10 +387,9 @@ fn parse(tokens: Vec<Token>) -> Result<Vec<AndOr>, String> {
                     None => {}
                 }
             }
-            Token::Pipe => return Err("pipes (|) are not supported yet".into()),
         }
     }
-    finish(&mut cmd, &mut current, &mut pending)?;
+    end_pipeline(&mut cmd, &mut pipeline, &mut current, &mut pending)?;
     if pending.is_some() {
         return Err("syntax error: missing command after && or ||".into());
     }
@@ -501,8 +531,8 @@ impl Shell {
     }
 
     fn run_and_or(&mut self, ao: &AndOr) {
-        self.run_command(&ao.first);
-        for (conn, cmd) in &ao.rest {
+        self.run_pipeline(&ao.first);
+        for (conn, pipeline) in &ao.rest {
             if self.exit_requested.is_some() {
                 return;
             }
@@ -511,9 +541,135 @@ impl Shell {
                 Connector::Or => self.status != 0,
             };
             if run {
-                self.run_command(cmd);
+                self.run_pipeline(pipeline);
             }
         }
+    }
+
+    /// Run `cmd1 | cmd2 | ...`: each command in its own process, stdout of
+    /// one connected to stdin of the next. The whole pipeline is one job
+    /// (one process group), and its status is the last command's.
+    fn run_pipeline(&mut self, cmds: &[Command]) {
+        if cmds.len() == 1 {
+            return self.run_command(&cmds[0]);
+        }
+        let mut pids: Vec<i32> = Vec::new();
+        let mut pgid = 0i32;
+        let mut prev_read: Option<i32> = None;
+        let mut failed = false;
+
+        for (i, cmd) in cmds.iter().enumerate() {
+            let last = i + 1 == cmds.len();
+            // Close-on-exec: programs only get the ends dup'ed onto 0 and 1.
+            let (next_read, write_end) = if last {
+                (None, None)
+            } else {
+                match pipe2(O_CLOEXEC) {
+                    Ok((r, w)) => (Some(r), Some(w)),
+                    Err(e) => {
+                        eprintln!("sh: pipe: {}", strerror(-e));
+                        failed = true;
+                        break;
+                    }
+                }
+            };
+
+            let pid = fork();
+            if pid < 0 {
+                eprintln!("sh: fork: {}", strerror(-pid));
+                for fd in [next_read, write_end].into_iter().flatten() {
+                    close(fd);
+                }
+                failed = true;
+                break;
+            }
+            if pid == 0 {
+                if self.interactive {
+                    setpgid(0, pgid); // pgid 0 for the first: it becomes the leader
+                    if i == 0 {
+                        tcsetpgrp(STDIN, getpid());
+                    }
+                    set_signal(SIGINT, SIG_DFL);
+                }
+                self.interactive = false;
+                if let Some(r) = prev_read {
+                    dup2(r, STDIN);
+                    close(r);
+                }
+                if let Some(w) = write_end {
+                    dup2(w, STDOUT);
+                    close(w);
+                }
+                if let Some(r) = next_read {
+                    close(r);
+                }
+                self.exec_in_child(cmd);
+            }
+
+            if pgid == 0 {
+                pgid = pid as i32;
+            }
+            if self.interactive {
+                setpgid(pid as i32, pgid);
+            }
+            // The parent keeps no pipe ends, or readers would never see EOF.
+            if let Some(r) = prev_read {
+                close(r);
+            }
+            if let Some(w) = write_end {
+                close(w);
+            }
+            prev_read = next_read;
+            pids.push(pid as i32);
+        }
+        if let Some(r) = prev_read {
+            close(r);
+        }
+
+        if self.interactive && pgid > 0 {
+            tcsetpgrp(STDIN, pgid);
+        }
+        let mut last_status = 0;
+        for (i, &pid) in pids.iter().enumerate() {
+            let mut status = 0;
+            if waitpid(pid, &mut status, 0) == pid as isize && i + 1 == pids.len() {
+                last_status = status;
+            }
+        }
+        if self.interactive {
+            tcsetpgrp(STDIN, getpgrp());
+        }
+        self.status = if failed { 1 } else { shell_status(last_status) };
+    }
+
+    /// In a forked child: run one command (builtin or program) and exit.
+    fn exec_in_child(&mut self, cmd: &Command) -> ! {
+        let words: Vec<String> = cmd.words.iter().map(|w| self.expand(w)).collect();
+        let assigns: Vec<(String, String)> =
+            cmd.assignments.iter().map(|(k, v)| (k.clone(), self.expand(v))).collect();
+        if self.apply_redirs(&cmd.redirs).is_err() {
+            exit(1);
+        }
+        if words.is_empty() {
+            exit(0);
+        }
+        if BUILTINS.contains(&words[0].as_str()) {
+            for (k, v) in assigns {
+                self.set(&k, v);
+            }
+            let status = self.builtin(&words);
+            exit(status);
+        }
+        let Some(path) = self.find_program(&words[0]) else {
+            eprintln!("sh: {}: command not found", words[0]);
+            exit(127);
+        };
+        let env = self.child_env(&assigns);
+        let argv: Vec<&str> = words.iter().map(String::as_str).collect();
+        let envp: Vec<&str> = env.iter().map(String::as_str).collect();
+        let err = execve(&path, &argv, &envp);
+        eprintln!("sh: {}: {}", words[0], strerror(-err));
+        exit(if err == -ENOENT { 127 } else { 126 });
     }
 
     /// `cmd &`: run the whole and-or list in a forked copy of the shell.
@@ -824,7 +980,7 @@ impl Shell {
                     names.sort();
                     print_wrapped(names.iter().map(String::as_str));
                 }
-                println!("Syntax: ; && || & > >> < 2> 2>&1 'quotes' \"$VAR\" ~ # comments");
+                println!("Syntax: | ; && || & > >> < 2> 2>&1 'quotes' \"$VAR\" ~ # comments");
                 println!("Also: run <program>, script <file> (like the kernel shell)");
                 println!("Keys: Up/Down history, Tab completes, Ctrl-C interrupts, Ctrl-D exits");
                 println!("Type 'exit' to return to the kernel shell.");

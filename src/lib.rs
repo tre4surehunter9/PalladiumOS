@@ -114,6 +114,7 @@ pub mod tty;
 pub mod programs;
 pub mod vfs;
 pub mod process;
+pub mod pipe;
 
 
 extern crate alloc;

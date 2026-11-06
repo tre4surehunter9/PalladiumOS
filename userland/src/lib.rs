@@ -29,6 +29,7 @@ pub mod sys {
     pub const STAT: u64 = 4;
     pub const FSTAT: u64 = 5;
     pub const LSEEK: u64 = 8;
+    pub const PIPE: u64 = 22;
     pub const BRK: u64 = 12;
     pub const RT_SIGACTION: u64 = 13;
     pub const IOCTL: u64 = 16;
@@ -42,6 +43,7 @@ pub mod sys {
     pub const EXIT: u64 = 60;
     pub const WAIT4: u64 = 61;
     pub const KILL: u64 = 62;
+    pub const FCNTL: u64 = 72;
     pub const SETPGID: u64 = 109;
     pub const GETPGRP: u64 = 111;
     pub const GETPPID: u64 = 110;
@@ -55,6 +57,7 @@ pub mod sys {
     pub const UNLINK: u64 = 87;
     pub const GETDENTS64: u64 = 217;
     pub const OPENAT: u64 = 257;
+    pub const PIPE2: u64 = 293;
 
     /// Invoke syscall `n` with up to three arguments. The kernel preserves
     /// every register except rax, which holds the result (-errno on failure).
@@ -84,6 +87,7 @@ pub mod tty;
 pub use tty::*;
 pub mod signal;
 pub use signal::*;
+pub mod io;
 
 pub const STDIN: i32 = 0;
 pub const STDOUT: i32 = 1;
