@@ -19,7 +19,8 @@ features = ["spin_no_std"]
 bootloader = { version = "0.9", features = ["map_physical_memory"]}
 volatile = "0.2.6"
 spin = "0.5.2"
-x86_64 = "0.14.2"
+# step_trait is left out: it no longer compiles on current nightly (Step trait changed)
+x86_64 = { version = "0.14.2", default-features = false, features = ["instructions", "abi_x86_interrupt", "const_fn"] }
 uart_16550 = "0.6.0"
 pic8259 = "0.10.1"
 pc-keyboard = "0.7.0"
@@ -29,7 +30,6 @@ fatfs = { git = "https://github.com/rafalh/rust-fatfs", default-features = false
 version = "0.3.11"
 default-features = false
 features = ["alloc"]
-noto-sans-mono-bitmap = "0.2.0"
 
 [dependencies.conquer-once]
 version = "0.2.0"
