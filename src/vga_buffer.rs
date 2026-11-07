@@ -1,8 +1,9 @@
 // Copyright (c) 2026 tre4surehunter9
 //! The console: a grid of character cells with VGA colors, drawn into the
 //! framebuffer the bootloader set up (bootloader 0.11: a graphics mode, not
-//! VGA text mode) with a 9x16 font, at as many cells as fit (142x45 at
-//! 1280x720; big screens get the font scaled up, 2x at 2560x1600). Before the framebuffer is set up (early boot), text goes into
+//! VGA text mode) with a 9x16 font, at as many cells as fit (213x67 at
+//! 1920x1080, 142x45 at 1280x720; very big screens get the font scaled up,
+//! 2x at 2560x1600). Before the framebuffer is set up (early boot), text goes into
 //! the grid only. The grid stays readable for tests and for QEMU's monitor
 //! (its address is logged to the serial port at boot).
 
@@ -46,8 +47,8 @@ struct ScreenChar {
 }
 
 /// The largest grid (cells); the real size depends on the framebuffer.
-pub const MAX_WIDTH: usize = 160;
-pub const MAX_HEIGHT: usize = 64;
+pub const MAX_WIDTH: usize = 240;
+pub const MAX_HEIGHT: usize = 80;
 /// The grid's size before the framebuffer is set up.
 const EARLY_WIDTH: usize = 80;
 const EARLY_HEIGHT: usize = 25;

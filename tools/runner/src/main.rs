@@ -6,9 +6,11 @@
 //!   palladium-runner KERNEL [--uefi] [QEMU ARGS...]   cargo run / cargo test
 //!   palladium-runner image KERNEL OUT.img [--uefi]    just make the disk image
 //!
-//! BIOS by default. With --uefi (or PALLADIUM_UEFI=1, e.g. `cargo run --
-//! --uefi`), a UEFI disk image (GPT, an EFI system partition), booted by
-//! the OVMF firmware (Arch: edk2-ovmf; or point OVMF at the file).
+//! `cargo run` boots with UEFI when the OVMF firmware is installed (Arch:
+//! edk2-ovmf; or point OVMF at the file): a UEFI disk image (GPT, an EFI
+//! system partition), at 1920x1080. --bios (or PALLADIUM_BIOS=1) boots with
+//! BIOS instead (the bootloader's BIOS stage goes up to 1280x720). Test
+//! kernels boot with BIOS unless --uefi / PALLADIUM_UEFI=1.
 //!
 //! Test kernels (cargo names them NAME-HASH) run without a
 //! window, with serial output on the terminal and a time limit; they report
@@ -23,6 +25,10 @@ use std::time::{Duration, Instant};
 /// the Alpine disk, and a network card (port 2222 on this machine, localhost
 /// only, reaches PalladiumOS's SSH server).
 const RUN_ARGS: &[&str] = &[
+    // 8 MiB of video memory: the biggest UEFI screen mode that fits is
+    // 1920x1080 (OVMF would otherwise pick 2560x1600). BIOS: 1280x720.
+    // (-global VGA.vgamem_mb=8 would leave OVMF without a screen.)
+    "-vga", "none", "-device", "VGA,vgamem_mb=8",
     "-drive", "format=raw,file=target/disk.img,index=1,media=disk",
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
     "-drive", "format=raw,file=target/alpine.img,index=3,media=disk",
@@ -41,14 +47,21 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let uefi_flag = args.iter().any(|a| a == "--uefi");
-    let uefi = uefi_flag || std::env::var("PALLADIUM_UEFI").is_ok_and(|v| v == "1");
-    let args: Vec<String> = args.into_iter().filter(|a| a != "--uefi").collect();
+    let flag = |f: &str| args.iter().any(|a| a == f);
+    let env = |v: &str| std::env::var(v).is_ok_and(|x| x == "1");
+    let want_uefi = flag("--uefi") || env("PALLADIUM_UEFI");
+    let want_bios = flag("--bios") || env("PALLADIUM_BIOS");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--uefi" && a != "--bios").collect();
     match args.first().map(String::as_str) {
         Some("image") if args.len() == 3 => {
-            make_image(Path::new(&args[1]), Path::new(&args[2]), uefi);
+            make_image(Path::new(&args[1]), Path::new(&args[2]), want_uefi);
         }
-        Some(kernel) => run(Path::new(kernel), &args[1..], uefi),
+        Some(kernel) => {
+            let kernel = Path::new(kernel);
+            // cargo run: UEFI if there's firmware for it; tests: BIOS.
+            let uefi = !want_bios && (want_uefi || (!is_test_kernel(kernel) && find_ovmf().is_some()));
+            run(kernel, &args[1..], uefi)
+        }
         None => {
             eprintln!("usage: palladium-runner KERNEL [QEMU ARGS...] | palladium-runner image KERNEL OUT.img");
             exit(2);
@@ -110,8 +123,15 @@ fn is_test_kernel(kernel: &Path) -> bool {
 
 /// The OVMF firmware for UEFI booting: $OVMF, or where distributions put it.
 fn ovmf() -> PathBuf {
+    find_ovmf().unwrap_or_else(|| {
+        eprintln!("palladium-runner: no OVMF firmware found for UEFI (install edk2-ovmf / ovmf, set OVMF=path, or use --bios)");
+        exit(1)
+    })
+}
+
+fn find_ovmf() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("OVMF") {
-        return PathBuf::from(path);
+        return Some(PathBuf::from(path));
     }
     let candidates = [
         "/usr/share/edk2/x64/OVMF.4m.fd",
@@ -121,13 +141,7 @@ fn ovmf() -> PathBuf {
         "/usr/share/ovmf/OVMF.fd",
         "/usr/share/qemu/OVMF.fd",
     ];
-    match candidates.iter().map(PathBuf::from).find(|p| p.exists()) {
-        Some(p) => p,
-        None => {
-            eprintln!("palladium-runner: no OVMF firmware found for UEFI (install edk2-ovmf / ovmf, or set OVMF=path)");
-            exit(1)
-        }
-    }
+    candidates.iter().map(PathBuf::from).find(|p| p.exists())
 }
 
 fn run(kernel: &Path, extra: &[String], uefi: bool) {
