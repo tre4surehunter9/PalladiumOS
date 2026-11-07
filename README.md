@@ -362,5 +362,22 @@ The built-in kernel shell is kept as a fallback: press Ctrl-D at the login promp
 * pwd                 - Print working directory
 * run <program>       - Run a program from /bin (or a path)
 
+## Third-Party Software
+The release images include software by other people, under their own licences. PalladiumOS's build downloads each of these from its official source at a pinned, checksum-verified version (see `tools/build-musl.sh` and `tools/ports/`), so the exact source is the version listed here.
+
+| Software | Version | Licence | In | Source |
+|----------|---------|---------|----|--------|
+| [musl](https://musl.libc.org) libc | 1.2.5 | MIT | every C program, `libc.so` on `usr.img` | [musl-1.2.5.tar.gz](https://musl.libc.org/releases/musl-1.2.5.tar.gz) |
+| [GNU C Library](https://www.gnu.org/software/libc/) (glibc) | 2.44 (Arch Linux package 2.44+r50+g1848099f063e-1) | LGPL-2.1-or-later | `ld-linux-x86-64.so.2`, `libc.so.6` and the Linux test programs on `usr.img`, copied from the build machine | [upstream commit 1848099f063e](https://sourceware.org/git/?p=glibc.git;a=commit;h=1848099f063e), [Arch's packaging](https://gitlab.archlinux.org/archlinux/packaging/packages/glibc/-/tree/2.44+r50+g1848099f063e-1), [glibc-2.44.tar.xz](https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz) |
+| [BusyBox](https://busybox.net) | 1.38.0 | GPL-2.0-only | `/bin/busybox` | [busybox-1.38.0.tar.bz2](https://busybox.net/downloads/busybox-1.38.0.tar.bz2); configuration in `tools/ports/busybox.sh` |
+| [TinyCC](https://repo.or.cz/tinycc.git) | git c638ddfb5932 | LGPL-2.1-or-later | `/bin/tcc`, its libraries and source on `usr.img` | [commit c638ddfb5932](https://repo.or.cz/tinycc.git/commit/c638ddfb593214813aa33536fb993b9a45d23793); PalladiumOS's change (static linking by default) is in `tools/ports/tcc.sh`, and the complete source is on `usr.img` in `/usr/src/tinycc` |
+| [dash](http://gondor.apana.org.au/~herbert/dash/) | 0.5.12 | BSD-3-Clause (one generated file from bash: GPL-2.0-or-later) | `/bin/dash` | [dash_0.5.12.orig.tar.gz](https://deb.debian.org/debian/pool/main/d/dash/dash_0.5.12.orig.tar.gz) |
+| [Lua](https://www.lua.org) | 5.4.7 | MIT | `/bin/lua`, `/bin/luac` | [lua-5.4.7.tar.gz](https://www.lua.org/ftp/lua-5.4.7.tar.gz) |
+| [MicroPython](https://micropython.org) | 1.29.0 | MIT | `/bin/micropython` | [micropython-1.29.0.tar.xz](https://github.com/micropython/micropython/releases/download/v1.29.0/micropython-1.29.0.tar.xz) |
+| [fastfetch](https://github.com/fastfetch-cli/fastfetch) | 2.71.0 | MIT | `/bin/fastfetch` | [2.71.0.tar.gz](https://github.com/fastfetch-cli/fastfetch/archive/refs/tags/2.71.0.tar.gz) |
+| [Dropbear SSH](https://matt.ucc.asn.au/dropbear/dropbear.html) | 2026.94 | MIT-style, with parts under BSD licences and public domain (libtomcrypt, libtommath); see its `LICENSE` | `/bin/dropbear`, `dbclient`, `dropbearkey`, `scp` | [dropbear-2026.94.tar.bz2](https://matt.ucc.asn.au/dropbear/releases/dropbear-2026.94.tar.bz2) |
+| GCC runtime (`libgcc`, `crtbeginS.o`) | 16.2.1 | GPL-3.0 with the GCC Runtime Library Exception | linked into the C programs | [gcc.gnu.org](https://gcc.gnu.org) |
+| Rust crates ([smoltcp](https://github.com/smoltcp-rs/smoltcp), [x86_64](https://github.com/rust-osdev/x86_64), [bootloader](https://github.com/rust-osdev/bootloader), [spin](https://github.com/mvdnes/spin-rs), [pc-keyboard](https://github.com/rust-embedded-community/pc-keyboard)...) | see `Cargo.lock` | permissive: MIT and/or Apache-2.0 for most, 0BSD (smoltcp, managed), Unlicense-or-MIT (byteorder); `cargo metadata` lists each | the kernel | [crates.io](https://crates.io) |
+
 ## Credits
 Philipp Oppermann for his 'Writing an OS in Rust' guide
