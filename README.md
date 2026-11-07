@@ -5,25 +5,26 @@
 ![Screenshot](Screenshot_20260811_212123.png)
 
 ## Notice
-I do want to make things clear and say I used AI for a lot of my code, as this is my first kernel, so I don't understand much yet.
-
-Up to 0.4.0, I used AI for:
-* The filesystem
-* The shell
-* Text editor (as a guide)
-* Finding bugs
-* Guiding for implementing stuff
-* Ring 3/usermode stuff
-
-For 0.5.0, almost all of the new code was written with AI (Claude Code), including:
-* The Linux-compatible system calls and the program loader
-* The userland: the Rust programs, `/bin/sh` and its scripting
-* Processes, the scheduler, `fork`/`exec`, copy-on-write, threads and signals
-* The ext2 filesystem, the VFS, `/proc`, `/dev` and the disk driver
-* Users, permissions, login and passwords
-* Running C programs with musl, and the ports (BusyBox, Lua, dash, MicroPython, fastfetch, TinyCC)
-* Networking: the network card driver, TCP/IP and sockets
-* The higher-half kernel, the boot log, the tests and most of this README
+> [!WARNING]
+> I do want to make things clear and say I used AI for a lot of my code, as this is my first kernel, so I don't understand much yet.
+>
+> Up to 0.4.0, I used AI for:
+> * The filesystem
+> * The shell
+> * Text editor (as a guide)
+> * Finding bugs
+> * Guiding for implementing stuff
+> * Ring 3/usermode stuff
+>
+> For 0.5.0, almost all of the new code was written with AI (Claude Code), including:
+> * The Linux-compatible system calls and the program loader
+> * The userland: the Rust programs, `/bin/sh` and its scripting
+> * Processes, the scheduler, `fork`/`exec`, copy-on-write, threads and signals
+> * The ext2 filesystem, the VFS, `/proc`, `/dev` and the disk driver
+> * Users, permissions, login and passwords
+> * Running C programs with musl, and the ports (BusyBox, Lua, dash, MicroPython, fastfetch, TinyCC)
+> * Networking: the network card driver, TCP/IP and sockets
+> * The higher-half kernel, the boot log, the tests and most of this README
 
 ## Features
 * **Linux-compatible system calls** (the x86_64 ABI): ordinary static Linux programs run unchanged, including C programs built with an unmodified [musl](https://musl.libc.org) libc
