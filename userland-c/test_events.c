@@ -15,7 +15,9 @@
 #include <sys/eventfd.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/sysinfo.h>
+#include <sys/times.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -161,6 +163,31 @@ static int misc(void)
     CHECK(prctl(PR_SET_NAME, "worker-1") == 0);
     CHECK(prctl(PR_GET_NAME, name) == 0 && strcmp(name, "worker-1") == 0);
     CHECK(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0);
+
+    /* times(): ticks since boot, and this process's CPU time. */
+    struct tms t;
+    volatile unsigned long spin = 0;
+    for (unsigned long i = 0; i < 50000000; i++) spin += i;
+    clock_t now = times(&t);
+    CHECK(now > 0 && t.tms_utime > 0 && t.tms_utime <= now && t.tms_cutime == 0);
+
+    /* fchmodat2 with AT_SYMLINK_NOFOLLOW (how musl chmods for apk): sets
+     * setuid bits on a file, refuses a symlink. */
+    const char *f = "/tmp/test_events.mode", *l = "/tmp/test_events.link";
+    unlink(f);
+    unlink(l);
+    int fd = open(f, O_CREAT | O_WRONLY, 0644);
+    CHECK(fd >= 0);
+    close(fd);
+    CHECK(syscall(452, AT_FDCWD, f, 04750, AT_SYMLINK_NOFOLLOW) == 0);
+    struct stat st;
+    CHECK(stat(f, &st) == 0 && (st.st_mode & 07777) == 04750);
+    CHECK(fchmodat(AT_FDCWD, f, 0600, AT_SYMLINK_NOFOLLOW) == 0); /* musl's wrapper */
+    CHECK(stat(f, &st) == 0 && (st.st_mode & 07777) == 0600);
+    CHECK(symlink(f, l) == 0);
+    CHECK(syscall(452, AT_FDCWD, l, 0644, AT_SYMLINK_NOFOLLOW) == -1 && errno == EOPNOTSUPP);
+    unlink(l);
+    unlink(f);
     return 0;
 }
 

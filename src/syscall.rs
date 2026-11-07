@@ -87,6 +87,8 @@ pub const SYS_EPOLL_PWAIT2: u64 = 441;
 pub const SYS_CAPGET: u64 = 125;
 pub const SYS_SIGALTSTACK: u64 = 131;
 pub const SYS_IO_URING_SETUP: u64 = 425;
+pub const SYS_TIMES: u64 = 100;
+pub const SYS_FCHMODAT2: u64 = 452;
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_CONNECT: u64 = 42;
 pub const SYS_ACCEPT: u64 = 43;
@@ -561,6 +563,8 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_RSEQ => -ENOSYS,
         SYS_PIDFD_OPEN => -ENOSYS, // (callers fall back to waitpid)
         SYS_IO_URING_SETUP => -ENOSYS, // (callers fall back to epoll)
+        SYS_TIMES => process::sys_times(a1),
+        SYS_FCHMODAT2 => vfs::sys_fchmodat2(a1, a2, a3, a4),
         SYS_CAPGET => sys_capget(a1, a2),
         SYS_SIGALTSTACK => sys_sigaltstack(a1, a2),
         SYS_SYSINFO => sys_sysinfo(a1),

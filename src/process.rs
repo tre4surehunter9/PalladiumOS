@@ -2613,6 +2613,18 @@ pub fn current_p4() -> PhysFrame {
     TABLE.lock()[&current_pid()].p4
 }
 
+/// times(buf): the process's CPU time (all counted as user time; children
+/// not counted) in 1/100 s, and the return value: ticks since boot.
+pub fn sys_times(buf: u64) -> i64 {
+    let hundredths = |ns: u64| ns / 10_000_000;
+    if buf != 0 {
+        let Some(out) = (unsafe { user_slice_mut(buf, 32) }) else { return -EFAULT };
+        out.fill(0);
+        out[0..8].copy_from_slice(&hundredths(cpu_time_ns()).to_le_bytes());
+    }
+    hundredths(ticks() * TICK_NS) as i64
+}
+
 /// CPU time used by the current process, in nanoseconds.
 fn cpu_time_ns() -> u64 {
     let table = TABLE.lock();

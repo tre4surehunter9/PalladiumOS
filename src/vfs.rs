@@ -1430,6 +1430,32 @@ fn fd_loc(fd: u64) -> Result<Option<Loc>, i64> {
 }
 
 /// fchmod(fd, mode)
+/// fchmodat2(dirfd, path, mode, flags): fchmodat with flags.
+/// AT_SYMLINK_NOFOLLOW: symlinks have no mode (EOPNOTSUPP, as on Linux);
+/// AT_EMPTY_PATH: the fd itself.
+pub fn sys_fchmodat2(dirfd: u64, path: u64, mode: u64, flags: u64) -> i64 {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return -EINVAL;
+    }
+    if flags & AT_EMPTY_PATH != 0 && matches!(user_path(path), Ok(p) if p.is_empty()) {
+        return sys_fchmod(dirfd, mode);
+    }
+    if flags & AT_SYMLINK_NOFOLLOW == 0 {
+        return sys_fchmodat(dirfd, path, mode);
+    }
+    let abs = match user_at_path(dirfd, path) {
+        Ok(p) => p,
+        Err(e) => return -e,
+    };
+    match mounts::lstat(&abs) {
+        Ok((_, meta)) if meta.kind == FileType::Symlink => -EOPNOTSUPP,
+        Ok((loc, meta)) => chmod_loc(loc, &meta, mode),
+        Err(e) => -e,
+    }
+}
+
 pub fn sys_fchmod(fd: u64, mode: u64) -> i64 {
     match fd_loc(fd) {
         Ok(Some(loc)) => match mounts::with_fs(loc.mount, |fs| fs.meta(loc.ino)) {
