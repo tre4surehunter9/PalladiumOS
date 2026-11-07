@@ -108,6 +108,7 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
         &[
             ("wget", "download a URL (wget -O file http://...)"),
             ("nslookup", "look up a name in DNS"),
+            ("ping", "check a host answers (as root: ping -c 3 HOST)"),
             ("nc", "connect to (or listen on) a TCP/UDP port"),
             ("telnet", "talk to a TCP server"),
             ("httpd", "a web server (httpd -f -p 8080 -h DIR)"),

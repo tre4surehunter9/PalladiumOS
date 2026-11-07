@@ -91,6 +91,7 @@ pub const SYS_ACCEPT4: u64 = 288;
 pub const SYS_SENDFILE: u64 = 40;
 pub const SYS_STATX: u64 = 332;
 pub const EAFNOSUPPORT: i64 = 97;
+pub const EMSGSIZE: i64 = 90;
 pub const ENOTSOCK: i64 = 88;
 pub const EPROTONOSUPPORT: i64 = 93;
 pub const SYS_CLOCK_GETRES: u64 = 229;
@@ -559,7 +560,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_RECVMSG => vfs::sys_recvmsg(a1, a2, a3),
         SYS_GETSOCKNAME => vfs::sys_getsockname(a1, a2, a3),
         SYS_GETPEERNAME => vfs::sys_getpeername(a1, a2, a3),
-        SYS_SETSOCKOPT => vfs::sys_setsockopt(a1),
+        SYS_SETSOCKOPT => vfs::sys_setsockopt(a1, a2, a3, a4, a5),
         SYS_GETSOCKOPT => vfs::sys_getsockopt(a1, a2, a3, a4, a5),
         SYS_GETRANDOM => match unsafe { user_slice_mut(a1, a2.min(1 << 20)) } {
             Some(buf) => {

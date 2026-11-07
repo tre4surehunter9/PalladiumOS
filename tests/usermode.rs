@@ -1921,3 +1921,15 @@ fn eth0_is_configured_by_dhcp() {
     assert_eq!(config.gateway.map(|g| alloc::format!("{}", g)).as_deref(), Some("10.0.2.2"));
     assert_eq!(config.dns.map(|d| alloc::format!("{}", d)).as_deref(), Some("10.0.2.3"));
 }
+
+#[test_case]
+fn busybox_ping_over_loopback() {
+    if c_program("busybox").is_none() || !filesystem::is_dir("/usr/bin") {
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("ping -c 2 -W 3 127.0.0.1 > /tmp/ping.out 2>&1"), 0, "{}", file("/tmp/ping.out"));
+    assert!(file("/tmp/ping.out").contains("2 packets transmitted, 2 packets received"), "{}", file("/tmp/ping.out"));
+    // Raw sockets are for root: an ordinary user's ping is refused.
+    assert_ne!(sh("su user -c 'ping -c 1 127.0.0.1' > /tmp/ping2.out 2>&1"), 0);
+}

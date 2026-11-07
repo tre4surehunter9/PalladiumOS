@@ -1485,11 +1485,11 @@ fn result(r: Result<i64, i64>) -> i64 {
 
 /// socket(domain, type, protocol): AF_INET, SOCK_STREAM (TCP) or
 /// SOCK_DGRAM (UDP), with SOCK_NONBLOCK / SOCK_CLOEXEC.
-pub fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> i64 {
+pub fn sys_socket(domain: u64, ty: u64, protocol: u64) -> i64 {
     if domain != sock::AF_INET {
         return -EAFNOSUPPORT; // no IPv6 or Unix-domain sockets yet
     }
-    let s = match Socket::new(ty) {
+    let s = match Socket::new(ty, protocol) {
         Ok(s) => s,
         Err(e) => return -e,
     };
@@ -1536,6 +1536,7 @@ pub fn sys_sendto(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, alen: u64)
     result((|| {
         let s = socket_of(fd)?;
         let to = if addr != 0 && !s.is_stream() {
+            // (raw sockets: the port in the address is ignored, as on Linux)
             let (a, port) = read_sockaddr(addr, alen)?;
             Some(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(a), port))
         } else {
@@ -1574,10 +1575,19 @@ pub fn sys_getpeername(fd: u64, addr: u64, len_ptr: u64) -> i64 {
     result(socket_of(fd).and_then(|s| s.peer()).and_then(|p| write_sockaddr(addr, len_ptr, p)).map(|_| 0))
 }
 
-/// setsockopt: accepted (SO_REUSEADDR, TCP_NODELAY, timeouts...), and
-/// ignored: the stack's defaults apply.
-pub fn sys_setsockopt(fd: u64) -> i64 {
-    result(socket_of(fd).map(|_| 0))
+/// setsockopt: IP_HDRINCL and IP_TTL for raw sockets; the rest
+/// (SO_REUSEADDR, TCP_NODELAY, timeouts...) is accepted and ignored: the
+/// stack's defaults apply.
+pub fn sys_setsockopt(fd: u64, level: u64, name: u64, val: u64, len: u64) -> i64 {
+    const IPPROTO_IP: u64 = 0;
+    result((|| {
+        let s = socket_of(fd)?;
+        if level == IPPROTO_IP && val != 0 && len >= 4 {
+            let b = unsafe { crate::syscall::user_slice(val, 4) }.ok_or(EFAULT)?;
+            s.set_ip_option(name, u32::from_le_bytes(b.try_into().unwrap()));
+        }
+        Ok(0)
+    })())
 }
 
 /// getsockopt: SO_ERROR (a failed non-blocking connect) and SO_TYPE;

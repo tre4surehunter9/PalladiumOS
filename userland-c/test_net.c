@@ -7,6 +7,8 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -42,6 +44,89 @@ static ssize_t read_all(int fd, char *buf, size_t n)
 }
 
 #define BIG (200 * 1024)
+
+/* The Internet checksum (ICMP, IP headers). */
+static unsigned short cksum(const void *data, int len)
+{
+    const unsigned short *p = data;
+    unsigned long sum = 0;
+    for (; len > 1; len -= 2)
+        sum += *p++;
+    if (len)
+        sum += *(const unsigned char *)p;
+    sum = (sum >> 16) + (sum & 0xffff);
+    sum += sum >> 16;
+    return (unsigned short)~sum;
+}
+
+/* Raw ICMP: an echo request to 127.0.0.1 and its reply (root only). */
+static int raw_sockets(void)
+{
+    int r = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    CHECK(r >= 0);
+    struct sockaddr_in to = loopback(0);
+    unsigned char pkt[64] = {0};
+    struct icmphdr *icmp = (struct icmphdr *)pkt;
+    icmp->type = ICMP_ECHO;
+    icmp->un.echo.id = htons(0x4242);
+    icmp->un.echo.sequence = htons(7);
+    memcpy(pkt + 8, "palladium", 9);
+    icmp->checksum = cksum(pkt, sizeof pkt);
+    CHECK(sendto(r, pkt, sizeof pkt, 0, (struct sockaddr *)&to, sizeof to) == sizeof pkt);
+    /* Replies come with their IP header. (Our own request may come by too,
+     * on loopback: skip it.) */
+    for (int tries = 0; tries < 4; tries++) {
+        unsigned char in[256];
+        struct sockaddr_in from;
+        socklen_t fl = sizeof from;
+        struct pollfd pfd = {r, POLLIN, 0};
+        CHECK(poll(&pfd, 1, 3000) == 1);
+        ssize_t n = recvfrom(r, in, sizeof in, 0, (struct sockaddr *)&from, &fl);
+        CHECK(n >= 20 + 8);
+        struct iphdr *ip = (struct iphdr *)in;
+        CHECK(ip->version == 4 && ip->protocol == IPPROTO_ICMP);
+        CHECK(from.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+        struct icmphdr *rep = (struct icmphdr *)(in + ip->ihl * 4);
+        if (rep->type == ICMP_ECHO)
+            continue;
+        CHECK(rep->type == ICMP_ECHOREPLY && ntohs(rep->un.echo.id) == 0x4242 && ntohs(rep->un.echo.sequence) == 7);
+        CHECK(memcmp((char *)rep + 8, "palladium", 9) == 0);
+        close(r);
+
+        /* IP_HDRINCL: we write the IP header ourselves */
+        r = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+        int on = 1;
+        CHECK(setsockopt(r, IPPROTO_IP, IP_HDRINCL, &on, sizeof on) == 0);
+        unsigned char full[20 + sizeof pkt];
+        struct iphdr *h = (struct iphdr *)full;
+        memset(full, 0, 20);
+        h->version = 4;
+        h->ihl = 5;
+        h->tot_len = htons(sizeof full);
+        h->ttl = 64;
+        h->protocol = IPPROTO_ICMP;
+        h->saddr = h->daddr = htonl(INADDR_LOOPBACK);
+        icmp->un.echo.sequence = htons(8);
+        icmp->checksum = 0;
+        icmp->checksum = cksum(pkt, sizeof pkt);
+        memcpy(full + 20, pkt, sizeof pkt);
+        CHECK(sendto(r, full, sizeof full, 0, (struct sockaddr *)&to, sizeof to) == sizeof full);
+        for (int t = 0; t < 4; t++) {
+            struct pollfd p2 = {r, POLLIN, 0};
+            CHECK(poll(&p2, 1, 3000) == 1);
+            n = recv(r, in, sizeof in, 0);
+            rep = (struct icmphdr *)(in + 20);
+            if (n >= 28 && rep->type == ICMP_ECHOREPLY) {
+                CHECK(ntohs(rep->un.echo.sequence) == 8);
+                close(r);
+                return 0;
+            }
+        }
+        CHECK(!"no reply to the IP_HDRINCL echo");
+    }
+    CHECK(!"no echo reply");
+    return 0;
+}
 
 int main(void)
 {
@@ -180,6 +265,22 @@ int main(void)
     CHECK(getaddrinfo("localhost", "80", &hints, &res) == 0);
     CHECK(((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr == htonl(INADDR_LOOPBACK));
     freeaddrinfo(res);
+
+    /* ---- raw sockets: root only ---- */
+    if (geteuid() == 0) {
+        int r = raw_sockets();
+        if (r)
+            return r;
+        pid_t user = fork();
+        if (user == 0) {
+            if (setuid(1000) != 0)
+                _exit(2);
+            _exit(socket(AF_INET, SOCK_RAW, IPPROTO_ICMP) == -1 && errno == EPERM ? 0 : 1);
+        }
+        CHECK(waitpid(user, &st, 0) == user && WEXITSTATUS(st) == 0);
+    } else {
+        printf("test_net: not root, skipping raw sockets\n");
+    }
 
     printf("test_net: all checks passed\n");
     return 0;

@@ -39,7 +39,8 @@ bootloader = { version = "0.9", features = ["map_physical_memory"]}
 # TCP/IP (no_std): Ethernet, IPv4, ARP, DHCP, TCP, UDP, ICMP.
 smoltcp = { version = "0.14", default-features = false, features = [
     "alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "proto-dhcpv4",
-    "socket-tcp", "socket-udp", "socket-icmp", "socket-dhcpv4",
+    "socket-tcp", "socket-udp", "socket-icmp", "socket-dhcpv4", "socket-raw",
+    "auto-icmp-echo-reply", # answer pings
 ] }
 volatile = "0.2.6"
 spin = "0.5.2"
