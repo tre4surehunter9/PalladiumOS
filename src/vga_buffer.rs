@@ -64,6 +64,12 @@ pub struct Writer {
     pending_len: usize,
     /// The last character printed (for CSI b, "repeat it").
     last_char: u8,
+    /// Inside a string sequence (OSC, DCS, APC, PM, SOS: ESC ] ... BEL or
+    /// ESC \), which is skipped; and whether its last byte was ESC.
+    in_string: bool,
+    string_esc: bool,
+    /// Where ESC 7 saved the cursor.
+    saved_cursor: (usize, usize),
 }
 
 
@@ -188,6 +194,9 @@ lazy_static! {
         pending: [0; 32],
         pending_len: 0,
         last_char: b' ',
+        in_string: false,
+        string_esc: false,
+        saved_cursor: (0, 0),
     });
 }
 
@@ -249,6 +258,13 @@ fn test_ansi_editing_sequences() {
         // Scroll up (S).
         w.write_ansi(b"\x1b[1S");
         assert!(is(&w, 0, "second") && is(&w, 1, "third"));
+        // String sequences (bash's OSC 3008 under systemd) are skipped,
+        // even split across writes; ESC 7 / ESC 8; private CSI ignored.
+        w.write_ansi(b"\x1b[2J\x1b[Hab\x1b]3008;start=x;cwd=/home");
+        w.write_ansi(b"/someone\x1b\\cd\x1b]0;title\x07e\x1b[>4;1m\x1b[!pf\x0eg");
+        assert!(is(&w, 0, "abcdefg"));
+        w.write_ansi(b"\x1b[3;5H\x1b7\x1b[10;10Hx\x1b8y\x1b(Bz");
+        assert!(is(&w, 2, "    yz"));
         w.write_ansi(b"\x1b[2J\x1b[H");
     });
 }
@@ -384,15 +400,93 @@ impl Writer {
         let mut i = 0;
         while i < bytes.len() {
             let b = bytes[i];
+            // The body of a string sequence (like the OSC 3008 status reports
+            // bash sends under systemd): skipped up to BEL or ESC \, even
+            // across writes.
+            if self.in_string {
+                if b == 0x07 || (self.string_esc && b == b'\\') {
+                    self.in_string = false;
+                }
+                self.string_esc = b == 0x1b;
+                i += 1;
+                continue;
+            }
             if b == 0x1b && i + 1 == bytes.len() {
                 self.pending[0] = 0x1b;
                 self.pending_len = 1;
                 break;
             }
+            if b == 0x1b && bytes.get(i + 1) != Some(&b'[') {
+                let next = bytes[i + 1];
+                match next {
+                    // OSC, DCS, SOS, PM, APC: a string, skipped.
+                    b']' | b'P' | b'X' | b'^' | b'_' => {
+                        self.in_string = true;
+                        self.string_esc = false;
+                        i += 2;
+                    }
+                    // Character set selection: ESC ( B and the like (ignored).
+                    b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' | b'#' | b'%' => {
+                        if i + 2 >= bytes.len() {
+                            let rest = &bytes[i..];
+                            self.pending[..rest.len()].copy_from_slice(rest);
+                            self.pending_len = rest.len();
+                            break;
+                        }
+                        i += 3;
+                    }
+                    b'7' => {
+                        self.saved_cursor = (self.row_position, self.column_position);
+                        i += 2;
+                    }
+                    b'8' => {
+                        (self.row_position, self.column_position) = self.saved_cursor;
+                        i += 2;
+                    }
+                    // Index (down a line, scrolling at the bottom), next line,
+                    // reverse index (up a line, scrolling at the top).
+                    b'D' => {
+                        let col = self.column_position;
+                        self.new_line();
+                        self.column_position = col;
+                        i += 2;
+                    }
+                    b'E' => {
+                        self.new_line();
+                        self.column_position = 0;
+                        i += 2;
+                    }
+                    b'M' => {
+                        if self.row_position > 0 {
+                            self.row_position -= 1;
+                        } else {
+                            self.shift_rows(0, 1, true);
+                        }
+                        i += 2;
+                    }
+                    // Full reset: default colors, a clear screen.
+                    b'c' => {
+                        self.reset_attributes();
+                        self.apply_attributes();
+                        self.blank(0, BUFFER_WIDTH * BUFFER_HEIGHT);
+                        self.row_position = 0;
+                        self.column_position = 0;
+                        i += 2;
+                    }
+                    // Keypad modes (ESC = / ESC >) and anything else: ignored.
+                    _ => i += 2,
+                }
+                continue;
+            }
             if b == 0x1b && bytes.get(i + 1) == Some(&b'[') {
+                // CSI: parameter bytes (0x30-0x3F), intermediate bytes
+                // (0x20-0x2F), then a final byte (0x40-0x7E). Sequences with
+                // a private prefix other than '?' (like ESC[>4;1m) or with
+                // intermediates (like ESC[!p) are read whole and ignored.
                 let mut params = [0u16; 8];
                 let mut count = 0;
                 let mut have_digit = false;
+                let mut ignore = false;
                 let mut j = i + 2;
                 while j < bytes.len() {
                     match bytes[j] {
@@ -407,6 +501,7 @@ impl Writer {
                             have_digit = false;
                         }
                         b'?' => {}
+                        b':' | b'<' | b'=' | b'>' | 0x20..=0x2f => ignore = true,
                         _ => break,
                     }
                     j += 1;
@@ -421,7 +516,9 @@ impl Writer {
                     break;
                 }
                 let n = (count + if have_digit || count > 0 { 1 } else { 0 }).min(params.len());
-                self.csi(bytes[j], &params[..n]);
+                if !ignore {
+                    self.csi(bytes[j], &params[..n]);
+                }
                 i = j + 1;
                 continue;
             }
@@ -435,8 +532,11 @@ impl Writer {
                         self.write_byte(b' ');
                     }
                 }
-                0x07 => {} // bell
                 0x20..=0x7e => self.write_byte(b),
+                // Other control characters (bell, shift in/out...) aren't
+                // printed, as on a terminal.
+                0x00..=0x1f | 0x7f => {}
+                // (Not ASCII: one block per byte, the VGA font has no UTF-8.)
                 _ => self.write_byte(0xfe),
             }
             i += 1;
