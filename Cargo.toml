@@ -3,6 +3,14 @@ name = "palladiumos"
 version = "0.4.0"
 edition = "2024"
 
+# The kernel lives in the higher half (it's linked at 0xffffffff80000000,
+# see .cargo/config.toml), so the whole lower half is for programs.
+[package.metadata.bootloader]
+physical-memory-offset = "0xFFFF800000000000"
+kernel-stack-address = "0xFFFFFE8000000000"
+kernel-stack-size = 128
+boot-info-address = "0xFFFFFF0000000000"
+
 [package.metadata.bootimage]
 test-timeout = 300 # (seconds)
 # The ext2 data disk (created by build.rs) is attached as the second IDE

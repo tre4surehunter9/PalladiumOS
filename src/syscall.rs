@@ -71,6 +71,7 @@ pub const SYS_SET_ROBUST_LIST: u64 = 273;
 pub const SYS_PRLIMIT64: u64 = 302;
 pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_CLONE: u64 = 56;
+pub const SYS_RSEQ: u64 = 334;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_SENDFILE: u64 = 40;
@@ -510,6 +511,8 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_SET_TID_ADDRESS => process::sys_set_tid_address(a1),
         SYS_FUTEX => process::sys_futex(a1, a2, a3, a4, a5, frame.r9),
         SYS_SET_ROBUST_LIST => 0,
+        // Restartable sequences: optional (glibc tries it and carries on).
+        SYS_RSEQ => -ENOSYS,
         SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(a2, a3),
         // limits, time, randomness
         SYS_GETRLIMIT => sys_prlimit(a1, 0, a2),

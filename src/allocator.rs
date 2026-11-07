@@ -2,7 +2,8 @@
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
 
-pub const HEAP_START: usize = 0x_4444_4444_0000;
+/// In the higher half, with the rest of the kernel.
+pub const HEAP_START: usize = 0xFFFF_9000_0000_0000;
 /// 32 MiB: each process needs a 16 KiB kernel stack, and /bin (an in-memory
 /// filesystem) holds every program, ported ones like lua included.
 pub const HEAP_SIZE: usize = 32 * 1024 * 1024;

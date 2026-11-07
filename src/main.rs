@@ -82,6 +82,7 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
 
         let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
         let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+        assert_eq!(phys_mem_offset.as_u64(), memory::PHYS_OFFSET, "physical-memory-offset in Cargo.toml changed?");
         let mut mapper = unsafe { memory::init(phys_mem_offset) };
         memory::PHYS_MEM_OFFSET.store(phys_mem_offset.as_u64(), core::sync::atomic::Ordering::Relaxed);
         boot_ok!("Set up paging (physical memory mapped at {:#x})", phys_mem_offset.as_u64());
@@ -106,6 +107,10 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
         palladiumos::process::init();
         boot_ok!("Started the scheduler (preemptive, up to {} processes)", palladiumos::process::MAX_PROCESSES);
+        boot_ok!(
+            "Kernel at {:#x} (higher half); lower half free for programs",
+            kernel_main as *const () as u64
+        );
         palladiumos::rtc::init();
         boot_ok!("Read the real-time clock: {}", palladiumos::boot::format_date(palladiumos::rtc::now()));
         // Keys pressed before anything reads the keyboard must not be lost.

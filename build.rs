@@ -10,9 +10,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Load address of user programs: 512 GiB, the second level-4 page-table
-/// slot. Slot 0 holds the kernel (0x200000), and each process's user slots
-/// must be separate from the kernel's (see memory::is_user_slot).
+/// Load address of PalladiumOS's own (Rust) programs: 512 GiB. Any lower-
+/// half address works (the kernel is in the higher half); this one stays
+/// clear of where Linux programs and the brk heap go.
 const USER_IMAGE_BASE: &str = "0x8000000000";
 
 fn main() {
@@ -125,6 +125,7 @@ fn make_disk_images(root: &std::path::Path, out_dir: &std::path::Path) {
         mke2fs(&disk, "32M", None, &[]);
     }
 
+    build_linux_test(root);
     make_system_disk(root, &target);
 
     // A scratch disk for the tests (recreated every build).
@@ -259,4 +260,31 @@ fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
 
 fn dir_size(dir: &std::path::Path) -> u64 {
     walk(dir).iter().filter_map(|p| p.metadata().ok()).map(|m| if m.is_file() { m.len() + 1024 } else { 1024 }).sum()
+}
+
+/// A plain Linux program (tests/linux/hello.c) built by the host's gcc,
+/// statically against glibc, at the usual Linux address: it goes on the
+/// system disk as /usr/share/linux-test/hello, to check that PalladiumOS
+/// runs Linux binaries unchanged. Skipped if the host can't link
+/// statically (no static glibc).
+fn build_linux_test(root: &std::path::Path) {
+    let src = root.join("tests/linux/hello.c");
+    println!("cargo:rerun-if-changed=tests/linux/hello.c");
+    let sysroot = root.join("target/sysroot");
+    let out_dir = sysroot.join("share/linux-test");
+    if !sysroot.is_dir() {
+        return; // no system disk contents (tcc not built): nothing to add to
+    }
+    fs::create_dir_all(&out_dir).unwrap();
+    let ok = Command::new("gcc")
+        .args(["-static", "-O2", "-o"])
+        .arg(out_dir.join("hello"))
+        .arg(&src)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        let _ = fs::remove_dir_all(&out_dir);
+        println!("cargo:warning=host gcc can't link statically: skipping the Linux binary test");
+    }
 }

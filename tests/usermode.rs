@@ -286,15 +286,17 @@ fn elf_huge_segment_is_rejected() {
 }
 
 #[test_case]
-fn elf_overlapping_kernel_memory_is_rejected() {
-    // 0x200000 is where the kernel itself is mapped.
-    let b = patch_data_segment(hello(), P_VADDR, 0x20_0000);
-    assert!(elf::parse(&b).is_ok(), "address is in the user half, so parsing passes");
-    let before = frames_in_use();
-    assert!(run(&b, &["bad"]).is_err(), "must refuse to map over the kernel");
-    assert_eq!(frames_in_use(), before, "failed load leaked frames");
+fn the_lower_half_is_all_for_programs() {
+    // The kernel lives in the higher half: every lower-half slot is free
+    // for programs (Linux programs start at 0x400000), and nothing of the
+    // kernel's is mapped there.
+    assert!((0..256).all(palladiumos::memory::is_user_slot), "a lower-half slot is in use by the kernel");
+    assert!((256..512).any(|i| !palladiumos::memory::is_user_slot(i)));
+    assert!((kernel_address as usize as u64) >= 0xffff_8000_0000_0000, "the kernel's code is in the higher half");
     assert_eq!(launch_program(hello()), 0);
 }
+
+fn kernel_address() {}
 
 // ---- syscalls ----
 
@@ -1878,4 +1880,17 @@ fn posix_threads_work() {
     assert_eq!(file("/tmp/thr2.out"), "the other thread finished\n");
     assert!(only_kernel_left(), "{:?}", process::list());
     assert_eq!(frames_in_use(), before, "threads' stacks and memory were freed");
+}
+
+#[test_case]
+fn linux_binaries_run_unchanged() {
+    // A static glibc program from the host's gcc, at 0x400000 (only with a
+    // system disk built: see build.rs).
+    if !filesystem::is_dir("/usr/share/linux-test") {
+        palladiumos::serial_print!("(skipped: no Linux test binary) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("/usr/share/linux-test/hello one two > /tmp/linux.out 2>&1"), 0, "{}", file("/tmp/linux.out"));
+    assert_eq!(file("/tmp/linux.out"), "glibc on PalladiumOS: 2 args, heap 7, child 9\n");
 }

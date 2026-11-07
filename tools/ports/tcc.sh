@@ -8,12 +8,9 @@
 # tinycc's development branch ("mob"); releases are rare (0.9.27 is from 2017).
 fetch_git tinycc https://repo.or.cz/tinycc.git c638ddfb593214813aa33536fb993b9a45d23793
 
-# PalladiumOS changes:
-# - Programs load at 512 GiB (0x80_0000_0000): the low addresses where
-#   Linux programs start (0x400000) belong to the kernel.
-# - Link statically by default: PalladiumOS has no dynamic linker.
-sed -i 's/^#define ELF_START_ADDR 0x400000$/#define ELF_START_ADDR 0x8000000000/' x86_64-link.c
-grep -q 'ELF_START_ADDR 0x8000000000' x86_64-link.c
+# PalladiumOS change: link statically by default (no dynamic linker yet).
+# (Programs load at tcc's usual 0x400000, as on Linux: the kernel lives in
+# the higher half.)
 sed -i 's/^    s->nocommon = 1;$/    s->nocommon = 1;\n    s->static_link = 1; \/* PalladiumOS: no dynamic linker *\//' libtcc.c
 grep -q 's->static_link = 1; /\* PalladiumOS' libtcc.c
 

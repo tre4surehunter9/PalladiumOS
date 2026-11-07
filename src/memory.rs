@@ -348,11 +348,25 @@ use x86_64::structures::paging::{OffsetPageTable as Opt, PageTableIndex};
 /// Physical address of the kernel's own level-4 table (set by init_address_spaces).
 static KERNEL_P4: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Remember the boot page table as the kernel's. Call once after PHYS_MEM_OFFSET is set.
+/// Where all physical memory is mapped (set in Cargo.toml's bootloader
+/// config, physical-memory-offset): the start of the higher half.
+pub const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
+
+/// Remember the boot page table as the kernel's, and give the whole lower
+/// half to programs. The kernel lives in the higher half; the lower half
+/// only holds the bootloader's identity map of itself, which is no longer
+/// needed once the kernel's own GDT and IDT are loaded. (Programs can then
+/// use any lower-half address, like 0x400000 where Linux programs start.)
+/// Call once after PHYS_MEM_OFFSET is set.
 pub fn init_address_spaces() {
     use x86_64::registers::control::Cr3;
     let (frame, _) = Cr3::read();
     KERNEL_P4.store(frame.start_address().as_u64(), core::sync::atomic::Ordering::Relaxed);
+    let p4 = table_at(frame);
+    for i in 0..256 {
+        p4[i].set_unused();
+    }
+    x86_64::instructions::tlb::flush_all();
 }
 
 pub fn kernel_p4() -> PhysFrame {

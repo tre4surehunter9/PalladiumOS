@@ -175,7 +175,9 @@ lazy_static! {
         column_position: 0,
         row_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
-        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+        // The text buffer (physical 0xb8000), through the kernel's
+        // physical-memory window (the low half belongs to programs).
+        buffer: unsafe { &mut *((crate::memory::PHYS_OFFSET + 0xb8000) as *mut Buffer) },
         fg: DEFAULT_FG,
         bg: DEFAULT_BG,
         bold: false,
