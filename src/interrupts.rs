@@ -64,6 +64,7 @@ extern "C" fn timer_dispatch(frame: &mut crate::syscall::SyscallFrame) {
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
     crate::process::tick();
+    crate::xhci::poll(); // USB keyboards
     // Preemptive multitasking: only when we interrupted a user program, never
     // in the middle of kernel code (which may hold locks). Signals (Ctrl-C,
     // alarms) reach busy programs here too.

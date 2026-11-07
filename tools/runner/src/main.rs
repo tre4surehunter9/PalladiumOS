@@ -39,6 +39,8 @@ const RUN_ARGS: &[&str] = &[
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
     "-drive", "format=raw,file=target/alpine.img,index=3,media=disk",
     "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22", "-device", "rtl8139,netdev=net0",
+    // A USB keyboard (QEMU sends the window's keys to it, not to PS/2).
+    "-device", "qemu-xhci", "-device", "usb-kbd",
 ];
 
 /// QEMU's arguments for test kernels.
@@ -251,6 +253,20 @@ fn find_ovmf() -> Option<PathBuf> {
     candidates.iter().map(PathBuf::from).find(|p| p.exists())
 }
 
+/// Extra QEMU arguments for some test kernels, by name.
+fn test_extra_args(kernel: &Path, test: bool) -> &'static [&'static str] {
+    let name = kernel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if !test {
+        &[]
+    } else if name.starts_with("ahci-") {
+        &["-machine", "q35"] // q35 has its disks on AHCI
+    } else if name.starts_with("usb-") {
+        &["-device", "qemu-xhci", "-device", "usb-kbd"]
+    } else {
+        &[]
+    }
+}
+
 fn run(kernel: &Path, extra: &[String], uefi: bool) {
     let test = is_test_kernel(kernel);
     let image = PathBuf::from(format!("{}{}.img", kernel.display(), if uefi { ".uefi" } else { "" }));
@@ -265,12 +281,7 @@ fn run(kernel: &Path, extra: &[String], uefi: bool) {
         .arg(format!("format=raw,file={}", image.canonicalize().unwrap_or(image.clone()).display()))
         .arg("-no-reboot")
         .args(if test { TEST_ARGS } else { RUN_ARGS })
-        // The AHCI tests: QEMU's q35 machine has its disks on AHCI.
-        .args(if test && kernel.file_name().is_some_and(|n| n.to_string_lossy().starts_with("ahci-")) {
-            &["-machine", "q35"][..]
-        } else {
-            &[][..]
-        })
+        .args(test_extra_args(kernel, test))
         .args(extra);
 
     if !test {

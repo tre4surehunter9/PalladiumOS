@@ -309,6 +309,7 @@ How it works: `cargo run` attaches a third disk, `target/alpine.img` (1 GiB, spa
 * `tests/filesystem.rs` - the filesystem and shell commands
 * `tests/ext2.rs` - the ext2 driver, the VFS, `/dev`, the ATA disk driver and the clock
 * `tests/ahci.rs` - the AHCI (SATA) disk driver, on QEMU's q35 machine
+* `tests/usb.rs` - the USB keyboard driver, with QEMU's xHCI controller and USB keyboard
 * `tests/heap_allocation.rs`, `tests/stack_overflow.rs`, `tests/should_panic.rs`, `tests/basic_boot.rs` - kernel basics
 
 The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh` rebuilds them).
@@ -324,6 +325,8 @@ The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh
 | `/tmp` | memory | cleared on reboot |
 | `/dev` | devfs | `null`, `zero`, `random`, `urandom`, `tty`, `console`, `ptmx`, `pts/N` |
 | `/proc` | procfs | live process and system information (below) |
+
+**Keyboards**: PS/2, and USB keyboards on an xHCI (USB 3) controller, the USB controller of PCs since about 2012. The kernel sets the controller up, finds keyboards on its ports, and turns their key reports into the same scancodes a PS/2 keyboard sends (with key repeat, which USB keyboards leave to the computer). `cargo run` gives QEMU a USB keyboard, so typing in the window goes through USB.
 
 Disks work on IDE (QEMU's default machine; the kernel talks ATA through I/O ports) and on **AHCI**, the SATA controller standard of modern PCs (the kernel finds the controller on PCI and moves sectors by DMA). Disk N is QEMU's `-drive ...,index=N`: the IDE position N, or SATA port N. Try it with `cargo run -- -machine q35`, where every disk is on AHCI.
 
