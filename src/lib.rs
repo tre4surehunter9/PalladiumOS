@@ -118,7 +118,17 @@ pub fn init() {
     }
     syscall::init_fast_syscalls();
     boot_ok!("Enabled the syscall instruction (Linux x86_64 ABI)");
-    unsafe { interrupts::PICS.lock().initialize() };
+    interrupts::disable_local_apic();
+    interrupts::start_timer();
+    unsafe {
+        let mut pics = interrupts::PICS.lock();
+        pics.initialize();
+        // Exactly the timer (0), the keyboard (1) and the cascade to the
+        // second PIC (2); the network card's line is let through when its
+        // driver starts. (initialize() keeps the firmware's masks: a BIOS
+        // leaves the timer and keyboard on, UEFI firmware masks them.)
+        pics.write_masks(0b1111_1000, 0b1111_1111);
+    }
     x86_64::instructions::interrupts::enable();
     boot_ok!("Started interrupts (PIC remapped, timer at 18.2 Hz)");
 }

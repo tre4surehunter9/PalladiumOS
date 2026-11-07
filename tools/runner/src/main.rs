@@ -3,8 +3,12 @@
 //! Turns a kernel ELF into a bootable disk image with the bootloader crate
 //! (0.11) and starts QEMU, like `bootimage runner` did for bootloader 0.9.
 //!
-//!   palladium-runner KERNEL [QEMU ARGS...]     cargo run / cargo test
-//!   palladium-runner image KERNEL OUT.img      just make the disk image
+//!   palladium-runner KERNEL [--uefi] [QEMU ARGS...]   cargo run / cargo test
+//!   palladium-runner image KERNEL OUT.img [--uefi]    just make the disk image
+//!
+//! BIOS by default. With --uefi (or PALLADIUM_UEFI=1, e.g. `cargo run --
+//! --uefi`), a UEFI disk image (GPT, an EFI system partition), booted by
+//! the OVMF firmware (Arch: edk2-ovmf; or point OVMF at the file).
 //!
 //! Test kernels (cargo names them NAME-HASH) run without a
 //! window, with serial output on the terminal and a time limit; they report
@@ -37,11 +41,14 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let uefi_flag = args.iter().any(|a| a == "--uefi");
+    let uefi = uefi_flag || std::env::var("PALLADIUM_UEFI").is_ok_and(|v| v == "1");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--uefi").collect();
     match args.first().map(String::as_str) {
         Some("image") if args.len() == 3 => {
-            make_image(Path::new(&args[1]), Path::new(&args[2]));
+            make_image(Path::new(&args[1]), Path::new(&args[2]), uefi);
         }
-        Some(kernel) => run(Path::new(kernel), &args[1..]),
+        Some(kernel) => run(Path::new(kernel), &args[1..], uefi),
         None => {
             eprintln!("usage: palladium-runner KERNEL [QEMU ARGS...] | palladium-runner image KERNEL OUT.img");
             exit(2);
@@ -49,13 +56,18 @@ fn main() {
     }
 }
 
-fn make_image(kernel: &Path, out: &Path) {
+fn make_image(kernel: &Path, out: &Path, uefi: bool) {
     // Without its debug info (kept in the kernel file itself, for
     // addr2line): the bootloader loads the whole file through the BIOS,
     // and debug info would make that slow and use up memory.
     let stripped = PathBuf::from(format!("{}.stripped", kernel.display()));
     let source = if strip(kernel, &stripped) { stripped.as_path() } else { kernel };
-    if let Err(e) = bootloader::BiosBoot::new(source).create_disk_image(out) {
+    let made = if uefi {
+        bootloader::UefiBoot::new(source).create_disk_image(out)
+    } else {
+        bootloader::BiosBoot::new(source).create_disk_image(out)
+    };
+    if let Err(e) = made {
         eprintln!("palladium-runner: can't make a disk image from {}: {e}", kernel.display());
         exit(1);
     }
@@ -96,12 +108,37 @@ fn is_test_kernel(kernel: &Path) -> bool {
     hashed || kernel.components().any(|c| c.as_os_str() == "deps")
 }
 
-fn run(kernel: &Path, extra: &[String]) {
+/// The OVMF firmware for UEFI booting: $OVMF, or where distributions put it.
+fn ovmf() -> PathBuf {
+    if let Ok(path) = std::env::var("OVMF") {
+        return PathBuf::from(path);
+    }
+    let candidates = [
+        "/usr/share/edk2/x64/OVMF.4m.fd",
+        "/usr/share/ovmf/x64/OVMF.4m.fd",
+        "/usr/share/edk2-ovmf/x64/OVMF.4m.fd",
+        "/usr/share/OVMF/OVMF.fd",
+        "/usr/share/ovmf/OVMF.fd",
+        "/usr/share/qemu/OVMF.fd",
+    ];
+    match candidates.iter().map(PathBuf::from).find(|p| p.exists()) {
+        Some(p) => p,
+        None => {
+            eprintln!("palladium-runner: no OVMF firmware found for UEFI (install edk2-ovmf / ovmf, or set OVMF=path)");
+            exit(1)
+        }
+    }
+}
+
+fn run(kernel: &Path, extra: &[String], uefi: bool) {
     let test = is_test_kernel(kernel);
-    let image = PathBuf::from(format!("{}.img", kernel.display()));
-    make_image(kernel, &image);
+    let image = PathBuf::from(format!("{}{}.img", kernel.display(), if uefi { ".uefi" } else { "" }));
+    make_image(kernel, &image, uefi);
 
     let mut qemu = Command::new("qemu-system-x86_64");
+    if uefi {
+        qemu.arg("-bios").arg(ovmf());
+    }
     qemu.current_dir(repo_root(kernel))
         .arg("-drive")
         .arg(format!("format=raw,file={}", image.canonicalize().unwrap_or(image.clone()).display()))

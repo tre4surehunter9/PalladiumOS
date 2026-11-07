@@ -130,6 +130,36 @@ extern "x86-interrupt" fn pci_irq11(_f: InterruptStackFrame) {
     pci_irq(11);
 }
 
+/// Turn off the CPU's local APIC, so interrupts come straight from the 8259
+/// PICs (the timer, keyboard, network card): the classic PC setup that the
+/// kernel's interrupt code uses. A BIOS leaves the APIC passing PIC
+/// interrupts through, but UEFI firmware (OVMF) leaves it blocking them,
+/// and nothing would ever interrupt.
+pub fn disable_local_apic() {
+    use x86_64::registers::model_specific::Msr;
+    const IA32_APIC_BASE: u32 = 0x1B;
+    const GLOBAL_ENABLE: u64 = 1 << 11;
+    let mut msr = Msr::new(IA32_APIC_BASE);
+    unsafe {
+        let base = msr.read();
+        if base & GLOBAL_ENABLE != 0 {
+            msr.write(base & !GLOBAL_ENABLE);
+        }
+    }
+}
+
+/// Program the PIT's channel 0 for the timer interrupt: a square wave at
+/// 1193182 Hz / 65536 = 18.2 Hz (process::TICK_NS). A BIOS leaves it like
+/// that; UEFI firmware may not have it running at all.
+pub fn start_timer() {
+    use x86_64::instructions::port::Port;
+    unsafe {
+        Port::<u8>::new(0x43).write(0x36); // channel 0, low then high byte, mode 3
+        Port::<u8>::new(0x40).write(0); // divisor 0 = 65536
+        Port::<u8>::new(0x40).write(0);
+    }
+}
+
 /// Let interrupt line `irq` through the PICs (and the cascade, for 8-15).
 pub fn unmask_irq(irq: u8) {
     if !(9..=11).contains(&irq) {

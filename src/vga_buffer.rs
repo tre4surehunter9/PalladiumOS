@@ -1,8 +1,8 @@
 // Copyright (c) 2026 tre4surehunter9
 //! The console: a grid of character cells with VGA colors, drawn into the
 //! framebuffer the bootloader set up (bootloader 0.11: a graphics mode, not
-//! VGA text mode) with a 9x16 font, at as many cells as fit (113x48 at
-//! 1024x768). Before the framebuffer is set up (early boot), text goes into
+//! VGA text mode) with a 9x16 font, at as many cells as fit (142x45 at
+//! 1280x720; big screens get the font scaled up, 2x at 2560x1600). Before the framebuffer is set up (early boot), text goes into
 //! the grid only. The grid stays readable for tests and for QEMU's monitor
 //! (its address is logged to the serial port at boot).
 
@@ -70,6 +70,9 @@ struct Fb {
     bpp: usize,
     bgr: bool,
     gray: bool,
+    /// Each font pixel is drawn as scale x scale pixels (big screens, like
+    /// UEFI's 2560x1600, get bigger text instead of a corner of tiny text).
+    scale: usize,
 }
 
 // (Only touched with the WRITER lock held.)
@@ -199,7 +202,7 @@ impl Writer {
             self.grid[row - 1] = self.grid[row];
         }
         if let Some(fb) = &self.fb {
-            let row_bytes = fb.stride * fb.bpp * CELL_H;
+            let row_bytes = fb.stride * fb.bpp * CELL_H * fb.scale;
             let used = row_bytes * self.height;
             if used <= fb.len {
                 // SAFETY: inside the framebuffer; copy handles the overlap.
@@ -418,13 +421,16 @@ impl Writer {
             c @ 0x21..=0x7e => get_raster(c as char, FontWeight::Regular, RasterHeight::Size16),
             _ => None,
         };
-        let (x0, y0) = (col * CELL_W, row * CELL_H);
-        if x0 + CELL_W > fb.width || y0 + CELL_H > fb.height {
+        let k = fb.scale;
+        let (x0, y0) = (col * CELL_W * k, row * CELL_H * k);
+        if x0 + CELL_W * k > fb.width || y0 + CELL_H * k > fb.height {
             return;
         }
-        for y in 0..CELL_H {
-            let line = unsafe { fb.buf.add(((y0 + y) * fb.stride + x0) * fb.bpp) };
-            for x in 0..CELL_W {
+        for py in 0..CELL_H * k {
+            let y = py / k;
+            let line = unsafe { fb.buf.add(((y0 + py) * fb.stride + x0) * fb.bpp) };
+            for px_i in 0..CELL_W * k {
+                let x = px_i / k;
                 // How much foreground: the glyph's coverage, a solid block for
                 // 0xfe (the VGA font's square), full for the cursor's line.
                 let mut on: u32 = match (ch.ascii_character, &glyph) {
@@ -438,7 +444,7 @@ impl Writer {
                 let mix = |f: u8, b: u8| ((f as u32 * on + b as u32 * (255 - on)) / 255) as u8;
                 let (r, g, b) = (mix(fg[0], bg[0]), mix(fg[1], bg[1]), mix(fg[2], bg[2]));
                 unsafe {
-                    let px = line.add(x * fb.bpp);
+                    let px = line.add(px_i * fb.bpp);
                     if fb.gray {
                         *px = ((r as u16 + g as u16 + b as u16) / 3) as u8;
                     } else if fb.bgr {
@@ -457,8 +463,8 @@ impl Writer {
 
     /// Start drawing into the framebuffer: as many cells as fit, cleared.
     fn use_framebuffer(&mut self, fb: Fb) {
-        self.width = (fb.width / CELL_W).clamp(1, MAX_WIDTH);
-        self.height = (fb.height / CELL_H).clamp(1, MAX_HEIGHT);
+        self.width = (fb.width / (CELL_W * fb.scale)).clamp(1, MAX_WIDTH);
+        self.height = (fb.height / (CELL_H * fb.scale)).clamp(1, MAX_HEIGHT);
         // Black around the cells (the right and bottom edges).
         unsafe { core::ptr::write_bytes(fb.buf, 0, fb.len) };
         self.fb = Some(fb);
@@ -481,6 +487,8 @@ pub fn init_framebuffer(fb: bootloader_api::info::FrameBuffer) {
         bpp: info.bytes_per_pixel,
         bgr: !matches!(info.pixel_format, PixelFormat::Rgb),
         gray: matches!(info.pixel_format, PixelFormat::U8),
+        // 1x up to about 1280x720, 2x from 2560x1440, and so on.
+        scale: (info.width / 1280).min(info.height / 720).max(1),
     };
     x86_64::instructions::interrupts::without_interrupts(|| WRITER.lock().use_framebuffer(fb));
 }
