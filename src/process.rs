@@ -1460,7 +1460,37 @@ pub fn tty_signal(sig: i32) {
 
 /// Called from the timer interrupt.
 pub fn tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    if now >= NEXT_LOAD_SAMPLE.load(Ordering::Relaxed) {
+        sample_load(now);
+    }
+}
+
+/// Load averages over 1, 5 and 15 minutes, as on Linux: fixed point with
+/// 11 fraction bits, updated every 5 seconds with the number of processes
+/// running or ready to run.
+static LOAD: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+static NEXT_LOAD_SAMPLE: AtomicU64 = AtomicU64::new(0);
+const LOAD_FIXED_1: u64 = 1 << 11;
+/// e^(-5 s / 1, 5, 15 min), times LOAD_FIXED_1.
+const LOAD_EXP: [u64; 3] = [1884, 2014, 2037];
+
+/// From the timer interrupt: never waits for the process table (a busy
+/// table means try again next tick).
+fn sample_load(now: u64) {
+    let Some(table) = TABLE.try_lock() else { return };
+    let running = table.values().filter(|p| p.pid != 0 && matches!(p.state, State::Running | State::Ready)).count() as u64;
+    drop(table);
+    for (load, exp) in LOAD.iter().zip(LOAD_EXP) {
+        let old = load.load(Ordering::Relaxed);
+        load.store((old * exp + running * LOAD_FIXED_1 * (LOAD_FIXED_1 - exp)) / LOAD_FIXED_1, Ordering::Relaxed);
+    }
+    NEXT_LOAD_SAMPLE.store(now + 5_000_000_000 / TICK_NS, Ordering::Relaxed);
+}
+
+/// The load averages, in hundredths (1.25 is 125).
+pub fn load_averages() -> [u64; 3] {
+    LOAD.each_ref().map(|l| l.load(Ordering::Relaxed) * 100 / LOAD_FIXED_1)
 }
 
 pub fn ticks() -> u64 {

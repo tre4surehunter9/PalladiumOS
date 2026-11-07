@@ -74,8 +74,11 @@ impl ProcFs {
             9 => crate::boot::log(), // the boot log (dmesg)
             4 => {
                 let (total, ready) = process::counts();
-                // No load average yet: show 0, with running/total and the last pid.
-                format!("0.00 0.00 0.00 {}/{} {}\n", ready, total, process::last_pid())
+                let [a, b, c] = process::load_averages();
+                format!(
+                    "{}.{:02} {}.{:02} {}.{:02} {}/{} {}\n",
+                    a / 100, a % 100, b / 100, b % 100, c / 100, c % 100, ready, total, process::last_pid()
+                )
             }
             5 => meminfo(),
             6 => {

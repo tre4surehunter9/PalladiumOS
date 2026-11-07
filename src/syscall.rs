@@ -818,6 +818,10 @@ fn sys_sysinfo(out: u64) -> i64 {
     };
     let uptime = process::ticks() * process::TICK_NS / 1_000_000_000;
     b[0..8].copy_from_slice(&uptime.to_le_bytes());
+    // Load averages, in 1/65536 (from hundredths).
+    for (i, l) in process::load_averages().iter().enumerate() {
+        b[8 + i * 8..16 + i * 8].copy_from_slice(&(l * 65536 / 100).to_le_bytes());
+    }
     b[32..40].copy_from_slice(&(total * 4096).to_le_bytes()); // totalram
     b[40..48].copy_from_slice(&(total.saturating_sub(used) * 4096).to_le_bytes()); // freeram
     b[80..82].copy_from_slice(&(process::process_count() as u16).to_le_bytes());

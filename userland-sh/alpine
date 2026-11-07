@@ -46,6 +46,9 @@ fi
 
 # DNS from PalladiumOS, and its /proc and /dev.
 cp /etc/resolv.conf "$ROOT/etc/resolv.conf" 2>/dev/null
+# The machine's own name resolves (servers like Apache look it up).
+HOST=$(uname -n)
+grep -qw "$HOST" "$ROOT/etc/hosts" 2>/dev/null || echo "127.0.0.1 $HOST" >> "$ROOT/etc/hosts"
 grep -q " $ROOT/proc " /proc/mounts || mount -t proc proc "$ROOT/proc"
 grep -q " $ROOT/dev " /proc/mounts || mount -t devtmpfs dev "$ROOT/dev"
 
