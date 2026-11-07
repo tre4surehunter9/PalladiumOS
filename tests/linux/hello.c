@@ -1,7 +1,9 @@
 /* Copyright (c) 2026 tre4surehunter9
- * A plain Linux program, built by the host's gcc against glibc (static, at
- * the usual 0x400000): checks that PalladiumOS runs Linux binaries as they
- * are. build.rs puts it on the system disk as /usr/share/linux-test/hello. */
+ * A plain Linux program, built by the host's gcc against glibc: checks that
+ * PalladiumOS runs Linux binaries as they are. build.rs puts it on the
+ * system disk twice: /usr/share/linux-test/hello (static, at the usual
+ * 0x400000) and hello-dyn (dynamically linked, with glibc's dynamic linker
+ * and libc.so.6 in /usr/lib). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -81,7 +81,7 @@ fn main() {
         writeln!(out, "    ({:?}, include_bytes!({:?})),", name, path.display().to_string()).unwrap();
     }
     let mut c_names = Vec::new();
-    for (name, path) in build_c_programs(&root).into_iter().chain(ported_programs(&root)) {
+    for (name, path) in build_c_programs(&root).into_iter().chain(build_dynamic(&root)).chain(ported_programs(&root)) {
         assert!(!names.contains(&name) && !c_names.contains(&name), "two programs are called {}", name);
         writeln!(out, "    ({:?}, include_bytes!({:?})),", name, path.display().to_string()).unwrap();
         c_names.push(name);
@@ -189,6 +189,60 @@ fn build_c_programs(root: &std::path::Path) -> Vec<(String, PathBuf)> {
     built
 }
 
+/// Dynamic linking: musl's libc.so (also its dynamic linker; PalladiumOS
+/// makes /lib/ld-musl-x86_64.so.1 point at /usr/lib/libc.so) goes on the
+/// system disk, with `ldd` (musl's libc.so answers to that name) and the
+/// shared libraries in userland-c/dynamic/lib*.c. The other programs there
+/// are linked dynamically (against them) and go in /bin.
+fn build_dynamic(root: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let src = root.join("userland-c/dynamic");
+    let cc = root.join("target/musl/bin/palladium-cc-dyn");
+    let libc_so = root.join("target/musl/lib/libc.so");
+    println!("cargo:rerun-if-changed=userland-c/dynamic");
+    println!("cargo:rerun-if-changed=target/musl/lib/libc.so");
+    if !cc.exists() || !libc_so.exists() {
+        return Vec::new(); // musl built without shared libraries
+    }
+    let lib = root.join("target/sysroot/lib");
+    let bin = root.join("target/sysroot/bin");
+    fs::create_dir_all(&lib).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy(&libc_so, lib.join("libc.so")).unwrap();
+    let ldd = bin.join("ldd");
+    let _ = fs::remove_file(&ldd);
+    std::os::unix::fs::symlink("/usr/lib/libc.so", &ldd).unwrap();
+
+    let Ok(entries) = fs::read_dir(&src) else { return Vec::new() };
+    let mut files: Vec<PathBuf> = entries.filter_map(|e| Some(e.ok()?.path())).filter(|p| p.extension().is_some_and(|x| x == "c")).collect();
+    files.sort();
+    let (libs, programs): (Vec<PathBuf>, Vec<PathBuf>) =
+        files.into_iter().partition(|p| p.file_name().unwrap().to_str().unwrap().starts_with("lib"));
+    let compile = |args: &[&std::ffi::OsStr]| {
+        let status = Command::new(&cc).args(["-O2", "-Wall"]).args(args).status().expect("failed to run palladium-cc-dyn");
+        assert!(status.success(), "compiling {:?} failed", args);
+    };
+    let mut link_libs = Vec::new();
+    for file in &libs {
+        let name = file.file_stem().unwrap().to_str().unwrap().to_string();
+        let so = lib.join(format!("{}.so", name));
+        compile(&["-shared".as_ref(), "-fPIC".as_ref(), "-o".as_ref(), so.as_os_str(), file.as_os_str()]);
+        link_libs.push(format!("-l{}", name.trim_start_matches("lib")));
+    }
+    let out = root.join("target/userland-c");
+    fs::create_dir_all(&out).unwrap();
+    let lflag = format!("-L{}", lib.display());
+    let mut built = Vec::new();
+    for file in &programs {
+        let name = file.file_stem().unwrap().to_str().unwrap().to_string();
+        let exe = out.join(&name);
+        let mut args: Vec<&std::ffi::OsStr> = vec!["-o".as_ref(), exe.as_os_str(), file.as_os_str(), lflag.as_ref()];
+        args.extend(link_libs.iter().map(|l| <String as AsRef<std::ffi::OsStr>>::as_ref(l)));
+        compile(&args);
+        built.push((name, exe));
+    }
+    built
+}
+
 /// Ported software built by tools/ports/*.sh (lua, ...), in target/ports/bin.
 fn ported_programs(root: &std::path::Path) -> Vec<(String, PathBuf)> {
     let dir = root.join("target/ports/bin");
@@ -286,5 +340,30 @@ fn build_linux_test(root: &std::path::Path) {
     if !ok {
         let _ = fs::remove_dir_all(&out_dir);
         println!("cargo:warning=host gcc can't link statically: skipping the Linux binary test");
+        return;
+    }
+    // The same, dynamically linked (as most Linux programs are), with the
+    // host's glibc dynamic linker and libc.so.6 on the system disk.
+    // PalladiumOS makes /lib64/ld-linux-x86-64.so.2 point at
+    // /usr/lib/ld-linux-x86-64.so.2.
+    let ld = std::path::Path::new("/lib64/ld-linux-x86-64.so.2");
+    let libc6 = Command::new("gcc").arg("-print-file-name=libc.so.6").output().ok()
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()));
+    let dyn_ok = ld.exists()
+        && libc6.as_ref().is_some_and(|p| p.is_absolute() && p.exists())
+        && Command::new("gcc")
+            .args(["-O2", "-o"])
+            .arg(out_dir.join("hello-dyn"))
+            .arg(&src)
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .status()
+            .is_ok_and(|s| s.success());
+    if dyn_ok {
+        let lib = sysroot.join("lib");
+        fs::create_dir_all(&lib).unwrap();
+        fs::copy(ld, lib.join("ld-linux-x86-64.so.2")).unwrap();
+        fs::copy(libc6.unwrap(), lib.join("libc.so.6")).unwrap();
+    } else {
+        let _ = fs::remove_file(out_dir.join("hello-dyn"));
     }
 }

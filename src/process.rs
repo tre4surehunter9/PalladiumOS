@@ -946,6 +946,7 @@ fn load_error_errno(e: &str) -> i64 {
     match e {
         ERR_TOO_MANY_ARGS => E2BIG,
         ERR_NO_MEMORY => ENOMEM,
+        usermode::ERR_NO_INTERP => ENOENT,
         _ => ENOEXEC,
     }
 }

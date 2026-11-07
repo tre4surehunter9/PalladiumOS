@@ -31,6 +31,8 @@ pub const MAX_ARG_BYTES: usize = 16 * 1024;
 
 pub const ERR_TOO_MANY_ARGS: &str = "argument list too long";
 pub const ERR_NO_MEMORY: &str = "out of memory";
+/// The program's interpreter (dynamic linker) doesn't exist.
+pub const ERR_NO_INTERP: &str = "program interpreter not found";
 
 /// A loaded program, ready to be entered.
 pub struct Image {
@@ -54,17 +56,25 @@ struct AuxInfo {
     phdr: u64,
     phnum: u64,
     phent: u64,
+    /// Where the interpreter was loaded (AT_BASE; 0: none).
+    base: u64,
     ids: Ids,
 }
 
 /// Build a new address space holding the program and its stack.
 pub fn build_image(bytes: &[u8], argv: &[&str], envp: &[&str], ids: Ids) -> Result<Image, &'static str> {
+    // A dynamically linked program: read its interpreter first (not while
+    // holding the frame allocator).
+    let interp = match elf::is_elf(bytes).then(|| elf::parse(bytes)).transpose()?.and_then(|e| e.interp) {
+        Some(path) => Some(crate::filesystem::read_bytes(&path).map_err(|_| ERR_NO_INTERP)?),
+        None => None,
+    };
     let mut alloc_guard = FRAME_ALLOCATOR.lock();
     let frames = alloc_guard.as_mut().expect("FRAME_ALLOCATOR not initialized");
     let p4 = memory::new_address_space(frames).ok_or(ERR_NO_MEMORY)?;
     let mut mapper = memory::mapper_for(p4);
 
-    match load(&mut mapper, frames, bytes, argv, envp, ids) {
+    match load(&mut mapper, frames, bytes, interp.as_deref(), argv, envp, ids) {
         Ok((entry, stack_pointer)) => Ok(Image { p4, entry, stack_pointer }),
         Err(e) => {
             memory::free_address_space(p4, frames);
@@ -101,23 +111,39 @@ fn load(
     mapper: &mut OffsetPageTable<'static>,
     frames: &mut BootInfoFrameAllocator,
     bytes: &[u8],
+    interp: Option<&[u8]>,
     argv: &[&str],
     envp: &[&str],
     ids: Ids,
 ) -> Result<(u64, u64), &'static str> {
     use PageTableFlags as F;
     let base = F::PRESENT | F::USER_ACCESSIBLE;
-    let mut aux = AuxInfo { entry: 0, phdr: 0, phnum: 0, phent: 0, ids };
-
-    let entry = if elf::is_elf(bytes) {
-        let image = elf::parse(bytes)?;
+    let mut aux = AuxInfo { entry: 0, phdr: 0, phnum: 0, phent: 0, base: 0, ids };
+    let mut map_elf = |mapper: &mut OffsetPageTable<'static>, image: &elf::Elf| -> Result<(), &'static str> {
         for seg in &image.segments {
             let flags = if seg.flags & elf::PF_W != 0 { base | F::WRITABLE } else { base };
             map_range(mapper, frames, seg.vaddr, seg.memsz, flags)?;
             copy_to_user(mapper, seg.vaddr, seg.data);
         }
-        aux = AuxInfo { entry: image.entry, phdr: image.phdr, phnum: image.phnum, phent: image.phent, ids };
-        image.entry
+        Ok(())
+    };
+
+    let entry = if elf::is_elf(bytes) {
+        let image = elf::parse(bytes)?;
+        map_elf(mapper, &image)?;
+        aux = AuxInfo { entry: image.entry, phdr: image.phdr, phnum: image.phnum, phent: image.phent, base: 0, ids };
+        match interp {
+            // Dynamically linked: the dynamic linker starts first, finds the
+            // program through the aux vector, loads its libraries, and
+            // jumps to its entry point.
+            Some(ld) => {
+                let ld = elf::parse_interp(ld)?;
+                map_elf(mapper, &ld)?;
+                aux.base = elf::INTERP_BASE;
+                ld.entry
+            }
+            None => image.entry,
+        }
     } else {
         if bytes.is_empty() || bytes.len() > MAX_FLAT_SIZE {
             return Err("flat binary is empty or larger than 64 KiB");
@@ -181,7 +207,7 @@ fn build_initial_stack(
         (4, aux.phent),      // AT_PHENT
         (5, aux.phnum),      // AT_PHNUM
         (6, 4096),           // AT_PAGESZ
-        (7, 0),              // AT_BASE: no dynamic linker
+        (7, aux.base),       // AT_BASE: where the dynamic linker is (0: none)
         (8, 0),              // AT_FLAGS
         (9, aux.entry),      // AT_ENTRY
         (11, ids.uid as u64), // AT_UID

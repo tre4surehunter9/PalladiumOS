@@ -1677,7 +1677,7 @@ fn fastfetch_port_works() {
     let _ = filesystem::make_dir("/tmp");
     assert_eq!(sh("fastfetch --logo none > /tmp/ff 2>&1"), 0);
     let out = file("/tmp/ff");
-    for want in ["OS: PalladiumOS 0.5.2 x86_64", "Kernel: PalladiumOS 0.5.2", "Memory: ", "Disk (/): "] {
+    for want in ["OS: PalladiumOS 0.5.3 x86_64", "Kernel: PalladiumOS 0.5.3", "Memory: ", "Disk (/): "] {
         assert!(out.contains(want), "{:?} missing from:\n{}", want, out);
     }
     assert!(!out.contains("not implemented"), "{}", out);
@@ -1894,6 +1894,34 @@ fn linux_binaries_run_unchanged() {
     let _ = filesystem::make_dir("/tmp");
     assert_eq!(sh("/usr/share/linux-test/hello one two > /tmp/linux.out 2>&1"), 0, "{}", file("/tmp/linux.out"));
     assert_eq!(file("/tmp/linux.out"), "glibc on PalladiumOS: 2 args, heap 7, child 9\n");
+    // The same, dynamically linked: glibc's own dynamic linker loads it
+    // and libc.so.6 (from the system disk).
+    if palladiumos::mounts::stat("/usr/share/linux-test/hello-dyn").is_ok() {
+        filesystem::init_default_files(); // /lib64/ld-linux-x86-64.so.2
+        assert_eq!(sh("/usr/share/linux-test/hello-dyn a b > /tmp/linux2.out 2>&1"), 0, "{}", file("/tmp/linux2.out"));
+        assert_eq!(file("/tmp/linux2.out"), "glibc on PalladiumOS: 2 args, heap 7, child 9\n");
+    }
+}
+
+#[test_case]
+fn dynamically_linked_musl_programs() {
+    let Some(_) = c_program("test_dyn") else { return };
+    if palladiumos::mounts::stat("/usr/lib/libc.so").is_err() {
+        palladiumos::serial_print!("(skipped: no libc.so on the system disk) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    filesystem::init_default_files(); // /lib/ld-musl-x86_64.so.1
+    // Libraries at startup, a constructor, TLS in a library across threads,
+    // dlopen/dlsym/dlclose, dl_iterate_phdr.
+    assert_eq!(sh("test_dyn > /tmp/dyn.out 2>&1"), 0, "{}", file("/tmp/dyn.out"));
+    assert!(file("/tmp/dyn.out").contains("all checks passed"));
+    assert_eq!(sh("ldd /bin/test_dyn > /tmp/ldd.out 2>&1"), 0, "{}", file("/tmp/ldd.out"));
+    assert!(file("/tmp/ldd.out").contains("libgreet.so => /usr/lib/libgreet.so"), "{}", file("/tmp/ldd.out"));
+    // Without its dynamic linker, a program can't start: "not found".
+    assert_eq!(sh("mv /lib/ld-musl-x86_64.so.1 /lib/ld-away; test_dyn 2> /tmp/dyn.err; echo $? > /tmp/dyn.st; mv /lib/ld-away /lib/ld-musl-x86_64.so.1"), 0);
+    assert_eq!(file("/tmp/dyn.st"), "127\n", "{}", file("/tmp/dyn.err"));
+    assert!(only_kernel_left(), "{:?}", process::list());
 }
 
 // ---- networking ----

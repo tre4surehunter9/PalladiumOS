@@ -192,6 +192,19 @@ pub fn init_default_files() {
             let _ = write_file(path, text);
         }
     }
+    // Dynamically linked programs name musl's dynamic linker by its usual
+    // path; it's libc.so on the system disk.
+    // (And glibc's, for Linux programs built against glibc.)
+    let _ = make_dir("/lib");
+    let _ = make_dir("/lib64");
+    for (link, target) in [
+        ("/lib/ld-musl-x86_64.so.1", "/usr/lib/libc.so"),
+        ("/lib64/ld-linux-x86-64.so.2", "/usr/lib/ld-linux-x86-64.so.2"),
+    ] {
+        if mounts::lstat(link).is_err() {
+            let _ = mounts::symlink(target, link);
+        }
+    }
     // Which OS this is, for programs like fastfetch (freedesktop format).
     // Written every boot: it describes the system, so an old disk gets the
     // current version.

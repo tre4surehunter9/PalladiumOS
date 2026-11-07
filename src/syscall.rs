@@ -83,6 +83,7 @@ pub const SYS_SOCKETPAIR: u64 = 53;
 pub const SYS_SETSID: u64 = 112;
 pub const SYS_GETSID: u64 = 124;
 pub const SYS_SELECT: u64 = 23;
+pub const SYS_MEMBARRIER: u64 = 324;
 pub const SYS_PSELECT6: u64 = 270;
 pub const SYS_SENDMSG: u64 = 46;
 pub const SYS_RECVMSG: u64 = 47;
@@ -569,6 +570,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_SETSID => process::sys_setsid(),
         SYS_GETSID => process::sys_getsid(a1),
         SYS_SELECT => sys_select(a1, a2, a3, a4, a5, false),
+        SYS_MEMBARRIER => sys_membarrier(a1),
         SYS_PSELECT6 => sys_select(a1, a2, a3, a4, a5, true),
         SYS_SENDMSG => vfs::sys_sendmsg(a1, a2, a3),
         SYS_RECVMSG => vfs::sys_recvmsg(a1, a2, a3),
@@ -754,6 +756,21 @@ fn sleep_until_something_happens(deadline: Option<u64>) {
     match deadline {
         Some(d) => process::block_on_until(process::POLL_KEY, d),
         None => process::block_on(process::POLL_KEY),
+    }
+}
+
+/// membarrier(cmd, flags): make every thread see this thread's memory
+/// writes (musl's dynamic linker uses it when loading libraries). With one
+/// CPU every thread already does, so the commands just succeed.
+fn sys_membarrier(cmd: u64) -> i64 {
+    const QUERY: u64 = 0;
+    const GLOBAL: u64 = 1;
+    const PRIVATE_EXPEDITED: u64 = 8;
+    const REGISTER_PRIVATE_EXPEDITED: u64 = 16;
+    match cmd {
+        QUERY => (GLOBAL | PRIVATE_EXPEDITED | REGISTER_PRIVATE_EXPEDITED) as i64,
+        GLOBAL | PRIVATE_EXPEDITED | REGISTER_PRIVATE_EXPEDITED => 0,
+        _ => -EINVAL,
     }
 }
 

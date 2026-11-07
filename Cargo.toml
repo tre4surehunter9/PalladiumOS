@@ -1,6 +1,6 @@
 [package]
 name = "palladiumos"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 
 # The kernel lives in the higher half (it's linked at 0xffffffff80000000,

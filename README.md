@@ -27,7 +27,7 @@
 > * The higher-half kernel, the boot log, the tests and most of this README
 
 ## Features
-* **Linux-compatible system calls** (the x86_64 ABI): ordinary static Linux programs run unchanged, including C programs built with an unmodified [musl](https://musl.libc.org) libc
+* **Linux-compatible system calls** (the x86_64 ABI): ordinary Linux programs run unchanged, static or dynamically linked (with musl's or glibc's own dynamic linker), including C programs built with an unmodified [musl](https://musl.libc.org) libc
 * **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control
 * **Users and permissions**: login, passwords, POSIX file permissions, setuid programs, `su`
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
@@ -135,7 +135,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 56 | clone | fork, vfork-style `CLONE_VM \| CLONE_VFORK` (what `posix_spawn`, `system` and `popen` use), and threads (`CLONE_THREAD` with `SETTLS`, `PARENT_SETTID`, `CHILD_SETTID`, `CHILD_CLEARTID`) |
 | 57 | fork | yes (copy-on-write: pages are copied only when written) |
 | 58 | vfork | yes (same as fork, which POSIX allows) |
-| 59 | execve | yes (static ELF executables) |
+| 59 | execve | yes (ELF executables, static or dynamically linked: the kernel loads the `PT_INTERP` dynamic linker too) |
 | 60 | exit | yes |
 | 61 | wait4 | yes (`WNOHANG`, `WUNTRACED`, `WCONTINUED`, process groups, rusage) |
 | 62 | kill | yes (pid, process group, or -1 for all; `EPERM` for other users' processes) |
@@ -184,6 +184,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 292 | dup3 | yes (`O_CLOEXEC`) |
 | 293 | pipe2 | yes (`O_CLOEXEC`, `O_NONBLOCK`) |
 | 318 | getrandom | yes (RDRAND when available) |
+| 324 | membarrier | yes (one CPU: every command is already satisfied) |
 | 332 | statx | yes |
 
 ## Networking
@@ -207,7 +208,13 @@ tools/build-musl.sh        # downloads musl 1.2.5 (checksum-verified) and builds
 cargo run                  # build.rs now compiles every userland-c/*.c into /bin
 ```
 
-Then run `chello` or `test_libc` (a test of stdio, malloc, files, mmap, fork/exec, signals, time...) in the shell. Add a program by putting `NAME.c` in `userland-c/`, or compile one yourself with `target/musl/bin/palladium-cc prog.c -o prog -lm`. Programs are static position-independent executables (static-PIE): PalladiumOS has no dynamic linker yet. Ordinary static Linux binaries run too, unchanged (even glibc ones built by a Linux host's `gcc -static`): the kernel lives in the higher half (at `0xffffffff80000000`, with all physical memory mapped from `0xffff800000000000`), so the whole lower half, including the usual `0x400000`, is for programs.
+Then run `chello` or `test_libc` (a test of stdio, malloc, files, mmap, fork/exec, signals, time...) in the shell. Add a program by putting `NAME.c` in `userland-c/`, or compile one yourself with `target/musl/bin/palladium-cc prog.c -o prog -lm`. These are static position-independent executables (static-PIE). Ordinary static Linux binaries run too, unchanged (even glibc ones built by a Linux host's `gcc -static`): the kernel lives in the higher half (at `0xffffffff80000000`, with all physical memory mapped from `0xffff800000000000`), so the whole lower half, including the usual `0x400000`, is for programs.
+
+### Dynamic Linking
+Dynamically linked programs work as on Linux: the kernel loads the program and the dynamic linker it names (`PT_INTERP`) and starts the linker, which loads the shared libraries and runs the program.
+* musl: `libc.so` (which is also musl's dynamic linker) is on the system disk, and `/lib/ld-musl-x86_64.so.1` points at it. Compile with `target/musl/bin/palladium-cc-dyn prog.c -o prog`, and shared libraries with `palladium-cc-dyn -shared -fPIC lib.c -o libfoo.so`. Libraries are found in `/lib`, `/usr/local/lib` and `/usr/lib` (or `LD_LIBRARY_PATH`), and `dlopen`, `dlsym`, constructors and thread-local storage in libraries work. `ldd prog` lists a program's libraries.
+* glibc: with the host's `ld-linux-x86-64.so.2` and `libc.so.6` on the system disk (build.rs copies them), and `/lib64/ld-linux-x86-64.so.2` pointing there, a host-built `gcc prog.c` program runs as it is (`/usr/share/linux-test/hello-dyn`). Programs needing more libraries than libc need those copied too.
+* Test: `test_dyn` (a dynamically linked program and `libgreet.so`, from `userland-c/dynamic/`).
 
 ### Ported Software
 Real-world programs are built from their original source by scripts in `tools/ports/` (after `tools/build-musl.sh`). `tools/build-all.sh` builds musl (if needed) and every port that's missing or out of date (`tools/build-all.sh tcc` rebuilds just that one, `--rebuild` everything, `--run` then boots with `cargo run`). Each downloads a pinned, checksum-verified release and installs into `target/ports/bin`, which goes into `/bin`:
