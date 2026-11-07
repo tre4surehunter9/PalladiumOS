@@ -5,15 +5,15 @@
 ![Screenshot](Screenshot_20260811_212123.png)
 
 ## Notice
-I do want to make things clear and say i used AI for some parts of my code as this is my first kernel so I dont understand much yet
+I do want to make things clear and say I used AI for some parts of my code, as this is my first kernel, so I don't understand much yet.
 
-i used AI for
-* the filesystem
-* the shell
-* text editor (as a guide)
-* finding bugs
-* guiding for implimenting stuff
-* ring 3/usermode stuff
+I used AI for:
+* The filesystem
+* The shell
+* Text editor (as a guide)
+* Finding bugs
+* Guiding for implementing stuff
+* Ring 3/usermode stuff
 
 ## Features
 * **Linux-compatible system calls** (the x86_64 ABI): ordinary static Linux programs run unchanged, including C programs built with an unmodified [musl](https://musl.libc.org) libc
