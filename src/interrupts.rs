@@ -139,11 +139,14 @@ pub fn disable_local_apic() {
     use x86_64::registers::model_specific::Msr;
     const IA32_APIC_BASE: u32 = 0x1B;
     const GLOBAL_ENABLE: u64 = 1 << 11;
+    const X2APIC: u64 = 1 << 10;
     let mut msr = Msr::new(IA32_APIC_BASE);
     unsafe {
         let base = msr.read();
         if base & GLOBAL_ENABLE != 0 {
-            msr.write(base & !GLOBAL_ENABLE);
+            // Both bits together: firmware may leave the APIC in x2APIC
+            // mode, and "x2APIC on, APIC off" is an invalid state (#GP).
+            msr.write(base & !(GLOBAL_ENABLE | X2APIC));
         }
     }
 }
