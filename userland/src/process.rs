@@ -51,43 +51,42 @@ pub fn wifcontinued(status: i32) -> bool {
     status == 0xffff
 }
 
-const MAX_ARGV: usize = 32;
-const STRING_SPACE: usize = 4096;
+/// The kernel's limits for execve (argv and envp each, and all the strings).
+const MAX_ARGV: usize = 8192;
+const MAX_STRING_BYTES: usize = 256 * 1024;
 
-/// execve(2) with Rust strings: copies them into C strings on the stack.
-/// Only returns on failure, with -errno.
+/// execve(2) with Rust strings: copies them into C strings (on the heap:
+/// `rm *` in a big directory passes thousands). Only returns on failure,
+/// with -errno.
 pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> isize {
     if argv.len() > MAX_ARGV || envp.len() > MAX_ARGV {
         return -E2BIG;
     }
-    let mut strings = [0u8; STRING_SPACE];
-    let mut used = 0usize;
-    // Copy `s` plus a NUL into `strings`, returning its address.
-    let mut store = |s: &str| -> Option<u64> {
-        if used + s.len() + 1 > STRING_SPACE || s.as_bytes().contains(&0) {
-            return None;
-        }
-        strings[used..used + s.len()].copy_from_slice(s.as_bytes());
-        strings[used + s.len()] = 0;
-        let ptr = strings.as_ptr() as u64 + used as u64;
-        used += s.len() + 1;
-        Some(ptr)
+    if path.as_bytes().contains(&0) {
+        return -ENAMETOOLONG;
+    }
+    let total: usize = argv.iter().chain(envp).map(|a| a.len() + 1).sum();
+    if total > MAX_STRING_BYTES || argv.iter().chain(envp).any(|a| a.as_bytes().contains(&0)) {
+        return -E2BIG;
+    }
+    // All the strings, NUL-terminated, in one buffer; then pointers into it
+    // (taken after it's complete, so they stay valid).
+    let mut strings: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(total + path.len() + 1);
+    let mut offsets = alloc::vec::Vec::with_capacity(argv.len() + envp.len() + 1);
+    for s in core::iter::once(&path).chain(argv).chain(envp) {
+        offsets.push(strings.len());
+        strings.extend_from_slice(s.as_bytes());
+        strings.push(0);
+    }
+    let base = strings.as_ptr() as u64;
+    let ptrs = |range: core::ops::Range<usize>| -> alloc::vec::Vec<u64> {
+        let mut v: alloc::vec::Vec<u64> = offsets[range].iter().map(|&o| base + o as u64).collect();
+        v.push(0);
+        v
     };
-
-    let Some(path_ptr) = store(path) else { return -ENAMETOOLONG };
-    let mut argv_ptrs = [0u64; MAX_ARGV + 1];
-    let mut envp_ptrs = [0u64; MAX_ARGV + 1];
-    for (i, a) in argv.iter().enumerate() {
-        let Some(p) = store(a) else { return -E2BIG };
-        argv_ptrs[i] = p;
-    }
-    for (i, e) in envp.iter().enumerate() {
-        let Some(p) = store(e) else { return -E2BIG };
-        envp_ptrs[i] = p;
-    }
-    unsafe {
-        syscall3(sys::EXECVE, path_ptr, argv_ptrs.as_ptr() as u64, envp_ptrs.as_ptr() as u64) as isize
-    }
+    let argv_ptrs = ptrs(1..1 + argv.len());
+    let envp_ptrs = ptrs(1 + argv.len()..offsets.len());
+    unsafe { syscall3(sys::EXECVE, base, argv_ptrs.as_ptr() as u64, envp_ptrs.as_ptr() as u64) as isize }
 }
 
 /// Start `path` with `argv` in a new process (fork + execve). Returns the

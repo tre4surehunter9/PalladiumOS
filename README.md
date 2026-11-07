@@ -341,7 +341,7 @@ cargo run                  # build and boot in QEMU, with a disk and a network c
 tools/build-all.sh         # optional: musl and the ported software (see above)
 ```
 
-`cargo build` builds the kernel, and `cargo bootimage` makes the bootable image (`target/x86_64-palladiumos/debug/bootimage-palladiumos.bin`), which also runs on its own: `qemu-system-x86_64 -drive format=raw,file=bootimage-palladiumos.bin`.
+`cargo build` builds the kernel, and `cargo bootimage` makes the bootable image (`target/x86_64-palladiumos/debug/bootimage-palladiumos.bin`), which also runs on its own: `qemu-system-x86_64 -drive format=raw,file=bootimage-palladiumos.bin`. The default build is optimized but keeps debug checks (overflow checks, assertions, a kernel stack canary); `cargo bootimage --release` (or `cargo run --release`) makes the fastest kernel, the one the releases use (`target/x86_64-palladiumos/release/`). With KVM, adding `-enable-kvm -cpu host` to QEMU's command makes everything faster again.
 
 ## The Shell
 After you log in, you get `/bin/sh`, a POSIX-style shell that runs in userland as a normal process.

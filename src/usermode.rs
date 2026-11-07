@@ -26,8 +26,11 @@ pub const STACK_TOP: u64 = 0x_7fff_ffff_0000;
 pub const STACK_MAX: u64 = 1024 * 1024;
 const STACK_PAGES: u64 = 16;
 
-pub const MAX_ARGS: usize = 64;
-pub const MAX_ARG_BYTES: usize = 16 * 1024;
+/// Limits for execve's argv and envp (each), and their strings together.
+/// (Linux's are larger still; these allow `rm *` in a directory of
+/// thousands of files.)
+pub const MAX_ARGS: usize = 8192;
+pub const MAX_ARG_BYTES: usize = 256 * 1024;
 
 pub const ERR_TOO_MANY_ARGS: &str = "argument list too long";
 pub const ERR_NO_MEMORY: &str = "out of memory";
@@ -153,8 +156,12 @@ fn load(
         FLAT_BASE
     };
 
-    let stack_bottom = STACK_TOP - STACK_PAGES * 4096;
-    map_range(mapper, frames, stack_bottom, STACK_PAGES * 4096, base | F::WRITABLE)?;
+    // Enough stack for the arguments and environment (strings, pointers,
+    // aux vector), plus the usual STACK_PAGES for the program itself.
+    let arg_bytes: usize = argv.iter().chain(envp).map(|a| a.len() + 1).sum::<usize>() + (argv.len() + envp.len() + 64) * 8;
+    let pages = (STACK_PAGES + (arg_bytes as u64).div_ceil(4096)).min(STACK_MAX / 4096);
+    let stack_bottom = STACK_TOP - pages * 4096;
+    map_range(mapper, frames, stack_bottom, pages * 4096, base | F::WRITABLE)?;
     let stack_pointer = build_initial_stack(mapper, argv, envp, &aux)?;
 
     Ok((entry, stack_pointer))

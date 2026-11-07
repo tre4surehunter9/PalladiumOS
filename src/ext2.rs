@@ -15,11 +15,15 @@
 //! used: when a directory is modified its index flag is cleared, so Linux
 //! falls back to a linear scan.
 //!
-//! All writes go straight to the disk (a write-through cache keeps recently
-//! used blocks in memory to speed up reads).
+//! Writes go to the disk by the end of each operation (a cache keeps recently
+//! used blocks in memory to speed up reads). Within one write or truncate,
+//! the allocation bookkeeping (block bitmaps, group descriptors, superblock)
+//! is updated in memory and written once at the end, not once per block,
+//! and new data blocks aren't zeroed on disk first when their contents are
+//! written anyway.
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -51,7 +55,7 @@ const FT_REG: u8 = 1;
 const FT_DIR: u8 = 2;
 const FT_SYMLINK: u8 = 7;
 
-const CACHE_BLOCKS: usize = 256;
+const CACHE_BLOCKS: usize = 1024;
 
 #[derive(Clone, Copy)]
 struct Group {
@@ -168,6 +172,18 @@ pub struct Ext2 {
     filetype: bool,
     read_only: bool,
     cache: BTreeMap<u64, Vec<u8>>,
+    /// Cached block numbers, oldest first (evicted in that order).
+    cache_order: VecDeque<u64>,
+    /// During a batch (see begin_batch): blocks waiting to be written
+    /// (bitmaps, new blocks still all zeros). Never evicted; reads see them.
+    dirty: BTreeMap<u64, Vec<u8>>,
+    batching: bool,
+    dirty_groups: BTreeSet<usize>,
+    sb_dirty: bool,
+    /// Where to start looking for a free block (the one after the last
+    /// allocated): files get consecutive blocks, and the search doesn't
+    /// rescan the full part of the disk every time.
+    alloc_hint: u32,
     /// How many open files refer to each inode.
     open: BTreeMap<Ino, usize>,
     /// Inodes with no links left that are still open: freed on last close.
@@ -220,6 +236,12 @@ impl Ext2 {
             filetype: incompat & INCOMPAT_FILETYPE != 0,
             read_only,
             cache: BTreeMap::new(),
+            cache_order: VecDeque::new(),
+            dirty: BTreeMap::new(),
+            batching: false,
+            dirty_groups: BTreeSet::new(),
+            sb_dirty: false,
+            alloc_hint: 0,
             open: BTreeMap::new(),
             orphans: BTreeSet::new(),
         };
@@ -264,6 +286,9 @@ impl Ext2 {
     // ---- blocks ----
 
     fn read_block(&mut self, n: u64) -> FsResult<Vec<u8>> {
+        if let Some(b) = self.dirty.get(&n) {
+            return Ok(b.clone());
+        }
         if let Some(b) = self.cache.get(&n) {
             return Ok(b.clone());
         }
@@ -278,17 +303,81 @@ impl Ext2 {
             return Err(EROFS);
         }
         self.dev.write(n * (self.block_size / SECTOR_SIZE) as u64, data).map_err(|_| EIO)?;
+        // (Its real contents are on disk now: a pending zero-fill is moot.)
+        self.dirty.remove(&n);
         self.cache_put(n, data.to_vec());
         Ok(())
     }
 
     fn cache_put(&mut self, n: u64, data: Vec<u8>) {
-        if self.cache.len() >= CACHE_BLOCKS && !self.cache.contains_key(&n) {
-            if let Some(&victim) = self.cache.keys().next() {
-                self.cache.remove(&victim);
+        if self.cache.insert(n, data).is_none() {
+            self.cache_order.push_back(n);
+            while self.cache.len() > CACHE_BLOCKS {
+                match self.cache_order.pop_front() {
+                    Some(victim) => {
+                        self.cache.remove(&victim);
+                    }
+                    None => break,
+                }
             }
         }
-        self.cache.insert(n, data);
+    }
+
+    /// Start a batch: bookkeeping changes wait in memory until end_batch.
+    fn begin_batch(&mut self) {
+        self.batching = true;
+    }
+
+    /// Write what the batch changed: bitmaps and zeroed blocks, the group
+    /// descriptors, and the superblock (each once).
+    fn end_batch(&mut self) -> FsResult<()> {
+        self.batching = false;
+        let mut result = Ok(());
+        for (n, data) in core::mem::take(&mut self.dirty) {
+            if let Err(e) = self.write_block(n, &data) {
+                result = Err(e);
+            }
+        }
+        for g in core::mem::take(&mut self.dirty_groups) {
+            if let Err(e) = self.write_group(g) {
+                result = Err(e);
+            }
+        }
+        if core::mem::take(&mut self.sb_dirty) {
+            if let Err(e) = self.write_superblock() {
+                result = Err(e);
+            }
+        }
+        result
+    }
+
+    /// A bookkeeping block changed: written now, or at the end of the batch.
+    fn put_meta(&mut self, n: u64, data: Vec<u8>) -> FsResult<()> {
+        if self.batching {
+            self.cache_put(n, data.clone());
+            self.dirty.insert(n, data);
+            Ok(())
+        } else {
+            self.write_block(n, &data)
+        }
+    }
+
+    fn group_changed(&mut self, g: usize) -> FsResult<()> {
+        if self.batching {
+            self.dirty_groups.insert(g);
+            Ok(())
+        } else {
+            self.write_group(g)
+        }
+    }
+
+    fn sb_changed(&mut self) -> FsResult<()> {
+        if self.batching {
+            self.sb_dirty = true;
+            Ok(())
+        } else {
+            self.write_superblock()
+        }
     }
 
     fn write_superblock(&mut self) -> FsResult<()> {
@@ -315,30 +404,54 @@ impl Ext2 {
         if self.read_only {
             return Err(EROFS);
         }
-        for g in 0..self.groups.len() {
+        // Start where the last allocation left off, and go round once.
+        let groups = self.groups.len();
+        let hint = self.alloc_hint.max(self.first_data_block).min(self.blocks_count.saturating_sub(1));
+        let start_g = ((hint - self.first_data_block) / self.blocks_per_group) as usize;
+        let start_bit = (hint - self.first_data_block) % self.blocks_per_group;
+        for k in 0..=groups {
+            let g = (start_g + k) % groups;
             if self.groups[g].free_blocks == 0 {
                 continue;
             }
             let bitmap_block = self.groups[g].block_bitmap as u64;
             let mut bitmap = self.read_block(bitmap_block)?;
-            for bit in 0..self.blocks_per_group {
+            // (In the first group, from the hint; the second pass over it,
+            // at the end, covers what's before the hint.)
+            let from = if k == 0 { start_bit } else { 0 };
+            let mut bit = from;
+            while bit < self.blocks_per_group {
+                let (byte, mask) = ((bit / 8) as usize, 1u8 << (bit % 8));
+                if bit % 8 == 0 && bitmap[byte] == 0xff {
+                    bit += 8; // a full byte: skip it
+                    continue;
+                }
                 let block = self.first_data_block + g as u32 * self.blocks_per_group + bit;
                 if block >= self.blocks_count {
                     break;
                 }
-                let (byte, mask) = ((bit / 8) as usize, 1u8 << (bit % 8));
                 if bitmap[byte] & mask == 0 {
                     bitmap[byte] |= mask;
-                    self.write_block(bitmap_block, &bitmap)?;
+                    self.put_meta(bitmap_block, bitmap)?;
                     self.groups[g].free_blocks -= 1;
-                    self.write_group(g)?;
+                    self.group_changed(g)?;
                     let free = rd32(&self.sb, 12).saturating_sub(1);
                     wr32(&mut self.sb, 12, free);
-                    self.write_superblock()?;
+                    self.sb_changed()?;
+                    // A new block reads as zeros. In a batch the zeros wait
+                    // in memory: usually the block's contents are written
+                    // right away, and then they never need to be.
                     let zero = vec![0u8; self.block_size];
-                    self.write_block(block as u64, &zero)?;
+                    if self.batching {
+                        self.cache_put(block as u64, zero.clone());
+                        self.dirty.insert(block as u64, zero);
+                    } else {
+                        self.write_block(block as u64, &zero)?;
+                    }
+                    self.alloc_hint = block + 1;
                     return Ok(block);
                 }
+                bit += 1;
             }
         }
         Err(ENOSPC)
@@ -354,13 +467,17 @@ impl Ext2 {
         let bitmap_block = self.groups[g].block_bitmap as u64;
         let mut bitmap = self.read_block(bitmap_block)?;
         bitmap[(bit / 8) as usize] &= !(1u8 << (bit % 8));
-        self.write_block(bitmap_block, &bitmap)?;
-        self.cache.remove(&(block as u64));
+        self.put_meta(bitmap_block, bitmap)?;
+        // (Drop any copy of it, including a zero-fill still waiting.)
+        if self.cache.remove(&(block as u64)).is_some() {
+            self.cache_order.retain(|&b| b != block as u64);
+        }
+        self.dirty.remove(&(block as u64));
         self.groups[g].free_blocks += 1;
-        self.write_group(g)?;
+        self.group_changed(g)?;
         let free = rd32(&self.sb, 12) + 1;
         wr32(&mut self.sb, 12, free);
-        self.write_superblock()
+        self.sb_changed()
     }
 
     // ---- inodes ----
@@ -515,7 +632,19 @@ impl Ext2 {
 
     /// Free blocks from file block `from` on. Whole indirect trees are freed
     /// when the cut is at 0; otherwise just the data blocks past it.
+    /// Free a file's blocks from `from` on (batched: the bitmaps and counts
+    /// are written once, at the end).
     fn free_blocks_from(&mut self, inode: &mut Inode, from: u64) -> FsResult<()> {
+        if self.batching {
+            return self.free_blocks_from_inner(inode, from);
+        }
+        self.begin_batch();
+        let r = self.free_blocks_from_inner(inode, from);
+        let flushed = self.end_batch();
+        r.and(flushed)
+    }
+
+    fn free_blocks_from_inner(&mut self, inode: &mut Inode, from: u64) -> FsResult<()> {
         if inode.is_fast_symlink() {
             // The "block pointers" are the target text, not blocks.
             if from == 0 {
@@ -809,6 +938,7 @@ impl FileSystem for Ext2 {
         let bs = self.block_size as u64;
         let mut done = 0;
         let mut result = Ok(());
+        self.begin_batch();
         while done < data.len() {
             let pos = offset + done as u64;
             let in_block = (pos % bs) as usize;
@@ -827,6 +957,10 @@ impl FileSystem for Ext2 {
                 break;
             }
             done += n;
+        }
+        // The bookkeeping, then the inode (as before: by the end of the call).
+        if let Err(e) = self.end_batch() {
+            result = Err(e);
         }
         if offset + done as u64 > inode.size() {
             inode.set_size(offset + done as u64);

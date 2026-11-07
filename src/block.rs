@@ -10,6 +10,8 @@ use alloc::vec::Vec;
 use x86_64::instructions::port::Port;
 
 pub const SECTOR_SIZE: usize = 512;
+/// The most sectors one ATA command moves (a sector count of 0 means 256).
+const MAX_SECTORS_PER_COMMAND: usize = 256;
 
 pub trait BlockDevice: Send {
     /// Number of 512-byte sectors.
@@ -183,14 +185,15 @@ impl AtaDisk {
         Err("disk timeout")
     }
 
-    fn command(&self, lba: u64, cmd: u8) -> Result<(), &'static str> {
-        if lba >= self.sectors || lba >= 1 << 28 {
+    /// Start a transfer of `count` sectors (1..=256; 256 is sent as 0).
+    fn command(&self, lba: u64, count: usize, cmd: u8) -> Result<(), &'static str> {
+        if lba + count as u64 > self.sectors || lba + count as u64 > 1 << 28 {
             return Err("sector out of range");
         }
         self.wait_ready()?;
         self.select(lba);
         unsafe {
-            Port::<u8>::new(self.io + 2).write(1); // one sector
+            Port::<u8>::new(self.io + 2).write(count as u8); // (256 -> 0)
             Port::<u8>::new(self.io + 3).write(lba as u8);
             Port::<u8>::new(self.io + 4).write((lba >> 8) as u8);
             Port::<u8>::new(self.io + 5).write((lba >> 16) as u8);
@@ -205,31 +208,43 @@ impl BlockDevice for AtaDisk {
         self.sectors
     }
 
+    /// Up to 256 sectors per command; each sector moves with one string
+    /// instruction (rep insw), not 256 separate port reads.
     fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
-        for (i, chunk) in buf.chunks_mut(SECTOR_SIZE).enumerate() {
-            crate::interrupts::let_in(); // (keys typed meanwhile aren't lost)
-            self.command(sector + i as u64, CMD_READ_SECTORS)?;
-            self.wait_drq()?;
-            let mut data: Port<u16> = Port::new(self.io);
-            for pair in chunk.chunks_mut(2) {
-                let w = unsafe { data.read() };
-                pair[0] = w as u8;
-                pair[1] = (w >> 8) as u8;
+        assert!(buf.len() % SECTOR_SIZE == 0, "partial sector read");
+        let mut done = 0;
+        for batch in buf.chunks_mut(SECTOR_SIZE * MAX_SECTORS_PER_COMMAND) {
+            let count = batch.len() / SECTOR_SIZE;
+            self.command(sector + done, count, CMD_READ_SECTORS)?;
+            for chunk in batch.chunks_mut(SECTOR_SIZE) {
+                crate::interrupts::let_in(); // (keys typed meanwhile aren't lost)
+                self.wait_drq()?;
+                unsafe {
+                    core::arch::asm!("rep insw", in("dx") self.io, inout("rdi") chunk.as_mut_ptr() => _,
+                        inout("rcx") SECTOR_SIZE / 2 => _, options(nostack, preserves_flags));
+                }
             }
+            done += count as u64;
         }
         Ok(())
     }
 
     fn write(&mut self, sector: u64, data: &[u8]) -> Result<(), &'static str> {
-        for (i, chunk) in data.chunks(SECTOR_SIZE).enumerate() {
-            crate::interrupts::let_in();
-            self.command(sector + i as u64, CMD_WRITE_SECTORS)?;
-            self.wait_drq()?;
-            let mut port: Port<u16> = Port::new(self.io);
-            for pair in chunk.chunks(2) {
-                unsafe { port.write(pair[0] as u16 | (pair[1] as u16) << 8) };
+        assert!(data.len() % SECTOR_SIZE == 0, "partial sector write");
+        let mut done = 0;
+        for batch in data.chunks(SECTOR_SIZE * MAX_SECTORS_PER_COMMAND) {
+            let count = batch.len() / SECTOR_SIZE;
+            self.command(sector + done, count, CMD_WRITE_SECTORS)?;
+            for chunk in batch.chunks(SECTOR_SIZE) {
+                crate::interrupts::let_in();
+                self.wait_drq()?;
+                unsafe {
+                    core::arch::asm!("rep outsw", in("dx") self.io, inout("rsi") chunk.as_ptr() => _,
+                        inout("rcx") SECTOR_SIZE / 2 => _, options(nostack, preserves_flags, readonly));
+                }
             }
             self.wait_ready()?;
+            done += count as u64;
         }
         Ok(())
     }

@@ -142,7 +142,11 @@ fn argv_is_passed() {
 
 #[test_case]
 fn argument_list_too_long_is_rejected() {
-    let many = vec!["x"; 65];
+    // Thousands of arguments are fine (rm * in a big directory)...
+    let lots = vec!["x"; 3000];
+    assert_eq!(run(hello(), &lots), Ok(0));
+    // ...but past the limit, execve refuses.
+    let many = vec!["x"; palladiumos::usermode::MAX_ARGS + 1];
     assert!(run(hello(), &many).is_err());
     assert_eq!(launch_program(hello()), 0, "kernel recovers after a failed load");
 }
@@ -1680,7 +1684,7 @@ fn fastfetch_port_works() {
     let _ = filesystem::make_dir("/tmp");
     assert_eq!(sh("fastfetch --logo none > /tmp/ff 2>&1"), 0);
     let out = file("/tmp/ff");
-    for want in ["OS: PalladiumOS 0.5.6 x86_64", "Kernel: PalladiumOS 0.5.6", "Memory: ", "Disk (/): "] {
+    for want in ["OS: PalladiumOS 0.5.7 x86_64", "Kernel: PalladiumOS 0.5.7", "Memory: ", "Disk (/): "] {
         assert!(out.contains(want), "{:?} missing from:\n{}", want, out);
     }
     assert!(!out.contains("not implemented"), "{}", out);
