@@ -196,7 +196,10 @@ pub const HEAP_MAX: u64 = 256 * 1024 * 1024;
 
 /// Environment for programs started by the kernel.
 /// /bin: PalladiumOS's programs; /usr/bin: BusyBox's tools (on the system disk).
-pub const DEFAULT_ENV: &[&str] = &["PATH=/bin:/usr/bin", "HOME=/", "SHELL=/bin/sh", "TERM=vga"];
+/// (TERM=ansi: the console speaks the standard ANSI sequences, and every
+/// system knows the name, which matters for programs on other machines
+/// reached over SSH.)
+pub const DEFAULT_ENV: &[&str] = &["PATH=/bin:/usr/bin", "HOME=/", "SHELL=/bin/sh", "TERM=ansi"];
 
 impl Process {
     fn kernel_stack_top(&self) -> Option<u64> {

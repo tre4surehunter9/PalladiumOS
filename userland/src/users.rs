@@ -413,6 +413,8 @@ pub fn login_env(user: &User) -> Vec<String> {
         format!("LOGNAME={}", user.name),
         format!("SHELL={}", user.shell),
         String::from("PATH=/bin:/usr/bin"),
-        String::from("TERM=vga"),
+        // The console speaks ANSI, and every system (including the other
+        // end of an SSH connection) knows the name.
+        String::from("TERM=ansi"),
     ]
 }

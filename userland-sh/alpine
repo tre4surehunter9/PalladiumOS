@@ -49,9 +49,9 @@ cp /etc/resolv.conf "$ROOT/etc/resolv.conf" 2>/dev/null
 grep -q " $ROOT/proc " /proc/mounts || mount -t proc proc "$ROOT/proc"
 grep -q " $ROOT/dev " /proc/mounts || mount -t devtmpfs dev "$ROOT/dev"
 
-# Alpine's programs, with Alpine's usual PATH. PalladiumOS's console
-# (TERM=vga) speaks the basic ANSI sequences, which Alpine's terminfo knows
-# as "ansi"; over SSH, TERM is your terminal's and stays as it is.
+# Alpine's programs, with Alpine's usual PATH. PalladiumOS's console is
+# TERM=ansi (before 0.5.6 it called itself "vga", which Alpine doesn't
+# know: that becomes ansi too); over SSH, TERM is your terminal's.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 if [ "$TERM" = vga ] || [ -z "$TERM" ]; then
     export TERM=ansi
