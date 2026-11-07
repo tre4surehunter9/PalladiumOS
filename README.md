@@ -4,9 +4,6 @@
 
 ![Screenshot](Screenshot_20260811_212123.png)
 
-## Warning
-Currently compling using 'cargo build' is broken for some Goddamn reason so it only works on my pc I really dont know why.
-
 ## Notice
 I do want to make things clear and say i used AI for some parts of my code as this is my first kernel so I dont understand much yet
 
@@ -19,16 +16,16 @@ i used AI for
 * ring 3/usermode stuff
 
 ## Features
-* Basic Shell
-* Heap Allocation
-* Keyboard Input
-* Filesystem
-* Scripting
-* Text Editor
-* Ring 3/Usermode
+* **Linux-compatible system calls** (the x86_64 ABI): ordinary static Linux programs run unchanged, including C programs built with an unmodified [musl](https://musl.libc.org) libc
+* **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control
+* **Users and permissions**: login, passwords, POSIX file permissions, setuid programs, `su`
+* **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
+* **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink
+* **A userland**: a POSIX-style shell, about 50 of PalladiumOS's own tools, and ported software: BusyBox, Lua, dash, MicroPython, fastfetch and TinyCC (a C compiler that runs inside PalladiumOS)
+* **A Linux-style boot log** with `[  OK  ]` lines, and `dmesg`
 
 ## Programs
-User programs run in ring 3 and are started with `run <name> [args...]` (`run` alone lists them):
+PalladiumOS's own tools, written in Rust, live in `/bin` and run from the shell by name (`ls -l /bin`). Where BusyBox's version is clearly better, `/bin/NAME` runs BusyBox's and the one below moves to `/bin/palladium/NAME` (see [Ported Software](#ported-software)):
 * hello - prints a greeting
 * echo - prints its arguments (`-n` for no newline)
 * cat - prints files, or what you type until Ctrl-D
@@ -85,7 +82,7 @@ fn main(args: userlib::Args) -> i32 {
 }
 ```
 
-Programs are static ELF executables loaded at `0x8000000000`, with a 64 KiB stack (plus a guard page) and the standard System V startup stack (`argc`, `argv`, `envp`, `auxv`).
+Programs are static ELF executables loaded at `0x8000000000`, with a stack that grows on demand up to 1 MiB and the standard System V startup stack (`argc`, `argv`, `envp`, `auxv`).
 Files named `test_*` are used by the test suite and hidden from `run`.
 
 ## Syscalls
@@ -95,85 +92,85 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 |---|------|--------|
 | 0 | read | yes (stdin is line-buffered, Ctrl-D is end-of-file) |
 | 1 | write | yes |
-| 7 / 271 | poll, ppoll | yes (pipes, the terminal; files are always ready) |
-| 9 / 10 / 11 | mmap, mprotect, munmap | anonymous and private file mappings (no writable shared file mappings) |
-| 17 / 18 | pread64, pwrite64 | yes |
-| 19 / 20 | readv, writev | yes |
-| 76 / 77 | truncate, ftruncate | yes |
-| 97 / 302 | getrlimit, prlimit64 | reports the limits (setting is ignored) |
-| 158 | arch_prctl | FS/GS base (thread-local storage) |
-| 218 | set_tid_address | yes |
-| 230 | clock_nanosleep | yes (`TIMER_ABSTIME` too) |
-| 318 | getrandom | yes (RDRAND when available) |
-| 332 | statx | yes |
-| 41-55, 288 | socket, connect, accept, sendto, recvfrom, sendmsg, recvmsg, shutdown, bind, listen, getsockname, getpeername, socketpair, setsockopt, getsockopt, accept4 | `AF_INET` TCP, UDP and raw IP; `AF_UNIX` stream and datagram |
-| 40 | sendfile | yes |
 | 2 | open | yes (`O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY`) |
 | 3 | close | yes |
 | 4 | stat | yes |
 | 5 | fstat | yes |
-| 6 | lstat | yes (same as stat, no symlinks) |
+| 6 | lstat | yes |
+| 7 / 271 | poll, ppoll | yes (pipes, sockets, the terminal; files are always ready) |
 | 8 | lseek | yes |
-| 21 | access | yes |
-| 82 | rename | yes (also renameat, renameat2 without flags) |
-| 86 | link | yes (also linkat; not on in-memory filesystems) |
-| 88 | symlink | yes (also symlinkat) |
-| 89 | readlink | yes (also readlinkat) |
-| 90 | chmod | yes (also fchmod, fchmodat) |
-| 95 | umask | yes |
-| 137 | statfs | yes (also fstatfs) |
-| 258-263 | mkdirat, newfstatat, unlinkat | yes |
-| 280 | utimensat | modification time |
-| 22 | pipe | yes |
+| 9 / 10 / 11 | mmap, mprotect, munmap | anonymous and private file mappings (no writable shared file mappings) |
 | 12 | brk | yes (the heap behind `userlib`'s allocator) |
 | 13 | rt_sigaction | yes (handlers, `SA_RESTART`, `SA_NODEFER`, `SA_RESETHAND`, `SA_NOCLDSTOP`, `sa_mask`) |
 | 14 | rt_sigprocmask | yes |
 | 15 | rt_sigreturn | yes |
-| 34 | pause | yes |
-| 36/38 | getitimer, setitimer | `ITIMER_REAL` |
-| 37 | alarm | yes |
-| 127 | rt_sigpending | yes |
-| 130 | rt_sigsuspend | yes |
-| 186 | gettid | yes (`getpid` is the process, `gettid` the thread) |
-| 200/234 | tkill, tgkill | yes |
-| 16 | ioctl | console: `TCGETS`/`TCSETS` (raw and cooked mode), `TIOCGWINSZ`, `TIOCGPGRP`/`TIOCSPGRP` |
+| 16 | ioctl | console: `TCGETS`/`TCSETS` (raw and cooked mode), `TIOCGWINSZ`, `TIOCGPGRP`/`TIOCSPGRP`; sockets: `FIONBIO`, `FIONREAD`, and the interface queries (`SIOCGIFNAME`, `SIOCGIFADDR`...) |
+| 17 / 18 | pread64, pwrite64 | yes |
+| 19 / 20 | readv, writev | yes |
+| 21 | access | yes |
+| 22 | pipe | yes |
 | 24 | sched_yield | yes |
 | 32 | dup | yes |
 | 33 | dup2 | yes |
+| 34 | pause | yes |
 | 35 | nanosleep | yes (55 ms timer resolution) |
+| 36/38 | getitimer, setitimer | `ITIMER_REAL` |
+| 37 | alarm | yes |
 | 39 | getpid | yes |
-| 57 | fork | yes (copies the whole address space) |
+| 40 | sendfile | yes |
+| 41-55, 288 | socket, connect, accept, sendto, recvfrom, sendmsg, recvmsg, shutdown, bind, listen, getsockname, getpeername, socketpair, setsockopt, getsockopt, accept4 | `AF_INET` TCP, UDP and raw IP; `AF_UNIX` stream and datagram |
 | 56 | clone | fork, vfork-style `CLONE_VM \| CLONE_VFORK` (what `posix_spawn`, `system` and `popen` use), and threads (`CLONE_THREAD` with `SETTLS`, `PARENT_SETTID`, `CHILD_SETTID`, `CHILD_CLEARTID`) |
-| 202 | futex | `WAIT`, `WAKE` (and `_BITSET`), `REQUEUE`, `CMP_REQUEUE`, timeouts |
+| 57 | fork | yes (copy-on-write: pages are copied only when written) |
 | 58 | vfork | yes (same as fork, which POSIX allows) |
 | 59 | execve | yes (static ELF executables) |
 | 60 | exit | yes |
-| 61 | wait4 | yes (`WNOHANG`, `WUNTRACED`, `WCONTINUED`, process groups; no rusage) |
+| 61 | wait4 | yes (`WNOHANG`, `WUNTRACED`, `WCONTINUED`, process groups, rusage) |
 | 62 | kill | yes (pid, process group, or -1 for all; `EPERM` for other users' processes) |
-| 92/93/94/260 | chown, fchown, lchown, fchownat | yes |
-| 102/104/107/108 | getuid, getgid, geteuid, getegid | yes |
-| 105/106/113/114/117/119 | setuid, setgid, setreuid, setregid, setresuid, setresgid | yes (POSIX rules) |
-| 115/116 | getgroups, setgroups | yes |
-| 118/120 | getresuid, getresgid | yes |
-| 72 | fcntl | `F_DUPFD`, `F_GETFD`/`F_SETFD` (close-on-exec), `F_GETFL` |
-| 109 | setpgid | yes |
-| 111 | getpgrp | yes |
-| 121 | getpgid | yes |
 | 63 | uname | yes |
+| 72 | fcntl | `F_DUPFD`(`_CLOEXEC`), `F_GETFD`/`F_SETFD` (close-on-exec), `F_GETFL`/`F_SETFL` (`O_NONBLOCK`) |
+| 76 / 77 | truncate, ftruncate | yes |
 | 79 | getcwd | yes |
 | 80 | chdir | yes |
+| 82 | rename | yes (also renameat, renameat2 without flags) |
 | 83 | mkdir | yes |
 | 84 | rmdir | yes |
+| 86 | link | yes (also linkat; not on in-memory filesystems) |
 | 87 | unlink | yes |
+| 88 | symlink | yes (also symlinkat) |
+| 89 | readlink | yes (also readlinkat) |
+| 90 | chmod | yes (also fchmod, fchmodat) |
+| 92/93/94/260 | chown, fchown, lchown, fchownat | yes |
+| 95 | umask | yes |
+| 97 / 302 | getrlimit, prlimit64 | reports the limits (setting is ignored) |
+| 102/104/107/108 | getuid, getgid, geteuid, getegid | yes |
+| 105/106/113/114/117/119 | setuid, setgid, setreuid, setregid, setresuid, setresgid | yes (POSIX rules) |
+| 109 | setpgid | yes |
 | 110 | getppid | yes |
+| 111 | getpgrp | yes |
+| 115/116 | getgroups, setgroups | yes |
+| 118/120 | getresuid, getresgid | yes |
+| 121 | getpgid | yes |
+| 127 | rt_sigpending | yes |
+| 130 | rt_sigsuspend | yes |
+| 137 | statfs | yes (also fstatfs) |
+| 158 | arch_prctl | FS/GS base (thread-local storage) |
 | 162 | sync | yes |
 | 169 | reboot | yes (restart, power off, halt; syncs first) |
+| 186 | gettid | yes (`getpid` is the process, `gettid` the thread) |
+| 200/234 | tkill, tgkill | yes |
+| 202 | futex | `WAIT`, `WAKE` (and `_BITSET`), `REQUEUE`, `CMP_REQUEUE`, timeouts |
 | 217 | getdents64 | yes |
+| 218 | set_tid_address | yes |
 | 228 | clock_gettime | yes (time since boot) |
+| 230 | clock_nanosleep | yes (`TIMER_ABSTIME` too) |
 | 231 | exit_group | yes |
 | 257 | openat | yes |
+| 258-263 | mkdirat, newfstatat, unlinkat | yes |
+| 280 | utimensat | modification time |
 | 292 | dup3 | yes (`O_CLOEXEC`) |
 | 293 | pipe2 | yes (`O_CLOEXEC`) |
+| 318 | getrandom | yes (RDRAND when available) |
+| 332 | statx | yes |
 
 ## Networking
 PalladiumOS has TCP/IP: a driver for the RTL8139 network card (what `cargo run` gives QEMU, on its user network), the [smoltcp](https://github.com/smoltcp-rs/smoltcp) stack, and BSD sockets.
@@ -215,7 +212,7 @@ Every program runs as a process with its own address space, kernel stack, open f
 The scheduler is preemptive round-robin: the timer switches between processes running in ring 3.
 Programs can start other programs with `fork` + `execve` and wait for them with `wait4` (`userlib::spawn` wraps this).
 The kernel shell is task 0: `run` starts a program as its child and waits for it (and anything it started) to finish.
-Orphaned processes are handed to the kernel, which reaps them. Up to 32 processes can exist at once.
+Orphaned processes are handed to the kernel, which reaps them. Up to 64 processes can exist at once.
 
 Paths follow symbolic links (up to 40 per lookup, then `ELOOP`). Files have permission bits (`chmod`, and `umask` for new files) and `execve` needs an execute bit; it also runs `#!` scripts. 
 
@@ -229,6 +226,7 @@ PalladiumOS boots into `login`. A fresh disk has two accounts, `root` and `user`
 * Accounts live in `/etc/passwd`, `/etc/group` and `/etc/shadow` (mode 600). Passwords are hashed with iterated, salted SHA-256 (`$sha256$salt$hash`, PalladiumOS's own format).
 * Tools: `login`, `su [-] [user] [-c cmd]`, `passwd [-d] [user]`, `whoami`, `id`, `groups`, `useradd [-u uid] [-G groups] name`, `userdel [-r] name`, `chown user[:group]`, `chgrp`. `ls -l` shows owners, and the prompt shows `user@palladium:~ $` (`#` for root).
 
+## Files, Pipes and Signals
 Open files work like POSIX: an fd refers to a shared open file description, so after `fork` or `dup` both fds share one file offset. Pipes hold 16 KiB; readers wait for data and get end-of-file when every writer has closed, writers wait for room and get SIGPIPE/`EPIPE` when no reader is left. `O_CLOEXEC` fds are closed by `execve`.
 
 Signals work as in POSIX:
@@ -240,7 +238,7 @@ Signals work as in POSIX:
 * Not yet: `SA_SIGINFO` details (the siginfo has only the signal number), `sigaltstack`, handlers for faults (a segfault always ends the program).
 The console understands the usual ANSI escape sequences (cursor movement, clearing, colors and reverse video), so full-screen programs like `edit` work.
 
-Programs live in `/bin` as ordinary files, installed at boot: `run ls` runs `/bin/ls`, and `run /path/to/program` runs any ELF file.
+Programs live in `/bin` as ordinary files, installed at boot.
 
 ## Running the Tests
 `cargo test` boots each test kernel in QEMU (no window) and reports results over serial.
@@ -258,8 +256,9 @@ The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh
 |------|------------|---|
 | `/` | ext2 on the disk | saved; falls back to memory if there's no disk |
 | `/bin` | memory | the bundled programs, refreshed every boot |
+| `/usr` | ext2 on the system disk, read-only | BusyBox's links, musl's headers and libraries (for tcc), rebuilt every build as `target/usr.img` |
 | `/tmp` | memory | cleared on reboot |
-| `/dev` | devfs | `null`, `zero`, `tty`, `console` |
+| `/dev` | devfs | `null`, `zero`, `random`, `urandom`, `tty`, `console` |
 | `/proc` | procfs | live process and system information (below) |
 
 The kernel has a small VFS layer: every filesystem implements one interface, and paths are resolved through the mount table. The ext2 driver reads and writes files (including indirect blocks), creates and removes files and directories, and frees a file deleted while open only when it's closed. Linux tools can check and read the disk: `e2fsck -f target/disk.img`, `debugfs -R "ls -l /" target/disk.img`. Run `sync` (or `poweroff`/`reboot`, which sync first) before closing QEMU.
@@ -271,11 +270,15 @@ The date comes from the PC's real-time clock, so file times and `date` are real.
 ## Booting
 The kernel reports each boot step like Linux with systemd: timestamped facts (`[    0.164] CPU: ...`) and a green `[  OK  ]`, yellow `[ WARN ]` or red `[FAILED]` for each step (paging, heap, interrupts, disks, mounts, programs...), then the login prompt. The log is kept: `dmesg` shows it again (`dmesg -n` without colors), and it's in `/proc/kmsg`.
 
-## Instructions for Running the Kernel
-* Install QEMU
-* Download the Latest Release
-* Run this Command: qemu-system-x86_64 -drive format=raw,file=[location of BIN file
-* The system is running
+## Building and Running
+You need Rust (the nightly toolchain in `rust-toolchain.toml` is picked automatically, with `rust-src` and `llvm-tools-preview`), [bootimage](https://github.com/rust-osdev/bootimage) (`cargo install bootimage`), QEMU, and `mke2fs` (e2fsprogs, for the disk images). Then:
+
+```sh
+cargo run                  # build and boot in QEMU, with a disk and a network card
+tools/build-all.sh         # optional: musl and the ported software (see above)
+```
+
+`cargo build` builds the kernel, and `cargo bootimage` makes the bootable image (`target/x86_64-palladiumos/debug/bootimage-palladiumos.bin`), which also runs on its own: `qemu-system-x86_64 -drive format=raw,file=bootimage-palladiumos.bin`.
 
 ## The Shell
 After you log in, you get `/bin/sh`, a POSIX-style shell that runs in userland as a normal process.
@@ -299,7 +302,7 @@ After you log in, you get `/bin/sh`, a POSIX-style shell that runs in userland a
 Not yet: here-documents (`<<EOF`), aliases, `local`.
 
 ### Kernel Shell
-Typing `exit` in `sh` (or Ctrl-D) drops to the built-in kernel shell, which is kept as a fallback (background jobs are sent SIGHUP). Type `run sh` to go back. Kernel shell commands:
+The built-in kernel shell is kept as a fallback: press Ctrl-D at the login prompt to open it (it runs as root, so it asks for root's password once root has one). `run login` goes back to the login prompt, and `run sh` starts a shell. Kernel shell commands:
 * echo                - Echos back your Message
 * about               - Kernel info
 * clear               - Clear the screen
