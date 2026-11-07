@@ -106,11 +106,12 @@ fn status(p: &ProcInfo) -> String {
         _ => "S (sleeping)",
     };
     format!(
-        "Name:\t{}\nState:\t{}\nPid:\t{}\nPPid:\t{}\nPGid:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\n\
+        "Name:\t{}\nState:\t{}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nPGid:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\n\
          FDSize:\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nVmData:\t{} kB\nThreads:\t1\n\
          SigPnd:\t{:016x}\nSigBlk:\t{:016x}\nSigIgn:\t{:016x}\nSigCgt:\t{:016x}\n",
         p.name,
         state,
+        p.tgid,
         p.pid,
         p.ppid,
         p.pgid,

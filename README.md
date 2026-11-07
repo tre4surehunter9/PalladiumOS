@@ -134,7 +134,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 37 | alarm | yes |
 | 127 | rt_sigpending | yes |
 | 130 | rt_sigsuspend | yes |
-| 186 | gettid | yes (one thread per process) |
+| 186 | gettid | yes (`getpid` is the process, `gettid` the thread) |
 | 200/234 | tkill, tgkill | yes |
 | 16 | ioctl | console: `TCGETS`/`TCSETS` (raw and cooked mode), `TIOCGWINSZ`, `TIOCGPGRP`/`TIOCSPGRP` |
 | 24 | sched_yield | yes |
@@ -143,7 +143,8 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 35 | nanosleep | yes (55 ms timer resolution) |
 | 39 | getpid | yes |
 | 57 | fork | yes (copies the whole address space) |
-| 56 | clone | fork, and vfork-style `CLONE_VM \| CLONE_VFORK` (what `posix_spawn`, `system` and `popen` use); no threads yet |
+| 56 | clone | fork, vfork-style `CLONE_VM \| CLONE_VFORK` (what `posix_spawn`, `system` and `popen` use), and threads (`CLONE_THREAD` with `SETTLS`, `PARENT_SETTID`, `CHILD_SETTID`, `CHILD_CLEARTID`) |
+| 202 | futex | `WAIT`, `WAKE` (and `_BITSET`), `REQUEUE`, `CMP_REQUEUE`, timeouts |
 | 58 | vfork | yes (same as fork, which POSIX allows) |
 | 59 | execve | yes (static ELF executables) |
 | 60 | exit | yes |
@@ -173,6 +174,9 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 257 | openat | yes |
 | 292 | dup3 | yes (`O_CLOEXEC`) |
 | 293 | pipe2 | yes (`O_CLOEXEC`) |
+
+## Threads
+Programs can have threads: musl's pthreads (mutexes, condition variables, semaphores, `pthread_join`, `pthread_kill`, thread-local storage) works unchanged, and MicroPython's `_thread` too. A thread shares its process's memory, open files, working directory and signal handlers; it has its own registers, stack, TLS, signal mask and pending signals. `kill` sends to a process (to a thread that isn't blocking the signal), `tgkill` to one thread. `exit` ends a thread, `exit_group` (or a fatal signal) the whole process; a process whose first thread called `pthread_exit` lives until its last thread ends. Limits: one CPU (threads take turns), and only a process's first thread may `execve`.
 
 ## C Programs (musl libc)
 C programs run on PalladiumOS with an unmodified [musl](https://musl.libc.org) libc: PalladiumOS speaks the Linux x86_64 syscall interface musl was written for, saves the SSE registers programs use, supports thread-local storage, `mmap`, and gives programs the aux vector libc's startup reads.

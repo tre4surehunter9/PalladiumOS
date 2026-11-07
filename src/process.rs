@@ -33,7 +33,8 @@ use crate::syscall::*;
 use crate::usermode::{self, ERR_NO_MEMORY, ERR_TOO_MANY_ARGS};
 use crate::vfs::{self, Files};
 
-pub const MAX_PROCESSES: usize = 32;
+/// Processes and threads together.
+pub const MAX_PROCESSES: usize = 64;
 const KERNEL_STACK_SIZE: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +148,8 @@ pub struct Process {
     /// set_tid_address / CLONE_CHILD_CLEARTID: zeroed and futex-woken when
     /// the thread exits (pthread_join waits on it).
     clear_child_tid: u64,
+    /// A futex wait with a timeout: the tick it gives up at (0 = none).
+    deadline: u64,
     /// A vfork child using its parent's address space (until it calls
     /// execve or exits; the parent waits meanwhile). It must not free `p4`.
     borrowed_vm: bool,
@@ -267,6 +270,7 @@ pub fn init() {
         gs_base: 0,
         tgid: 0,
         clear_child_tid: 0,
+        deadline: 0,
         borrowed_vm: false,
     }));
     CURRENT.store(0, Ordering::SeqCst);
@@ -313,7 +317,10 @@ pub fn others_ready() -> bool {
     let now = ticks();
     TABLE.lock().values().any(|p| {
         (p.alarm_at != 0 && now >= p.alarm_at)
-            || (p.pid != cur && (p.state == State::Ready || (p.state == State::Sleeping && now >= p.wake_at)))
+            || (p.pid != cur
+                && (p.state == State::Ready
+                    || (p.state == State::Sleeping && now >= p.wake_at)
+                    || (matches!(p.state, State::Blocked(_)) && p.deadline != 0 && now >= p.deadline)))
     })
 }
 
@@ -370,6 +377,7 @@ pub fn schedule() {
                 match p.state {
                     State::Sleeping if now >= p.wake_at => p.state = State::Ready,
                     State::Blocked(key) if woken.contains(&key) => p.state = State::Ready,
+                    State::Blocked(_) if p.deadline != 0 && now >= p.deadline => p.state = State::Ready,
                     _ => {}
                 }
             }
@@ -479,6 +487,7 @@ pub fn exit_current(reason: ExitReason) -> ! {
         let mut table = TABLE.lock();
         let cur = current_pid();
         assert!(cur != 0, "the kernel task can't exit");
+        clear_child_tid(&mut table, cur);
         let ppid = {
             let p = table.get_mut(&cur).unwrap();
             p.state = State::Zombie(reason);
@@ -501,6 +510,13 @@ pub fn exit_current(reason: ExitReason) -> ! {
         if table.get(&cur).is_some_and(|p| p.borrowed_vm) {
             wake(vfork_key(cur)); // a vfork child: the parent may go on
         }
+        // The last thread of a process that isn't its first: the parent has
+        // been told (it reaps the first thread); the kernel reaps this one.
+        if let Some(p) = table.get_mut(&cur) {
+            if p.pid != p.tgid {
+                p.ppid = 0;
+            }
+        }
         // If an orphan already exited, the kernel may be waiting for it.
         if let Some(kernel) = table.get_mut(&0) {
             if kernel.state == State::Waiting {
@@ -512,14 +528,120 @@ pub fn exit_current(reason: ExitReason) -> ! {
     unreachable!("a zombie was scheduled");
 }
 
-/// Kill the current process with a signal (used by fault handlers).
+/// Kill the current process (all its threads) with a signal (used by
+/// fault handlers).
 pub fn kill_current(signal: i32) -> ! {
-    exit_current(ExitReason::Signaled(signal))
+    exit_group(ExitReason::Signaled(signal))
+}
+
+/// A thread is done: its CLONE_CHILD_CLEARTID word is zeroed and futex-woken
+/// (pthread_join waits on it).
+fn clear_child_tid(table: &mut BTreeMap<u64, Box<Process>>, tid: u64) {
+    let Some(p) = table.get(&tid) else { return };
+    let (addr, p4) = (p.clear_child_tid, p.p4);
+    if addr == 0 {
+        return;
+    }
+    if let Some(word) = unsafe { user_slice_mut(addr, 4) } {
+        word.copy_from_slice(&0u32.to_le_bytes());
+    }
+    futex_wake_locked(table, futex_key(p4, addr), u32::MAX);
+}
+
+/// Other live threads of the current thread's process.
+fn other_threads(table: &BTreeMap<u64, Box<Process>>, cur: u64) -> Vec<u64> {
+    let tgid = table[&cur].tgid;
+    table.values().filter(|t| t.tgid == tgid && t.pid != cur && !matches!(t.state, State::Zombie(_))).map(|t| t.pid).collect()
+}
+
+/// End another thread now (it isn't running: there's one CPU). Its kernel
+/// stack goes when it's reaped: by the kernel, unless it's the process's
+/// first thread, which its parent waits for.
+fn end_thread_locked(table: &mut BTreeMap<u64, Box<Process>>, tid: u64, reason: ExitReason) {
+    let Some(t) = table.get_mut(&tid) else { return };
+    t.state = State::Zombie(reason);
+    t.files = Arc::new(Mutex::new(Files::empty()));
+    if t.pid != t.tgid {
+        t.ppid = 0;
+    }
+}
+
+/// exit(): end the calling thread. The last thread of a process ends the
+/// process; a process's first thread that exits early stays a zombie
+/// until the others are done (that's what its parent waits for).
+pub fn exit_thread(code: i32) -> ! {
+    let alone = {
+        let mut table = TABLE.lock();
+        let cur = current_pid();
+        clear_child_tid(&mut table, cur);
+        let others = other_threads(&table, cur);
+        if !others.is_empty() && table[&cur].pid != table[&cur].tgid {
+            // Not the first thread, and not the last: just this thread.
+            end_thread_locked(&mut table, cur, ExitReason::Exited(code));
+            wake_kernel_locked(&mut table);
+            false
+        } else {
+            true
+        }
+    };
+    if alone {
+        exit_current(ExitReason::Exited(code));
+    }
+    schedule();
+    unreachable!("an exited thread was scheduled");
+}
+
+/// exit_group(), a fatal signal, a fault: end every thread of the process.
+pub fn exit_group(reason: ExitReason) -> ! {
+    let leader_alive_elsewhere = {
+        let mut table = TABLE.lock();
+        let cur = current_pid();
+        let tgid = table[&cur].tgid;
+        for t in other_threads(&table, cur) {
+            end_thread_locked(&mut table, t, reason);
+        }
+        tgid != cur
+    };
+    if leader_alive_elsewhere {
+        // A thread other than the first ends the process: the first thread
+        // (ended above, a zombie now) is what the parent sees exit.
+        let mut table = TABLE.lock();
+        let cur = current_pid();
+        let tgid = table[&cur].tgid;
+        clear_child_tid(&mut table, cur);
+        end_thread_locked(&mut table, cur, reason);
+        notify_exit_locked(&mut table, tgid);
+        drop(table);
+        schedule();
+        unreachable!("an exited thread was scheduled");
+    }
+    exit_current(reason)
+}
+
+fn wake_kernel_locked(table: &mut BTreeMap<u64, Box<Process>>) {
+    if let Some(kernel) = table.get_mut(&0) {
+        if kernel.state == State::Waiting {
+            kernel.state = State::Ready;
+        }
+    }
+}
+
+/// A process ended: wake its parent (if it waits) and send it SIGCHLD.
+fn notify_exit_locked(table: &mut BTreeMap<u64, Box<Process>>, pid: u64) {
+    let ppid = table.get(&pid).map_or(0, |p| p.ppid);
+    if let Some(parent) = table.get_mut(&ppid) {
+        if parent.state == State::Waiting {
+            parent.state = State::Ready;
+        }
+    }
+    signal_locked(table, ppid, SIGCHLD);
+    wake_kernel_locked(table);
 }
 
 /// Free a reaped process's memory. Its kernel stack is freed when it drops.
 fn free_process(p: Box<Process>) {
-    if p.kernel_stack.is_some() && !p.borrowed_vm {
+    // Threads share the address space: the last one to go frees it.
+    if p.kernel_stack.is_some() && !p.borrowed_vm && Arc::strong_count(&p.mm) == 1 {
         let mut alloc = FRAME_ALLOCATOR.lock();
         memory::free_address_space(p.p4, alloc.as_mut().unwrap());
     }
@@ -570,7 +692,7 @@ pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u64, ExitReason)>, i64> {
 /// fork(): duplicate the current process. Returns the child's pid to the
 /// parent; the child returns from the same syscall with 0.
 pub fn fork(frame: &SyscallFrame) -> i64 {
-    fork_with(frame, false, 0)
+    fork_with(frame, CloneKind::Fork, 0)
 }
 
 /// Key a vfork parent waits on until its child stops using its memory.
@@ -578,25 +700,77 @@ fn vfork_key(child: u64) -> u64 {
     0xF0F0_0000_0000_0000 | child
 }
 
-/// clone(flags, stack, parent_tid, child_tid, tls): fork, or a vfork
-/// (CLONE_VM | CLONE_VFORK, what posix_spawn uses): the child runs in the
-/// parent's memory, on `stack`, and the parent waits until it calls execve
-/// or exits. Threads (CLONE_VM without CLONE_VFORK, CLONE_THREAD...) aren't
-/// supported yet.
-pub fn sys_clone(frame: &SyscallFrame, flags: u64, stack: u64) -> i64 {
+/// What a new task shares with its creator.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CloneKind {
+    /// A new process with a copy-on-write copy of the memory.
+    Fork,
+    /// A new process borrowing the parent's memory until it execs or exits.
+    Vfork,
+    /// A new thread of the same process: memory, files, signal handlers.
+    Thread { tls: Option<u64>, clear_tid: u64 },
+}
+
+/// clone(flags, stack, parent_tid, child_tid, tls):
+/// - fork (just an exit signal),
+/// - vfork (CLONE_VM | CLONE_VFORK, what posix_spawn uses): the child runs
+///   in the parent's memory, on `stack`, and the parent waits until it
+///   calls execve or exits,
+/// - a thread (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+///   CLONE_THREAD, as pthread_create does), with CLONE_SETTLS (its TLS),
+///   CLONE_PARENT_SETTID / CLONE_CHILD_SETTID (write its tid) and
+///   CLONE_CHILD_CLEARTID (zero and futex-wake that word when it exits).
+pub fn sys_clone(frame: &SyscallFrame, flags: u64, stack: u64, parent_tid: u64, child_tid: u64, tls: u64) -> i64 {
     const CLONE_VM: u64 = 0x100;
+    const CLONE_FS: u64 = 0x200;
+    const CLONE_FILES: u64 = 0x400;
+    const CLONE_SIGHAND: u64 = 0x800;
     const CLONE_VFORK: u64 = 0x4000;
+    const CLONE_THREAD: u64 = 0x10000;
+    const CLONE_SYSVSEM: u64 = 0x40000;
+    const CLONE_SETTLS: u64 = 0x80000;
+    const CLONE_PARENT_SETTID: u64 = 0x100000;
+    const CLONE_CHILD_CLEARTID: u64 = 0x200000;
+    const CLONE_DETACHED: u64 = 0x400000;
+    const CLONE_CHILD_SETTID: u64 = 0x1000000;
+    const THREAD: u64 = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
     let exit_signal = flags & 0xff;
-    let other = flags & !0xff & !(CLONE_VM | CLONE_VFORK);
-    if other != 0 || (exit_signal != 0 && exit_signal != SIGCHLD as u64) {
+    let known = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_VFORK | CLONE_THREAD | CLONE_SYSVSEM
+        | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID | CLONE_DETACHED | CLONE_CHILD_SETTID;
+    if flags & !0xff & !known != 0 || (exit_signal != 0 && exit_signal != SIGCHLD as u64) {
         return -EINVAL;
     }
-    let share = flags & CLONE_VM != 0;
-    if share && flags & CLONE_VFORK == 0 {
-        return -EINVAL; // a thread
+    let kind = if flags & CLONE_THREAD != 0 {
+        // A thread shares everything a pthread does (nothing in between).
+        if flags & THREAD != THREAD {
+            return -EINVAL;
+        }
+        CloneKind::Thread {
+            tls: (flags & CLONE_SETTLS != 0).then_some(tls),
+            clear_tid: if flags & CLONE_CHILD_CLEARTID != 0 { child_tid } else { 0 },
+        }
+    } else if flags & CLONE_VM != 0 {
+        if flags & CLONE_VFORK == 0 {
+            return -EINVAL; // shared memory without a thread: not supported
+        }
+        CloneKind::Vfork
+    } else {
+        CloneKind::Fork
+    };
+    let pid = fork_with(frame, kind, stack);
+    if pid <= 0 {
+        return pid;
     }
-    let pid = fork_with(frame, share, stack);
-    if pid > 0 && share {
+    // Tell the creator (and, for a thread, the thread itself) its tid.
+    // (The memory is shared for threads, so both writes land for both.)
+    for (flag, ptr) in [(CLONE_PARENT_SETTID, parent_tid), (CLONE_CHILD_SETTID, child_tid)] {
+        if flags & flag != 0 {
+            if let Some(out) = unsafe { user_slice_mut(ptr, 4) } {
+                out.copy_from_slice(&(pid as u32).to_le_bytes());
+            }
+        }
+    }
+    if kind == CloneKind::Vfork {
         // Wait (uninterruptibly: the child is using our memory) until the
         // child has its own address space or is gone.
         loop {
@@ -613,13 +787,14 @@ pub fn sys_clone(frame: &SyscallFrame, flags: u64, stack: u64) -> i64 {
     pid
 }
 
-/// fork, sharing the address space (vfork) or copying it, with the child
-/// on `stack` if it's not 0.
-fn fork_with(frame: &SyscallFrame, share: bool, stack: u64) -> i64 {
+/// Make a new task (see CloneKind), with the child on `stack` if it's not 0.
+fn fork_with(frame: &SyscallFrame, kind: CloneKind, stack: u64) -> i64 {
+    let share = kind != CloneKind::Fork; // the same address space
+    let thread = matches!(kind, CloneKind::Thread { .. });
     // The child gets the FPU registers as they are now.
     let mut fpu = Box::new(crate::fpu::FpuState::initial());
     crate::fpu::save(&mut fpu);
-    let (p4, files, name, ppid, mm, pgid, (actions, blocked), argv, exe, cred, (fs_base, gs_base)) = {
+    let (p4, files, name, ppid, mm, pgid, (actions, blocked), argv, exe, cred, (fs_base, gs_base), tgid) = {
         let table = TABLE.lock();
         if table.len() >= MAX_PROCESSES {
             return -EAGAIN;
@@ -627,16 +802,20 @@ fn fork_with(frame: &SyscallFrame, share: bool, stack: u64) -> i64 {
         let cur = table.get(&current_pid()).unwrap();
         (
             cur.p4,
-            Arc::new(Mutex::new(cur.files.lock().clone())),
+            // A thread shares the files and memory bookkeeping; a new
+            // process gets copies.
+            if thread { cur.files.clone() } else { Arc::new(Mutex::new(cur.files.lock().clone())) },
             cur.name.clone(),
-            cur.pid,
-            Arc::new(Mutex::new(cur.mm.lock().clone())), // copied with the address space
+            // A thread's parent is its process's parent.
+            if thread { cur.ppid } else { cur.pid },
+            if thread { cur.mm.clone() } else { Arc::new(Mutex::new(cur.mm.lock().clone())) },
             cur.pgid,
             (cur.actions.clone(), cur.blocked),
             cur.argv.clone(),
             cur.exe.clone(),
             cur.cred.clone(),
             (cur.fs_base, cur.gs_base),
+            if thread { Some(cur.tgid) } else { None },
         )
     };
 
@@ -683,11 +862,18 @@ fn fork_with(frame: &SyscallFrame, share: bool, stack: u64) -> i64 {
         running_since: 0,
         cred,
         fpu,
-        fs_base,
+        fs_base: match kind {
+            CloneKind::Thread { tls: Some(tls), .. } => tls,
+            _ => fs_base,
+        },
         gs_base,
-        tgid: pid,
-        clear_child_tid: 0,
-        borrowed_vm: share,
+        tgid: tgid.unwrap_or(pid),
+        clear_child_tid: match kind {
+            CloneKind::Thread { clear_tid, .. } => clear_tid,
+            _ => 0,
+        },
+        deadline: 0,
+        borrowed_vm: kind == CloneKind::Vfork,
     };
     match add_process(child) {
         Ok(pid) => pid as i64,
@@ -788,6 +974,15 @@ fn load_executable(path: &str, argv: Vec<String>) -> Result<(String, Vec<u8>, Ve
 /// execve(path, argv, envp): replace the current program. On success it
 /// doesn't return: the syscall "returns" into the new program's entry point.
 pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 {
+    // In a process with threads, only its first thread may exec (the new
+    // program takes over the process; the other threads end).
+    {
+        let table = TABLE.lock();
+        let cur = current_pid();
+        if table[&cur].pid != table[&cur].tgid && !other_threads(&table, cur).is_empty() {
+            return -EBUSY;
+        }
+    }
     let path = match vfs::user_string(path) {
         Ok(p) if p.is_empty() => return -ENOENT,
         Ok(p) => p,
@@ -817,7 +1012,15 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
     // Point of no return: switch to the new address space, free the old one.
     let old_p4 = {
         let mut table = TABLE.lock();
-        let p = table.get_mut(&current_pid()).unwrap();
+        let cur = current_pid();
+        // The other threads end; they keep the old address space until
+        // they're reaped (the last one frees it).
+        for t in other_threads(&table, cur) {
+            end_thread_locked(&mut table, t, ExitReason::Signaled(SIGKILL));
+        }
+        wake_kernel_locked(&mut table);
+        let p = table.get_mut(&cur).unwrap();
+        let old_shared = Arc::strong_count(&p.mm) > 1;
         p.files.lock().close_on_exec();
         p.name = basename(&path);
         p.argv = argv.clone();
@@ -833,9 +1036,9 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
                 *a = SigAction::DEFAULT;
             }
         }
-        (core::mem::replace(&mut p.p4, image.p4), borrowed)
+        (core::mem::replace(&mut p.p4, image.p4), borrowed, old_shared)
     };
-    let (old_p4, borrowed) = old_p4;
+    let (old_p4, borrowed, old_shared) = old_p4;
     apply_exec_ids(setuid, setgid);
     let (_, flags) = Cr3::read();
     unsafe { Cr3::write(image.p4, flags) };
@@ -844,7 +1047,7 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
     if borrowed {
         // A vfork child: the old address space is the parent's. Let it go on.
         wake(vfork_key(current_pid()));
-    } else {
+    } else if !old_shared {
         let mut alloc = FRAME_ALLOCATOR.lock();
         memory::free_address_space(old_p4, alloc.as_mut().unwrap());
     }
@@ -877,8 +1080,10 @@ pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64, rusage: u64) -> i64 {
             let mut table = TABLE.lock();
             let cur = current_pid();
             let my_pgid = table.get(&cur).map(|p| p.pgid).unwrap_or(0);
+            // Only whole processes (their first thread), never other threads.
             let matches = |p: &Process| {
                 p.ppid == cur
+                    && p.pid == p.tgid
                     && p.pid != cur
                     && match pid {
                         -1 => true,
@@ -890,7 +1095,13 @@ pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64, rusage: u64) -> i64 {
             if !table.values().any(|p| matches(p)) {
                 return -ECHILD;
             }
-            if let Some(zpid) = table.values().find(|p| matches(p) && matches!(p.state, State::Zombie(_))).map(|p| p.pid) {
+            // A process is done when its first thread is a zombie and no
+            // other thread of it is still running.
+            let done = |p: &Process| {
+                matches!(p.state, State::Zombie(_))
+                    && !table.values().any(|t| t.tgid == p.pid && t.pid != p.pid && !matches!(t.state, State::Zombie(_)))
+            };
+            if let Some(zpid) = table.values().find(|p| matches(p) && done(p)).map(|p| p.pid) {
                 let p = table.remove(&zpid).unwrap();
                 let State::Zombie(reason) = p.state else { unreachable!() };
                 let cpu = p.cpu_ticks;
@@ -982,6 +1193,7 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         gs_base: 0,
         tgid: pid,
         clear_child_tid: 0,
+        deadline: 0,
         borrowed_vm: false,
     };
     add_process(process).map_err(|_| {
@@ -1288,8 +1500,33 @@ fn signal_locked(table: &mut BTreeMap<u64, Box<Process>>, pid: u64, sig: i32) ->
 }
 
 fn signal_group_locked(table: &mut BTreeMap<u64, Box<Process>>, pgid: u64, sig: i32) -> usize {
-    let members: Vec<u64> = table.values().filter(|p| p.pgid == pgid && p.pid != 0).map(|p| p.pid).collect();
-    members.iter().filter(|&&pid| signal_locked(table, pid, sig)).count()
+    // One delivery per process (thread group) in the group.
+    let mut members: Vec<u64> = table.values().filter(|p| p.pgid == pgid && p.pid != 0).map(|p| p.tgid).collect();
+    members.dedup();
+    members.iter().filter(|&&tgid| signal_process_locked(table, tgid, sig)).count()
+}
+
+/// Send `sig` to a process (thread group), as kill() does. Stop, continue
+/// and SIGKILL reach every thread; any other signal goes to one thread
+/// that isn't blocking it (the first thread if they all are). Returns
+/// false if there's no such process.
+fn signal_process_locked(table: &mut BTreeMap<u64, Box<Process>>, tgid: u64, sig: i32) -> bool {
+    let threads: Vec<(u64, bool)> = table
+        .values()
+        .filter(|t| t.tgid == tgid && !matches!(t.state, State::Zombie(_)))
+        .map(|t| (t.pid, sig > 0 && t.blocked & bit(sig) != 0))
+        .collect();
+    if threads.len() <= 1 {
+        return signal_locked(table, tgid, sig); // one thread (or a zombie)
+    }
+    if sig == SIGKILL || sig == SIGCONT || (sig > 0 && STOP_SIGNALS & bit(sig) != 0) {
+        for (t, _) in &threads {
+            signal_locked(table, *t, sig);
+        }
+        return true;
+    }
+    let target = threads.iter().find(|(_, blocked)| !blocked).map_or(threads[0].0, |(t, _)| *t);
+    signal_locked(table, target, sig)
 }
 
 /// Send the signals typed at the keyboard to the foreground process group.
@@ -1427,7 +1664,7 @@ pub fn handle_signals(frame: &mut SyscallFrame, syscall: Option<(u64, i64)>) {
         let act = p.actions[(sig - 1) as usize];
         if act.handler == SIG_DFL {
             drop(table);
-            exit_current(ExitReason::Signaled(sig));
+            exit_group(ExitReason::Signaled(sig));
         }
         let old_mask = p.saved_mask.take().unwrap_or(p.blocked);
         let mut during = p.blocked | act.mask;
@@ -1445,7 +1682,7 @@ pub fn handle_signals(frame: &mut SyscallFrame, syscall: Option<(u64, i64)>) {
     }
     // No way back from the handler without a restorer (libc always gives one).
     if act.flags & SA_RESTORER == 0 || crate::signal::setup_frame(frame, sig, act.handler, act.restorer, old_mask).is_err() {
-        exit_current(ExitReason::Signaled(SIGSEGV));
+        exit_group(ExitReason::Signaled(SIGSEGV));
     }
 }
 
@@ -1458,7 +1695,7 @@ pub fn sys_rt_sigreturn(frame: &mut SyscallFrame) -> i64 {
             table.get_mut(&current_pid()).unwrap().blocked = mask & !UNBLOCKABLE;
             frame.rax as i64
         }
-        Err(()) => exit_current(ExitReason::Signaled(SIGSEGV)),
+        Err(()) => exit_group(ExitReason::Signaled(SIGSEGV)),
     }
 }
 
@@ -1478,16 +1715,20 @@ pub fn sys_kill(pid: u64, sig: u64) -> i64 {
     let allowed = |p: &Process| {
         me.euid == 0 || [me.ruid, me.euid].iter().any(|&u| u == p.cred.ruid || u == p.cred.suid)
     };
-    let targets: Vec<u64> = if pid > 0 {
-        table.keys().copied().filter(|&p| p == pid as u64).collect()
+    // Processes (thread groups): kill(TID) of any thread means its process.
+    let my_tgid = table.get(&cur).map_or(0, |p| p.tgid);
+    let mut targets: Vec<u64> = if pid > 0 {
+        table.get(&(pid as u64)).map(|p| p.tgid).into_iter().collect()
     } else if pid == 0 {
         let pgid = table.get(&cur).map(|p| p.pgid).unwrap_or(0);
-        table.values().filter(|p| p.pgid == pgid && p.pid != 0).map(|p| p.pid).collect()
+        table.values().filter(|p| p.pgid == pgid && p.pid != 0).map(|p| p.tgid).collect()
     } else if pid == -1 {
-        table.keys().copied().filter(|&p| p != 0 && p != cur).collect()
+        table.values().filter(|p| p.pid != 0 && p.tgid != my_tgid).map(|p| p.tgid).collect()
     } else {
-        table.values().filter(|p| p.pgid == (-pid) as u64 && p.pid != 0).map(|p| p.pid).collect()
+        table.values().filter(|p| p.pgid == (-pid) as u64 && p.pid != 0).map(|p| p.tgid).collect()
     };
+    targets.sort_unstable();
+    targets.dedup();
     if targets.is_empty() {
         return -ESRCH;
     }
@@ -1496,17 +1737,27 @@ pub fn sys_kill(pid: u64, sig: u64) -> i64 {
         return -EPERM;
     }
     for t in permitted {
-        signal_locked(&mut table, t, sig);
+        signal_process_locked(&mut table, t, sig);
     }
     0
 }
 
 /// tgkill(tgid, tid, sig) and tkill(tid, sig): one thread is one process here.
-pub fn sys_tkill(tid: u64, sig: u64) -> i64 {
-    if tid as i64 <= 0 {
+/// tkill(tid, sig) / tgkill(tgid, tid, sig): a signal for one thread
+/// (raise() and pthread_kill use these). `tgid` 0 means "don't check".
+pub fn sys_tkill(tgid: u64, tid: u64, sig: u64) -> i64 {
+    if tid as i64 <= 0 || !(0..=MAX_SIGNAL as u64).contains(&sig) {
         return -EINVAL;
     }
-    sys_kill(tid, sig)
+    let mut table = TABLE.lock();
+    let me = table.get(&current_pid()).map(|p| p.cred.clone()).unwrap_or(Cred::ROOT);
+    let Some(t) = table.get(&tid).filter(|t| tgid == 0 || t.tgid == tgid) else { return -ESRCH };
+    let allowed = me.euid == 0 || [me.ruid, me.euid].iter().any(|&u| u == t.cred.ruid || u == t.cred.suid);
+    if !allowed {
+        return -EPERM;
+    }
+    signal_locked(&mut table, tid, sig as i32);
+    0
 }
 
 /// setpgid(pid, pgid): 0 means "the caller" / "same as pid".
@@ -1580,10 +1831,14 @@ pub fn sys_rt_sigaction(sig: u64, act: u64, oldact: u64) -> i64 {
         }
     }
     if let Some(new) = new {
-        p.actions[(sig - 1) as usize] = new;
-        // Setting a signal to be ignored drops it if it's pending (POSIX).
-        if discarded(p, sig) {
-            p.pending &= !bit(sig);
+        // Handlers belong to the process: every thread gets the change.
+        let tgid = p.tgid;
+        for t in table.values_mut().filter(|t| t.tgid == tgid) {
+            t.actions[(sig - 1) as usize] = new;
+            // Setting a signal to be ignored drops it if it's pending (POSIX).
+            if discarded(t, sig) {
+                t.pending &= !bit(sig);
+            }
         }
     }
     0
@@ -1856,6 +2111,8 @@ pub fn raise(sig: i32) {
 /// A snapshot of one process, for /proc.
 pub struct ProcInfo {
     pub pid: u64,
+    /// The process (thread group) this thread belongs to.
+    pub tgid: u64,
     pub ppid: u64,
     pub pgid: u64,
     pub name: String,
@@ -1909,6 +2166,7 @@ pub fn snapshot(only: Option<u64>) -> Vec<ProcInfo> {
             let brk = p.mm.lock().brk;
             ProcInfo {
                 pid: p.pid,
+                tgid: p.tgid,
                 ppid: p.ppid,
                 pgid: p.pgid,
                 name: p.name.clone(),
@@ -2185,5 +2443,144 @@ fn fill_rusage(ptr: u64, cpu_ticks: u64) {
         let us = cpu_ticks * TICK_NS / 1000;
         out[0..8].copy_from_slice(&((us / 1_000_000) as i64).to_le_bytes()); // ru_utime.tv_sec
         out[8..16].copy_from_slice(&((us % 1_000_000) as i64).to_le_bytes()); // ru_utime.tv_usec
+    }
+}
+
+// ---- threads: ids and futexes ----
+
+/// getpid(): the process (thread group) ID.
+pub fn current_tgid() -> u64 {
+    TABLE.lock().get(&current_pid()).map_or(0, |p| p.tgid)
+}
+
+/// set_tid_address(addr): zero and futex-wake `addr` when this thread
+/// exits. Returns the thread ID.
+pub fn sys_set_tid_address(addr: u64) -> i64 {
+    with_current(|p| {
+        p.clear_child_tid = addr;
+        p.pid as i64
+    })
+}
+
+/// A futex is identified by its address space and address. (Bit 63 keeps
+/// these apart from other wait keys, which are kernel heap addresses.)
+fn futex_key(p4: PhysFrame, addr: u64) -> u64 {
+    (1 << 63) | (((p4.start_address().as_u64() >> 12) & 0x7FFF) << 47) | (addr & ((1 << 47) - 1))
+}
+
+/// Wake up to `max` threads waiting on `key`. Returns how many.
+fn futex_wake_locked(table: &mut BTreeMap<u64, Box<Process>>, key: u64, max: u32) -> u32 {
+    let mut woken = 0;
+    for p in table.values_mut() {
+        if woken >= max {
+            break;
+        }
+        if p.state == State::Blocked(key) {
+            p.state = State::Ready;
+            p.deadline = 0;
+            woken += 1;
+        }
+    }
+    woken
+}
+
+fn read_u32(addr: u64) -> Result<u32, i64> {
+    match unsafe { user_slice(addr, 4) } {
+        Some(b) => Ok(u32::from_le_bytes(b.try_into().unwrap())),
+        None => Err(EFAULT),
+    }
+}
+
+/// futex(uaddr, op, val, timeout | val2, uaddr2, val3): what pthread
+/// mutexes, condition variables and joins are built on.
+///   WAIT (and WAIT_BITSET): sleep if *uaddr == val, until woken (or the
+///     timeout: relative for WAIT, absolute for WAIT_BITSET)
+///   WAKE (and WAKE_BITSET): wake up to val waiters
+///   REQUEUE / CMP_REQUEUE: wake val, move up to val2 others to uaddr2
+/// The PRIVATE flag is accepted (every futex is per-process here).
+pub fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u64) -> i64 {
+    const WAIT: u64 = 0;
+    const WAKE: u64 = 1;
+    const REQUEUE: u64 = 3;
+    const CMP_REQUEUE: u64 = 4;
+    const WAIT_BITSET: u64 = 9;
+    const WAKE_BITSET: u64 = 10;
+    const CLOCK_REALTIME: u64 = 256;
+    const ETIMEDOUT: i64 = 110;
+    if uaddr & 3 != 0 {
+        return -EINVAL;
+    }
+    let p4 = current_p4();
+    let key = futex_key(p4, uaddr);
+    match op & 0x7f {
+        WAIT | WAIT_BITSET => {
+            match read_u32(uaddr) {
+                Ok(v) if v == val as u32 => {}
+                Ok(_) => return -EAGAIN, // it changed: don't sleep
+                Err(e) => return -e,
+            }
+            let deadline = if timeout != 0 {
+                let Some(ts) = (unsafe { user_slice(timeout, 16) }) else { return -EFAULT };
+                let sec = u64::from_le_bytes(ts[0..8].try_into().unwrap());
+                let nsec = u64::from_le_bytes(ts[8..16].try_into().unwrap());
+                let mut ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
+                if op & 0x7f == WAIT_BITSET {
+                    // An absolute time on CLOCK_MONOTONIC (or REALTIME).
+                    let now = if op & CLOCK_REALTIME != 0 { crate::rtc::now_ns() } else { ticks() * TICK_NS };
+                    if ns <= now {
+                        return -ETIMEDOUT;
+                    }
+                    ns -= now;
+                }
+                Some(ticks() + ns.div_ceil(TICK_NS).max(1))
+            } else {
+                None
+            };
+            if signal_pending() {
+                return -EINTR;
+            }
+            {
+                let mut table = TABLE.lock();
+                let p = table.get_mut(&current_pid()).unwrap();
+                p.state = State::Blocked(key);
+                p.deadline = deadline.unwrap_or(0);
+            }
+            schedule();
+            with_current(|p| p.deadline = 0);
+            if deadline.is_some_and(|d| ticks() >= d) {
+                return -ETIMEDOUT;
+            }
+            if signal_pending() {
+                return -EINTR;
+            }
+            0 // woken (or spuriously: callers check their condition again)
+        }
+        WAKE | WAKE_BITSET => futex_wake_locked(&mut TABLE.lock(), key, val as u32) as i64,
+        REQUEUE | CMP_REQUEUE => {
+            if op & 0x7f == CMP_REQUEUE {
+                match read_u32(uaddr) {
+                    Ok(v) if v == val3 as u32 => {}
+                    Ok(_) => return -EAGAIN,
+                    Err(e) => return -e,
+                }
+            }
+            if uaddr2 & 3 != 0 {
+                return -EINVAL;
+            }
+            let mut table = TABLE.lock();
+            let woken = futex_wake_locked(&mut table, key, val as u32);
+            let (to, mut moved) = (futex_key(p4, uaddr2), 0u64);
+            for p in table.values_mut() {
+                if moved >= timeout {
+                    break; // (the 4th argument is val2 here: how many to move)
+                }
+                if p.state == State::Blocked(key) {
+                    p.state = State::Blocked(to);
+                    moved += 1;
+                }
+            }
+            woken as i64 + if op & 0x7f == CMP_REQUEUE { moved as i64 } else { 0 }
+        }
+        _ => -ENOSYS,
     }
 }

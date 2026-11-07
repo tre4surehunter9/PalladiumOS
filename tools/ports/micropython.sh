@@ -12,11 +12,11 @@ fetch micropython-1.29.0 https://github.com/micropython/micropython/releases/dow
 # mpy-cross precompiles the built-in Python modules: a host tool.
 make -C mpy-cross -j"$(nproc)" CC=gcc
 
-# PalladiumOS has no threads, libffi (it needs dynamic loading) or TLS
-# library yet; -Werror is dropped so new compiler warnings can't stop
-# the build.
+# PalladiumOS has no libffi (it needs dynamic loading) or TLS library
+# yet; threads are on (_thread). -Werror is dropped so new compiler
+# warnings can't stop the build.
 make -C ports/unix -j"$(nproc)" VARIANT=standard CC="$PCC" CWARN="-Wall" \
-    MICROPY_PY_THREAD=0 MICROPY_PY_FFI=0 MICROPY_PY_SSL=0 MICROPY_SSL_MBEDTLS=0 MICROPY_PY_BTREE=0 \
+    MICROPY_PY_THREAD=1 MICROPY_PY_FFI=0 MICROPY_PY_SSL=0 MICROPY_SSL_MBEDTLS=0 MICROPY_PY_BTREE=0 \
     MICROPY_STANDALONE=0
 install -m 755 ports/unix/build-standard/micropython "$BIN/micropython"
 echo "micropython installed in $BIN"

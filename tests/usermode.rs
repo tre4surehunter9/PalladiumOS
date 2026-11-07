@@ -1759,6 +1759,19 @@ fn micropython_port_works() {
     .unwrap();
     assert_eq!(sh("chmod +x /tmp/k.py && /tmp/k.py > /tmp/k.out 2>&1"), 0, "{}", file("/tmp/k.out"));
     assert_eq!(file("/tmp/k.out"), "interrupted\n");
+    // _thread: four threads, a lock, and garbage collection while they run
+    // (MicroPython's GC stops threads with a real-time signal).
+    filesystem::write_file(
+        "/tmp/thr.py",
+        "import _thread, time, gc\nlock = _thread.allocate_lock()\ncount = [0]\ndone = [0]\n\
+         def worker(n):\n    for i in range(500):\n        with lock:\n            count[0] += 1\n        \
+         if i % 100 == 0:\n            gc.collect()\n    with lock:\n        done[0] += 1\n\
+         for i in range(4):\n    _thread.start_new_thread(worker, (i,))\n\
+         while done[0] < 4:\n    time.sleep_ms(10)\nprint('count', count[0])\n",
+    )
+    .unwrap();
+    assert_eq!(sh("micropython /tmp/thr.py > /tmp/thr.out 2>&1"), 0, "{}", file("/tmp/thr.out"));
+    assert_eq!(file("/tmp/thr.out"), "count 2000\n");
     assert!(only_kernel_left(), "{:?}", process::list());
 }
 
@@ -1850,4 +1863,19 @@ fn fork_is_copy_on_write() {
     assert_eq!(run(prog("test_cow"), &["test_cow"]), Ok(0));
     assert_eq!(frames_in_use(), before, "every shared and copied page was freed");
     assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn posix_threads_work() {
+    let Some(_) = c_program("test_threads") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let before = frames_in_use();
+    let status = sh("test_threads > /tmp/thr.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/thr.out"));
+    assert!(file("/tmp/thr.out").contains("all checks passed"));
+    // pthread_exit in main: the process ends when its last thread does
+    assert_eq!(sh("test_threads main-exits > /tmp/thr2.out 2>&1"), 0, "{}", file("/tmp/thr2.out"));
+    assert_eq!(file("/tmp/thr2.out"), "the other thread finished\n");
+    assert!(only_kernel_left(), "{:?}", process::list());
+    assert_eq!(frames_in_use(), before, "threads' stacks and memory were freed");
 }

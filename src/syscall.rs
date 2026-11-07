@@ -71,6 +71,7 @@ pub const SYS_SET_ROBUST_LIST: u64 = 273;
 pub const SYS_PRLIMIT64: u64 = 302;
 pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_CLONE: u64 = 56;
+pub const SYS_FUTEX: u64 = 202;
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_SENDFILE: u64 = 40;
 pub const SYS_STATX: u64 = 332;
@@ -446,7 +447,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
             process::yield_now();
             0
         }
-        SYS_GETPID => process::current_pid() as i64,
+        SYS_GETPID => process::current_tgid() as i64,
         SYS_GETPPID => process::current_ppid() as i64,
         SYS_UNAME => sys_uname(a1),
         // vfork may be implemented as fork (POSIX allows it).
@@ -475,11 +476,12 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_GETITIMER => process::sys_itimer(a1, 0, a2),
         SYS_SETITIMER => process::sys_itimer(a1, a2, a3),
         SYS_GETTID => process::current_pid() as i64,
-        SYS_TKILL => process::sys_tkill(a1, a2),
-        SYS_TGKILL => process::sys_tkill(a2, a3),
+        SYS_TKILL => process::sys_tkill(0, a1, a2),
+        SYS_TGKILL => process::sys_tkill(a1, a2, a3),
         SYS_NANOSLEEP => process::sys_nanosleep(a1, a2),
         SYS_CLOCK_GETTIME => process::sys_clock_gettime(a1, a2),
-        SYS_EXIT | SYS_EXIT_GROUP => process::exit_current(process::ExitReason::Exited(a1 as i32)),
+        SYS_EXIT => process::exit_thread(a1 as i32),
+        SYS_EXIT_GROUP => process::exit_group(process::ExitReason::Exited(a1 as i32)),
         // memory
         SYS_MMAP => crate::mmap::sys_mmap(a1, a2, a3, a4, a5, frame.r9),
         SYS_MUNMAP => crate::mmap::sys_munmap(a1, a2),
@@ -505,7 +507,8 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_FADVISE64 => 0,
         // threads (one per process) and TLS
         SYS_ARCH_PRCTL => process::sys_arch_prctl(a1, a2),
-        SYS_SET_TID_ADDRESS => process::current_pid() as i64,
+        SYS_SET_TID_ADDRESS => process::sys_set_tid_address(a1),
+        SYS_FUTEX => process::sys_futex(a1, a2, a3, a4, a5, frame.r9),
         SYS_SET_ROBUST_LIST => 0,
         SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(a2, a3),
         // limits, time, randomness
@@ -521,7 +524,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         },
         SYS_CLOCK_NANOSLEEP => process::sys_clock_nanosleep(a1, a2, a3, a4),
         SYS_CLOCK_GETRES => process::sys_clock_getres(a1, a2),
-        SYS_CLONE => process::sys_clone(frame, a1, a2),
+        SYS_CLONE => process::sys_clone(frame, a1, a2, a3, a4, a5),
         SYS_STATX => vfs::sys_statx(a1, a2, a3, a4, a5),
         SYS_SENDFILE => sys_sendfile(a1, a2, a3, a4),
         // No networking yet: the honest answer for any address family.
