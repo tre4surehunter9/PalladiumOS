@@ -80,6 +80,10 @@ pub const SYS_SENDTO: u64 = 44;
 pub const SYS_RECVFROM: u64 = 45;
 pub const SYS_SHUTDOWN: u64 = 48;
 pub const SYS_SOCKETPAIR: u64 = 53;
+pub const SYS_SETSID: u64 = 112;
+pub const SYS_GETSID: u64 = 124;
+pub const SYS_SELECT: u64 = 23;
+pub const SYS_PSELECT6: u64 = 270;
 pub const SYS_SENDMSG: u64 = 46;
 pub const SYS_RECVMSG: u64 = 47;
 pub const SYS_BIND: u64 = 49;
@@ -188,6 +192,8 @@ pub const EISDIR: i64 = 21;
 pub const EINVAL: i64 = 22;
 pub const EMFILE: i64 = 24;
 pub const ENOTTY: i64 = 25;
+pub const ENXIO: i64 = 6;
+pub const ENOSPC: i64 = 28;
 pub const EFBIG: i64 = 27;
 pub const ESPIPE: i64 = 29;
 pub const EPIPE: i64 = 32;
@@ -560,6 +566,10 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_RECVFROM => vfs::sys_recvfrom(a1, a2, a3, a4, a5, frame.r9),
         SYS_SHUTDOWN => vfs::sys_shutdown(a1, a2),
         SYS_SOCKETPAIR => vfs::sys_socketpair(a1, a2, a3, a4),
+        SYS_SETSID => process::sys_setsid(),
+        SYS_GETSID => process::sys_getsid(a1),
+        SYS_SELECT => sys_select(a1, a2, a3, a4, a5, false),
+        SYS_PSELECT6 => sys_select(a1, a2, a3, a4, a5, true),
         SYS_SENDMSG => vfs::sys_sendmsg(a1, a2, a3),
         SYS_RECVMSG => vfs::sys_recvmsg(a1, a2, a3),
         SYS_GETSOCKNAME => vfs::sys_getsockname(a1, a2, a3),
@@ -729,6 +739,88 @@ fn poll_until(fds: u64, nfds: u64, no_wait: bool, deadline: Option<u64>) -> i64 
         }
         if deadline.is_some_and(|d| process::ticks() >= d) {
             return 0;
+        }
+        if process::signal_pending() {
+            return -EINTR;
+        }
+        if process::others_ready() {
+            process::yield_now();
+        } else {
+            process::idle_halt();
+        }
+    }
+}
+
+/// select(nfds, readfds, writefds, exceptfds, timeout) and pselect6 (the
+/// same with a timespec, and a signal mask that isn't applied), on top of
+/// poll: an fd set is a bit array of nfds bits.
+fn sys_select(nfds: u64, rset: u64, wset: u64, eset: u64, timeout: u64, pselect: bool) -> i64 {
+    const POLLPRI: i16 = 0x2;
+    if nfds > vfs::MAX_FDS as u64 {
+        return -EINVAL;
+    }
+    let bytes = nfds.div_ceil(64) * 8;
+    let read_set = |ptr: u64| -> Result<alloc::vec::Vec<u8>, i64> {
+        if ptr == 0 || bytes == 0 {
+            return Ok(alloc::vec![0; bytes as usize]);
+        }
+        unsafe { user_slice(ptr, bytes) }.map(|b| b.to_vec()).ok_or(EFAULT)
+    };
+    let (r, w, e) = match (read_set(rset), read_set(wset), read_set(eset)) {
+        (Ok(r), Ok(w), Ok(e)) => (r, w, e),
+        _ => return -EFAULT,
+    };
+    let is_set = |set: &[u8], fd: usize| set[fd / 8] & (1 << (fd % 8)) != 0;
+    // NULL: wait forever; a zero timeout: just check.
+    let (deadline, no_wait) = if timeout == 0 {
+        (None, false)
+    } else {
+        let Some(t) = (unsafe { user_slice(timeout, 16) }) else { return -EFAULT };
+        let sec = u64::from_le_bytes(t[0..8].try_into().unwrap());
+        let frac = u64::from_le_bytes(t[8..16].try_into().unwrap());
+        let ns = sec.saturating_mul(1_000_000_000).saturating_add(if pselect { frac } else { frac.saturating_mul(1000) });
+        (Some(process::ticks() + ns.div_ceil(process::TICK_NS)), ns == 0)
+    };
+    loop {
+        crate::net::poll_if_due();
+        let (mut ro, mut wo, mut eo) = (alloc::vec![0u8; bytes as usize], alloc::vec![0u8; bytes as usize], alloc::vec![0u8; bytes as usize]);
+        let mut count = 0i64;
+        for fd in 0..nfds as usize {
+            let want = (if is_set(&r, fd) { vfs::POLLIN } else { 0 })
+                | (if is_set(&w, fd) { vfs::POLLOUT } else { 0 })
+                | (if is_set(&e, fd) { POLLPRI } else { 0 });
+            if want == 0 {
+                continue;
+            }
+            let got = vfs::poll_ready(fd as i32, want);
+            if got & vfs::POLLNVAL != 0 {
+                return -EBADF;
+            }
+            // Hangups and errors count as readable/writable, as on Linux.
+            if is_set(&r, fd) && got & (vfs::POLLIN | vfs::POLLHUP | vfs::POLLERR) != 0 {
+                ro[fd / 8] |= 1 << (fd % 8);
+                count += 1;
+            }
+            if is_set(&w, fd) && got & (vfs::POLLOUT | vfs::POLLERR) != 0 {
+                wo[fd / 8] |= 1 << (fd % 8);
+                count += 1;
+            }
+            if is_set(&e, fd) && got & POLLPRI != 0 {
+                eo[fd / 8] |= 1 << (fd % 8);
+                count += 1;
+            }
+        }
+        let timed_out = deadline.is_some_and(|d| process::ticks() >= d);
+        if count > 0 || no_wait || timed_out {
+            for (ptr, set) in [(rset, &ro), (wset, &wo), (eset, &eo)] {
+                if ptr != 0 && bytes != 0 {
+                    match unsafe { user_slice_mut(ptr, bytes) } {
+                        Some(out) => out.copy_from_slice(set),
+                        None => return -EFAULT,
+                    }
+                }
+            }
+            return count;
         }
         if process::signal_pending() {
             return -EINTR;

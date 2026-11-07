@@ -131,6 +131,7 @@ pub mod programs;
 pub mod vfs;
 pub mod process;
 pub mod pipe;
+pub mod pty;
 pub mod block;
 pub mod mounts;
 pub mod ext2;

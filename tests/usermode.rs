@@ -1943,3 +1943,13 @@ fn unix_domain_sockets() {
     assert!(file("/tmp/unix.out").contains("all checks passed"));
     assert!(only_kernel_left(), "{:?}", process::list());
 }
+
+#[test_case]
+fn pseudo_terminals_and_sessions() {
+    let Some(_) = c_program("test_pty") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let status = sh("test_pty > /tmp/pty.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/pty.out"));
+    assert!(file("/tmp/pty.out").contains("all checks passed"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}

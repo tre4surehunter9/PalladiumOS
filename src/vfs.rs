@@ -47,6 +47,7 @@ pub const O_NONBLOCK: u64 = 0o4000;
 pub const O_DIRECTORY: u64 = 0o200000;
 pub const O_CLOEXEC: u64 = 0o2000000;
 pub const O_NOFOLLOW: u64 = 0o400000;
+pub const O_NOCTTY: u64 = 0o400;
 
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 const AT_REMOVEDIR: u64 = 0x200;
@@ -96,6 +97,9 @@ enum Kind {
     PipeWrite(PipeWriter),
     /// A socket: internet (net::socket) or Unix-domain (net::unix).
     Socket(AnySock),
+    /// A pseudo-terminal end: /dev/ptmx (master) or /dev/pts/N (slave).
+    /// `loc` is its /dev entry (for fstat).
+    Pty { end: Arc<crate::pty::End>, loc: Loc },
 }
 
 /// An open file description.
@@ -139,6 +143,8 @@ fn handle(kind: Kind) -> Handle {
         Kind::Zero => "/dev/zero".to_string(),
         Kind::Random => "/dev/urandom".to_string(),
         Kind::Socket(s) => alloc::format!("socket:[{}]", s.id()),
+        Kind::Pty { end, .. } if end.master => "/dev/ptmx".to_string(),
+        Kind::Pty { end, .. } => alloc::format!("/dev/pts/{}", end.pty.index),
         Kind::File { path, .. } | Kind::Dir { path, .. } => path.clone(),
         Kind::PipeRead(r) => alloc::format!("pipe:[{}]", pipe::id(&r.pipe())),
         Kind::PipeWrite(w) => alloc::format!("pipe:[{}]", pipe::id(&w.pipe())),
@@ -331,12 +337,39 @@ fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
             }
             Kind::Dir { loc, path: abs.to_string() }
         }
-        FileType::CharDevice(dev) => match dev {
-            Device::Null => Kind::Null,
-            Device::Zero => Kind::Zero,
-            Device::Random => Kind::Random,
-            Device::Tty => Kind::Console,
-        },
+        FileType::CharDevice(dev) => {
+            let nonblocking = flags & O_NONBLOCK != 0;
+            match dev {
+                Device::Null => Kind::Null,
+                Device::Zero => Kind::Zero,
+                Device::Random => Kind::Random,
+                Device::Console => Kind::Console,
+                Device::Ptmx => match crate::pty::open_master(nonblocking) {
+                    // (its /dev/pts/N entry, for fstat and ttyname)
+                    Ok(end) => {
+                        let loc = mounts::resolve(&alloc::format!("/dev/pts/{}", end.pty.index)).unwrap_or(loc);
+                        Kind::Pty { end: Arc::new(end), loc }
+                    }
+                    Err(e) => return -e,
+                },
+                Device::Pts(n) => match crate::pty::open_slave(n, nonblocking, flags & O_NOCTTY != 0) {
+                    Ok(end) => Kind::Pty { end: Arc::new(end), loc },
+                    Err(e) => return -e,
+                },
+                // /dev/tty: the caller's controlling terminal.
+                Device::Tty => match crate::process::current_session().2 {
+                    crate::process::CTTY_CONSOLE => Kind::Console,
+                    crate::process::CTTY_NONE => return -crate::syscall::ENXIO,
+                    ctty => {
+                        let Some(pty) = crate::pty::get(ctty - 1) else { return -crate::syscall::ENXIO };
+                        let end = crate::pty::reopen_slave(&pty);
+                        end.set_nonblocking(nonblocking);
+                        let loc = mounts::resolve(&alloc::format!("/dev/pts/{}", pty.index)).unwrap_or(loc);
+                        Kind::Pty { end: Arc::new(end), loc }
+                    }
+                },
+            }
+        }
         FileType::Symlink => return -ELOOP, // a loop of symlinks
         FileType::File => {
             if flags & O_DIRECTORY != 0 {
@@ -419,10 +452,19 @@ const TERMIOS_SIZE: u64 = 36;
 /// Anything that isn't the console is ENOTTY (how isatty() works).
 pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
     use crate::syscall::{user_slice, user_slice_mut};
+    // The request is an unsigned int: libc may pass it sign-extended
+    // (TIOCGPTN is 0x80045430), so only the low 32 bits count, as on Linux.
+    let request = request & 0xffff_ffff;
     const FIONREAD: u64 = 0x541B;
     const FIONBIO: u64 = 0x5421;
     match get(fd) {
         Ok(h) if matches!(h.lock().kind, Kind::Console) => {}
+        Ok(h) if matches!(h.lock().kind, Kind::Pty { .. }) => {
+            // (The description isn't held while it runs: TIOCSWINSZ signals.)
+            let Kind::Pty { end, .. } = &h.lock().kind else { unreachable!() };
+            let end = end.clone();
+            return crate::pty::ioctl(&end, request, arg);
+        }
         Ok(h) => {
             // Sockets: non-blocking mode, bytes waiting, and the
             // interfaces (name, index, address, MTU, MAC...).
@@ -613,13 +655,17 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                 }
                 Kind::Console | Kind::Null | Kind::Zero | Kind::Random => O_RDWR as i64,
                 Kind::Socket(s) => (O_RDWR | if s.is_nonblocking() { O_NONBLOCK } else { 0 }) as i64,
+                Kind::Pty { end, .. } => (O_RDWR | if end.is_nonblocking() { O_NONBLOCK } else { 0 }) as i64,
                 Kind::PipeWrite(_) => O_WRONLY as i64,
                 Kind::Dir { .. } | Kind::PipeRead(_) => O_RDONLY as i64,
             },
             F_SETFL => {
-                // O_NONBLOCK works on sockets; other changes are accepted.
-                if let Kind::Socket(s) = &slot.handle.lock().kind {
-                    s.set_nonblocking(arg & O_NONBLOCK != 0);
+                // O_NONBLOCK works on sockets and terminals; other changes
+                // are accepted.
+                match &slot.handle.lock().kind {
+                    Kind::Socket(s) => s.set_nonblocking(arg & O_NONBLOCK != 0),
+                    Kind::Pty { end, .. } => end.set_nonblocking(arg & O_NONBLOCK != 0),
+                    _ => {}
                 }
                 0
             }
@@ -639,6 +685,11 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
         Kind::Console => {
             drop(desc); // don't hold it while waiting for a key
             crate::tty::read(buf)
+        }
+        Kind::Pty { end, .. } => {
+            let end = end.clone();
+            drop(desc); // don't hold it while waiting
+            if end.master { crate::pty::master_read(&end, buf) } else { crate::pty::slave_read(&end, buf) }
         }
         Kind::PipeRead(r) => {
             let pipe = r.pipe();
@@ -749,6 +800,11 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
             console_write(bytes);
             bytes.len() as i64
         }
+        Kind::Pty { end, .. } => {
+            let end = end.clone();
+            drop(desc);
+            if end.master { crate::pty::master_write(&end, bytes) } else { crate::pty::slave_write(&end, bytes) }
+        }
         Kind::PipeWrite(w) => {
             let pipe = w.pipe();
             drop(desc);
@@ -826,7 +882,7 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
         }
         Kind::Dir { .. } => -EINVAL,
         Kind::Null | Kind::Zero | Kind::Random => 0,
-        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) => -ESPIPE,
+        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } => -ESPIPE,
     }
 }
 
@@ -891,6 +947,12 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
         Kind::Console | Kind::Null | Kind::Zero | Kind::Random => {
             fill_stat(out, 0, 0, S_IFCHR | 0o666, 1, 0, 0);
             0
+        }
+        // The /dev/pts/N entry's stat, so ttyname() can match them up.
+        Kind::Pty { loc, .. } => {
+            let loc = *loc;
+            drop(desc);
+            stat_loc(loc, out)
         }
         Kind::Socket(s) => {
             fill_stat(out, 0, s.id(), 0o140000 | 0o777, 1, 0, 0); // S_IFSOCK
@@ -1380,6 +1442,10 @@ pub fn poll_ready(fd: i32, events: i16) -> i16 {
         },
         Kind::Socket(s) => {
             let (r, w, hup) = s.readiness();
+            (if r { POLLIN } else { 0 }) | (if w { POLLOUT } else { 0 }) | (if hup { POLLHUP } else { 0 })
+        }
+        Kind::Pty { end, .. } => {
+            let (r, w, hup) = crate::pty::readiness(end);
             (if r { POLLIN } else { 0 }) | (if w { POLLOUT } else { 0 }) | (if hup { POLLHUP } else { 0 })
         }
         // Files and devices never block.

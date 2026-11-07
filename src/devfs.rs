@@ -1,9 +1,12 @@
 // Copyright (c) 2026 tre4surehunter9
 //! /dev: device files. Opening one gives a device instead of a file:
 //! /dev/null (discards writes, reads are end-of-file), /dev/zero (reads
-//! zeros), /dev/random and /dev/urandom (random bytes, as getrandom), and
-//! /dev/tty and /dev/console (the console).
+//! zeros), /dev/random and /dev/urandom (random bytes, as getrandom),
+//! /dev/console (the screen and keyboard), /dev/tty (the opener's
+//! controlling terminal), /dev/ptmx (a new pseudo-terminal) and /dev/pts/N
+//! (the pseudo-terminals in use, see pty.rs).
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -11,9 +14,13 @@ use crate::mounts::{Device, FileSystem, FileType, FsResult, Ino, Meta};
 use crate::syscall::{EACCES, ENOENT, ENOTDIR, EPERM};
 
 const ROOT: Ino = 1;
+/// /dev/pts, and /dev/pts/N at PTS_BASE + N.
+const PTS_DIR: Ino = 50;
+const PTS_BASE: Ino = 100;
 const DEVICES: &[(&str, Device)] = &[
-    ("console", Device::Tty),
+    ("console", Device::Console),
     ("null", Device::Null),
+    ("ptmx", Device::Ptmx),
     ("random", Device::Random),
     ("tty", Device::Tty),
     ("urandom", Device::Random),
@@ -21,6 +28,10 @@ const DEVICES: &[(&str, Device)] = &[
 ];
 
 pub struct DevFs;
+
+fn pts_number(ino: Ino) -> Option<u32> {
+    (PTS_BASE..PTS_BASE + crate::pty::MAX_PTYS as Ino).contains(&ino).then(|| (ino - PTS_BASE) as u32)
+}
 
 impl FileSystem for DevFs {
     fn name(&self) -> &'static str {
@@ -32,21 +43,29 @@ impl FileSystem for DevFs {
     }
 
     fn lookup(&mut self, dir: Ino, name: &str) -> FsResult<Ino> {
-        if dir != ROOT {
-            return Err(ENOTDIR);
+        match dir {
+            ROOT if name == "pts" => Ok(PTS_DIR),
+            ROOT => DEVICES.iter().position(|(n, _)| *n == name).map(|i| i as Ino + 2).ok_or(ENOENT),
+            PTS_DIR => {
+                let n: u32 = name.parse().map_err(|_| ENOENT)?;
+                crate::pty::get(n).map(|_| PTS_BASE + n as Ino).ok_or(ENOENT)
+            }
+            _ => Err(ENOTDIR),
         }
-        DEVICES.iter().position(|(n, _)| *n == name).map(|i| i as Ino + 2).ok_or(ENOENT)
     }
 
     fn meta(&mut self, ino: Ino) -> FsResult<Meta> {
-        let kind = if ino == ROOT {
-            FileType::Dir
+        let (kind, perm, uid, gid) = if ino == ROOT || ino == PTS_DIR {
+            (FileType::Dir, 0o755, 0, 0)
+        } else if let Some(n) = pts_number(ino) {
+            let (uid, gid, mode) = crate::pty::owner(n).ok_or(ENOENT)?;
+            (FileType::CharDevice(Device::Pts(n)), mode, uid, gid)
         } else {
             let (_, dev) = DEVICES.get((ino as usize).wrapping_sub(2)).ok_or(ENOENT)?;
-            FileType::CharDevice(*dev)
+            let perm = if *dev == Device::Console { 0o600 } else { 0o666 };
+            (FileType::CharDevice(*dev), perm, 0, 0)
         };
-        let perm = if kind == FileType::Dir { 0o755 } else { 0o666 };
-        Ok(Meta { ino, kind, size: 0, perm, nlink: 1, mtime: 0, uid: 0, gid: 0 })
+        Ok(Meta { ino, kind, size: 0, perm, nlink: 1, mtime: 0, uid, gid })
     }
 
     // Device data never goes through the filesystem (see vfs.rs).
@@ -63,10 +82,22 @@ impl FileSystem for DevFs {
     }
 
     fn readdir(&mut self, dir: Ino) -> FsResult<Vec<(String, Ino, FileType)>> {
-        if dir != ROOT {
-            return Err(ENOTDIR);
+        match dir {
+            ROOT => {
+                let mut v: Vec<_> = DEVICES
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (n, d))| (n.to_string(), i as Ino + 2, FileType::CharDevice(*d)))
+                    .collect();
+                v.push(("pts".to_string(), PTS_DIR, FileType::Dir));
+                Ok(v)
+            }
+            PTS_DIR => Ok(crate::pty::list()
+                .into_iter()
+                .map(|n| (format!("{}", n), PTS_BASE + n as Ino, FileType::CharDevice(Device::Pts(n))))
+                .collect()),
+            _ => Err(ENOTDIR),
         }
-        Ok(DEVICES.iter().enumerate().map(|(i, (n, d))| (n.to_string(), i as Ino + 2, FileType::CharDevice(*d))).collect())
     }
 
     fn create(&mut self, _dir: Ino, _name: &str, _kind: FileType, _perm: u32) -> FsResult<Ino> {
@@ -75,5 +106,19 @@ impl FileSystem for DevFs {
 
     fn remove(&mut self, _dir: Ino, _name: &str, _is_dir: bool) -> FsResult<()> {
         Err(EPERM)
+    }
+
+    /// A pseudo-terminal's owner and mode can change (grantpt, and servers
+    /// giving a user their terminal).
+    fn chmod(&mut self, ino: Ino, perm: u32) -> FsResult<()> {
+        let n = pts_number(ino).ok_or(EPERM)?;
+        crate::pty::set_owner(n, None, None, Some(perm)).then_some(()).ok_or(ENOENT)
+    }
+
+    fn chown(&mut self, ino: Ino, uid: u32, gid: u32) -> FsResult<()> {
+        let n = pts_number(ino).ok_or(EPERM)?;
+        let keep = u32::MAX; // chown(-1) leaves it
+        let ok = crate::pty::set_owner(n, (uid != keep).then_some(uid), (gid != keep).then_some(gid), None);
+        ok.then_some(()).ok_or(ENOENT)
     }
 }

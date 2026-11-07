@@ -110,6 +110,11 @@ pub struct Process {
     pub mm: Arc<Mutex<Mm>>,
     /// Process group (for Ctrl-C and kill(-pgid)).
     pub pgid: u64,
+    /// Session (setsid): the pid of its leader.
+    pub sid: u64,
+    /// Controlling terminal: CTTY_CONSOLE, CTTY_NONE, or pseudo-terminal
+    /// N as N + 1.
+    pub ctty: u32,
     /// Signals sent but not yet acted on (bit n-1 = signal n).
     pending: u64,
     /// What to do for each signal (index n-1), see sigaction.
@@ -251,6 +256,8 @@ pub fn init() {
         files: Arc::new(Mutex::new(Files::new("/"))),
         mm: Mm::new(),
         pgid: 0,
+        sid: 0,
+        ctty: CTTY_CONSOLE,
         pending: 0,
         actions: Box::new([SigAction::DEFAULT; MAX_SIGNAL as usize]),
         blocked: 0,
@@ -796,7 +803,7 @@ fn fork_with(frame: &SyscallFrame, kind: CloneKind, stack: u64) -> i64 {
     // The child gets the FPU registers as they are now.
     let mut fpu = Box::new(crate::fpu::FpuState::initial());
     crate::fpu::save(&mut fpu);
-    let (p4, files, name, ppid, mm, pgid, (actions, blocked), argv, exe, cred, (fs_base, gs_base), tgid) = {
+    let (p4, files, name, ppid, mm, (pgid, sid, ctty), (actions, blocked), argv, exe, cred, (fs_base, gs_base), tgid) = {
         let table = TABLE.lock();
         if table.len() >= MAX_PROCESSES {
             return -EAGAIN;
@@ -811,7 +818,7 @@ fn fork_with(frame: &SyscallFrame, kind: CloneKind, stack: u64) -> i64 {
             // A thread's parent is its process's parent.
             if thread { cur.ppid } else { cur.pid },
             if thread { cur.mm.clone() } else { Arc::new(Mutex::new(cur.mm.lock().clone())) },
-            cur.pgid,
+            (cur.pgid, cur.sid, cur.ctty),
             (cur.actions.clone(), cur.blocked),
             cur.argv.clone(),
             cur.exe.clone(),
@@ -849,6 +856,8 @@ fn fork_with(frame: &SyscallFrame, kind: CloneKind, stack: u64) -> i64 {
         files,
         mm,
         pgid,
+        sid,
+        ctty,
         pending: 0,
         actions, // handlers and the mask are inherited; pending signals and alarms aren't
         blocked,
@@ -1176,6 +1185,8 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         files: Arc::new(Mutex::new(Files::new(&cwd))),
         mm: Mm::new(),
         pgid: pid, // leader of a new process group
+        sid: pid,  // and session, on the console
+        ctty: CTTY_CONSOLE,
         pending: 0,
         actions: Box::new([SigAction::DEFAULT; MAX_SIGNAL as usize]),
         blocked: 0,
@@ -1330,6 +1341,7 @@ pub const SIGSTOP: i32 = 19;
 pub const SIGTSTP: i32 = 20;
 pub const SIGTTIN: i32 = 21;
 pub const SIGTTOU: i32 = 22;
+pub const SIGWINCH: i32 = 28;
 const MAX_SIGNAL: i32 = 64;
 
 pub const SIG_DFL: u64 = 0;
@@ -1782,6 +1794,105 @@ pub fn sys_getpgid(pid: u64) -> i64 {
     let table = TABLE.lock();
     let pid = if pid == 0 { current_pid() } else { pid };
     table.get(&pid).map(|p| p.pgid as i64).unwrap_or(-ESRCH)
+}
+
+/// The controlling terminal is the console (every program the kernel
+/// starts has it).
+pub const CTTY_CONSOLE: u32 = 0;
+/// No controlling terminal (after setsid, until one is acquired).
+pub const CTTY_NONE: u32 = u32::MAX;
+
+/// setsid(): a new session (and process group), led by the caller, with no
+/// controlling terminal. A group leader can't (EPERM), as in POSIX.
+pub fn sys_setsid() -> i64 {
+    let mut table = TABLE.lock();
+    let cur = current_pid();
+    let tgid = table.get(&cur).map_or(cur, |p| p.tgid);
+    if table.values().any(|p| p.pgid == tgid && p.pid != 0) {
+        return -EPERM;
+    }
+    for p in table.values_mut().filter(|p| p.tgid == tgid) {
+        p.sid = tgid;
+        p.pgid = tgid;
+        p.ctty = CTTY_NONE;
+    }
+    tgid as i64
+}
+
+/// getsid(pid) (0: the caller)
+pub fn sys_getsid(pid: u64) -> i64 {
+    let table = TABLE.lock();
+    let pid = if pid == 0 { current_pid() } else { pid };
+    table.get(&pid).map(|p| p.sid as i64).unwrap_or(-ESRCH)
+}
+
+/// The caller's (session, process group, controlling terminal, session
+/// leader?): what terminal code needs.
+pub fn current_session() -> (u64, u64, u32, bool) {
+    let table = TABLE.lock();
+    table.get(&current_pid()).map_or((0, 0, CTTY_CONSOLE, false), |p| (p.sid, p.pgid, p.ctty, p.sid == p.tgid))
+}
+
+/// Give the caller's whole session controlling terminal `ctty`.
+pub fn set_session_ctty(sid: u64, ctty: u32) {
+    let mut table = TABLE.lock();
+    for p in table.values_mut().filter(|p| p.sid == sid && p.pid != 0) {
+        p.ctty = ctty;
+    }
+}
+
+/// The caller alone gives up its controlling terminal (TIOCNOTTY).
+pub fn set_session_ctty_of_current(ctty: u32) {
+    let mut table = TABLE.lock();
+    let tgid = table.get(&current_pid()).map_or(0, |p| p.tgid);
+    for p in table.values_mut().filter(|p| p.tgid == tgid) {
+        p.ctty = ctty;
+    }
+}
+
+/// A terminal went away: processes that had it have no controlling
+/// terminal now.
+pub fn drop_ctty(ctty: u32) {
+    let mut table = TABLE.lock();
+    for p in table.values_mut().filter(|p| p.ctty == ctty) {
+        p.ctty = CTTY_NONE;
+    }
+}
+
+/// Send `sig` to every process in group `pgid` (from terminals: Ctrl-C,
+/// hangups, window changes). Returns whether anyone got it.
+pub fn signal_pgrp(pgid: u64, sig: i32) -> bool {
+    if pgid == 0 {
+        return false;
+    }
+    let mut table = TABLE.lock();
+    if sig == SIGTSTP && orphaned_locked(&table, pgid) {
+        return false; // nobody could continue it
+    }
+    signal_group_locked(&mut table, pgid, sig) > 0
+}
+
+/// Send `sig` to one process (by pid; a session leader).
+pub fn signal_pid(pid: u64, sig: i32) {
+    let mut table = TABLE.lock();
+    if let Some(tgid) = table.get(&pid).map(|p| p.tgid) {
+        signal_process_locked(&mut table, tgid, sig);
+    }
+}
+
+/// Would `sig` be ignored or blocked by the caller? (A background read
+/// from a terminal fails with EIO then, instead of stopping.)
+pub fn ignores_or_blocks(sig: i32) -> bool {
+    let table = TABLE.lock();
+    table.get(&current_pid()).is_some_and(|p| {
+        p.blocked & bit(sig) != 0 || p.actions[(sig - 1) as usize].handler == SIG_IGN
+    })
+}
+
+/// Is the caller's process group orphaned (see orphaned_locked)?
+pub fn current_pgrp_orphaned() -> bool {
+    let table = TABLE.lock();
+    table.get(&current_pid()).is_some_and(|p| orphaned_locked(&table, p.pgid))
 }
 
 pub fn set_foreground(pgid: u64) {

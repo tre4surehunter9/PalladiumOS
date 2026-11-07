@@ -28,7 +28,14 @@ pub type FsResult<T> = Result<T, i64>;
 pub enum Device {
     Null,
     Zero,
+    /// /dev/tty: the opener's controlling terminal.
     Tty,
+    /// /dev/console: the screen and keyboard, always.
+    Console,
+    /// /dev/ptmx: opening it makes a new pseudo-terminal.
+    Ptmx,
+    /// /dev/pts/N: pseudo-terminal N's slave end.
+    Pts(u32),
     /// /dev/random and /dev/urandom
     Random,
 }
