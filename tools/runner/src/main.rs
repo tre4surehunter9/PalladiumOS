@@ -157,6 +157,12 @@ fn run(kernel: &Path, extra: &[String], uefi: bool) {
         .arg(format!("format=raw,file={}", image.canonicalize().unwrap_or(image.clone()).display()))
         .arg("-no-reboot")
         .args(if test { TEST_ARGS } else { RUN_ARGS })
+        // The AHCI tests: QEMU's q35 machine has its disks on AHCI.
+        .args(if test && kernel.file_name().is_some_and(|n| n.to_string_lossy().starts_with("ahci-")) {
+            &["-machine", "q35"][..]
+        } else {
+            &[][..]
+        })
         .args(extra);
 
     if !test {

@@ -308,6 +308,7 @@ How it works: `cargo run` attaches a third disk, `target/alpine.img` (1 GiB, spa
 * `tests/usermode.rs` - ring 3 programs, syscalls, exit statuses and fault handling
 * `tests/filesystem.rs` - the filesystem and shell commands
 * `tests/ext2.rs` - the ext2 driver, the VFS, `/dev`, the ATA disk driver and the clock
+* `tests/ahci.rs` - the AHCI (SATA) disk driver, on QEMU's q35 machine
 * `tests/heap_allocation.rs`, `tests/stack_overflow.rs`, `tests/should_panic.rs`, `tests/basic_boot.rs` - kernel basics
 
 The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh` rebuilds them).
@@ -323,6 +324,8 @@ The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh
 | `/tmp` | memory | cleared on reboot |
 | `/dev` | devfs | `null`, `zero`, `random`, `urandom`, `tty`, `console`, `ptmx`, `pts/N` |
 | `/proc` | procfs | live process and system information (below) |
+
+Disks work on IDE (QEMU's default machine; the kernel talks ATA through I/O ports) and on **AHCI**, the SATA controller standard of modern PCs (the kernel finds the controller on PCI and moves sectors by DMA). Disk N is QEMU's `-drive ...,index=N`: the IDE position N, or SATA port N. Try it with `cargo run -- -machine q35`, where every disk is on AHCI.
 
 The kernel has a small VFS layer: every filesystem implements one interface, and paths are resolved through the mount table. The ext2 driver reads and writes files (including indirect blocks), creates and removes files and directories, and frees a file deleted while open only when it's closed. Linux tools can check and read the disk: `e2fsck -f target/disk.img`, `debugfs -R "ls -l /" target/disk.img`. Run `sync` (or `poweroff`/`reboot`, which sync first) before closing QEMU.
 

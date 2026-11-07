@@ -165,6 +165,7 @@ pub mod process;
 pub mod pipe;
 pub mod pty;
 pub mod block;
+pub mod ahci;
 pub mod mounts;
 pub mod ext2;
 pub mod devfs;

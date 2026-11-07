@@ -2,7 +2,8 @@
 //! Block devices: things made of 512-byte sectors that filesystems live on.
 //!
 //! - `AtaDisk`: an IDE/ATA hard disk, using PIO (the CPU copies every word
-//!   through I/O ports). Simple and works everywhere, including QEMU.
+//!   through I/O ports). Simple, and what QEMU's default machine has.
+//! - `ahci::AhciDisk` (src/ahci.rs): a SATA disk on an AHCI controller.
 //! - `RamDisk`: a disk image held in memory (used by the tests).
 
 use alloc::boxed::Box;
@@ -257,24 +258,41 @@ impl BlockDevice for AtaDisk {
     }
 }
 
-/// Probe for the data disk (see AtaDisk::primary_slave).
-pub fn data_disk() -> Option<Box<dyn BlockDevice>> {
-    AtaDisk::primary_slave().map(|d| Box::new(d) as Box<dyn BlockDevice>)
+/// Disk number `index`, as QEMU numbers `-drive ...,index=N`: the IDE
+/// position N (0 primary master, 1 primary slave, 2 secondary master,
+/// 3 secondary slave) on PCs with IDE, or SATA port N on an AHCI controller
+/// (QEMU's q35 machine, and most real PCs). Each disk is handed out once.
+pub fn disk(index: u8) -> Option<Box<dyn BlockDevice>> {
+    let ide = match index {
+        1 => AtaDisk::primary_slave(),
+        2 => AtaDisk::secondary_master(),
+        3 => AtaDisk::secondary_slave(),
+        _ => None,
+    };
+    match ide {
+        Some(d) => Some(Box::new(d)),
+        None => crate::ahci::boxed(index),
+    }
 }
 
-/// Probe for the system disk: the files under /usr (C headers and
+/// The data disk (disk 1), mounted at /.
+pub fn data_disk() -> Option<Box<dyn BlockDevice>> {
+    disk(1)
+}
+
+/// The system disk (disk 2): the files under /usr (C headers and
 /// libraries for tcc), made by build.rs as target/usr.img.
 pub fn system_disk() -> Option<Box<dyn BlockDevice>> {
-    AtaDisk::secondary_master().map(|d| Box::new(d) as Box<dyn BlockDevice>)
+    disk(2)
 }
 
-/// Mount the Alpine disk (QEMU's `index=3`, target/alpine.img from build.rs)
-/// at /alpine, if there is one: room for an Alpine Linux root filesystem
-/// (see /bin/alpine). Returns its size in MiB.
+/// Mount the Alpine disk (disk 3, target/alpine.img from build.rs) at
+/// /alpine, if there is one: room for an Alpine Linux root filesystem (see
+/// /bin/alpine). Returns its size in MiB.
 pub fn mount_alpine_disk() -> Option<u64> {
-    let dev = AtaDisk::secondary_slave()?;
-    let mib = dev.sectors * 512 / 1024 / 1024;
-    let fs = crate::ext2::Ext2::mount(Box::new(dev)).ok()?;
+    let dev = disk(3)?;
+    let mib = dev.sectors() * 512 / 1024 / 1024;
+    let fs = crate::ext2::Ext2::mount(dev).ok()?;
     let _ = crate::filesystem::make_dir("/alpine");
     crate::mounts::mount("/alpine", Box::new(fs));
     Some(mib)

@@ -233,7 +233,7 @@ impl BootInfoFrameAllocator {
 }
 
 /// Pointer to a physical address through the bootloader's physical memory map.
-fn phys_to_virt(phys: u64) -> *mut u64 {
+pub fn phys_to_virt(phys: u64) -> *mut u64 {
     let offset = PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
     assert!(offset != 0, "PHYS_MEM_OFFSET not set");
     (offset + phys) as *mut u64
@@ -285,6 +285,40 @@ impl FrameDeallocator<Size4KiB> for BootInfoFrameAllocator {
 pub fn zero_frame(frame: PhysFrame) {
     let ptr = phys_to_virt(frame.start_address().as_u64()) as *mut u8;
     unsafe { core::ptr::write_bytes(ptr, 0, 4096) };
+}
+
+/// A kernel pointer to `len` bytes of device registers at physical address
+/// `phys` (memory-mapped I/O, like an AHCI controller's): at the same place
+/// in the physical memory map, mapped there uncached if the bootloader's
+/// map doesn't reach it (it covers RAM; devices often sit above). Every
+/// address space shares those page tables (the kernel half is copied at
+/// the level-4 table), so the mapping works whichever process is running.
+pub fn map_mmio(phys: u64, len: usize) -> *mut u8 {
+    use x86_64::structures::paging::mapper::Translate;
+    let mut alloc = FRAME_ALLOCATOR.lock();
+    let frames = alloc.as_mut().expect("no frame allocator");
+    let mut mapper = mapper_for(kernel_p4());
+    let first = phys & !0xFFF;
+    for page_phys in (first..phys + len as u64).step_by(4096) {
+        let virt = VirtAddr::new(phys_to_virt(page_phys) as u64);
+        if mapper.translate_addr(virt).is_some() {
+            continue;
+        }
+        let flags = PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::NO_CACHE
+            | PageTableFlags::WRITE_THROUGH
+            | PageTableFlags::NO_EXECUTE;
+        let page = Page::<Size4KiB>::containing_address(virt);
+        let frame = PhysFrame::containing_address(PhysAddr::new(page_phys));
+        unsafe {
+            mapper
+                .map_to_with_table_flags(page, frame, flags, PageTableFlags::PRESENT | PageTableFlags::WRITABLE, frames)
+                .expect("can't map device registers")
+                .flush();
+        }
+    }
+    phys_to_virt(phys) as *mut u8
 }
 
 /// Kernel-virtual pointer to a physical address, for writing into user
