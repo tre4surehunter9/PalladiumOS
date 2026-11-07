@@ -155,3 +155,8 @@ pub fn read_status(pipe: &Arc<Pipe>) -> (bool, bool) {
 pub fn write_status(pipe: &Arc<Pipe>) -> (bool, bool) {
     (pipe.buf.lock().len() < PIPE_CAPACITY, pipe.readers.load(Ordering::SeqCst) == 0)
 }
+
+/// For FIONREAD: bytes waiting in the pipe.
+pub fn buffered(pipe: &Arc<Pipe>) -> usize {
+    pipe.buf.lock().len()
+}

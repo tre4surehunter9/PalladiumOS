@@ -21,6 +21,7 @@ use spin::Mutex;
 
 use crate::filesystem;
 use crate::net::socket::{self as sock, Socket};
+use crate::net::unix::{self, UnixSocket};
 use crate::perm;
 use crate::mounts::{self, Device, FileType, Loc};
 use crate::pipe::{self, PipeReader, PipeWriter};
@@ -92,8 +93,8 @@ enum Kind {
     Random,
     PipeRead(PipeReader),
     PipeWrite(PipeWriter),
-    /// A network socket (see net::socket).
-    Socket(Arc<Socket>),
+    /// A socket: internet (net::socket) or Unix-domain (net::unix).
+    Socket(AnySock),
 }
 
 /// An open file description.
@@ -136,7 +137,7 @@ fn handle(kind: Kind) -> Handle {
         Kind::Null => "/dev/null".to_string(),
         Kind::Zero => "/dev/zero".to_string(),
         Kind::Random => "/dev/urandom".to_string(),
-        Kind::Socket(s) => alloc::format!("socket:[{}]", s.id),
+        Kind::Socket(s) => alloc::format!("socket:[{}]", s.id()),
         Kind::File { path, .. } | Kind::Dir { path, .. } => path.clone(),
         Kind::PipeRead(r) => alloc::format!("pipe:[{}]", pipe::id(&r.pipe())),
         Kind::PipeWrite(w) => alloc::format!("pipe:[{}]", pipe::id(&w.pipe())),
@@ -656,7 +657,7 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
             let s = s.clone();
             drop(desc); // don't hold it while waiting for data
             match s.recv(buf, 0) {
-                Ok((n, _)) => n as i64,
+                Ok(n) => n as i64,
                 Err(e) => -e,
             }
         }
@@ -764,7 +765,7 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
         Kind::Socket(s) => {
             let s = s.clone();
             drop(desc);
-            match s.send(bytes, 0, None) {
+            match s.send(bytes, 0) {
                 Ok(n) => n as i64,
                 Err(e) => -e,
             }
@@ -877,7 +878,7 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
             0
         }
         Kind::Socket(s) => {
-            fill_stat(out, 0, s.id, 0o140000 | 0o777, 1, 0, 0); // S_IFSOCK
+            fill_stat(out, 0, s.id(), 0o140000 | 0o777, 1, 0, 0); // S_IFSOCK
             0
         }
         Kind::PipeRead(_) | Kind::PipeWrite(_) => {
@@ -1438,8 +1439,62 @@ pub fn sys_statx(dirfd: u64, path: u64, flags: u64, _mask: u64, buf: u64) -> i64
 
 // ---- sockets ----
 
+/// A socket descriptor's socket: internet or Unix-domain.
+#[derive(Clone)]
+pub enum AnySock {
+    Inet(Arc<Socket>),
+    Unix(Arc<UnixSocket>),
+}
+
+impl AnySock {
+    fn id(&self) -> u64 {
+        match self {
+            AnySock::Inet(s) => s.id,
+            AnySock::Unix(s) => s.id,
+        }
+    }
+    fn is_nonblocking(&self) -> bool {
+        match self {
+            AnySock::Inet(s) => s.is_nonblocking(),
+            AnySock::Unix(s) => s.is_nonblocking(),
+        }
+    }
+    fn set_nonblocking(&self, on: bool) {
+        match self {
+            AnySock::Inet(s) => s.set_nonblocking(on),
+            AnySock::Unix(s) => s.set_nonblocking(on),
+        }
+    }
+    fn readiness(&self) -> (bool, bool, bool) {
+        match self {
+            AnySock::Inet(s) => s.readiness(),
+            AnySock::Unix(s) => s.readiness(),
+        }
+    }
+    fn pending_bytes(&self) -> usize {
+        match self {
+            AnySock::Inet(s) => s.pending_bytes(),
+            AnySock::Unix(s) => s.pending_bytes(),
+        }
+    }
+    /// read()
+    fn recv(&self, buf: &mut [u8], flags: u64) -> Result<usize, i64> {
+        match self {
+            AnySock::Inet(s) => s.recv(buf, flags).map(|(n, _)| n),
+            AnySock::Unix(s) => s.recv(buf, flags).map(|(n, _)| n),
+        }
+    }
+    /// write()
+    fn send(&self, data: &[u8], flags: u64) -> Result<usize, i64> {
+        match self {
+            AnySock::Inet(s) => s.send(data, flags, None),
+            AnySock::Unix(s) => s.send(data, flags, None),
+        }
+    }
+}
+
 /// The socket behind `fd`.
-fn socket_of(fd: u64) -> Result<Arc<Socket>, i64> {
+fn any_socket(fd: u64) -> Result<AnySock, i64> {
     match &get(fd)?.lock().kind {
         Kind::Socket(s) => Ok(s.clone()),
         _ => Err(ENOTSOCK),
@@ -1460,119 +1515,237 @@ fn read_sockaddr(ptr: u64, len: u64) -> Result<(smoltcp::wire::Ipv4Address, u16)
     Ok((smoltcp::wire::Ipv4Address::new(b[4], b[5], b[6], b[7]), port))
 }
 
-/// Write a sockaddr_in to (ptr, *len_ptr) and set *len_ptr (NULL: skip).
-fn write_sockaddr(ptr: u64, len_ptr: u64, ep: smoltcp::wire::IpEndpoint) -> Result<(), i64> {
+/// struct sockaddr_un -> a name: a path (up to its NUL), or an abstract
+/// name (sun_path[0] == 0: the rest of the given length).
+fn read_sockaddr_un(ptr: u64, len: u64) -> Result<unix::Name, i64> {
+    if !(3..=110).contains(&len) {
+        return Err(EINVAL);
+    }
+    let b = unsafe { crate::syscall::user_slice(ptr, len) }.ok_or(EFAULT)?;
+    if u16::from_le_bytes([b[0], b[1]]) as u64 != unix::AF_UNIX {
+        return Err(EAFNOSUPPORT);
+    }
+    let path = &b[2..];
+    if path[0] == 0 {
+        return Ok(unix::Name::Abstract(path[1..].to_vec()));
+    }
+    let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+    let given = String::from_utf8_lossy(&path[..end]).into_owned();
+    let abs = absolute(&given);
+    Ok(unix::Name::Path { given, abs })
+}
+
+/// Write a socket address to (ptr, *len_ptr) and set *len_ptr (NULL: skip).
+fn write_addr(ptr: u64, len_ptr: u64, bytes: &[u8]) -> Result<(), i64> {
     if ptr == 0 || len_ptr == 0 {
         return Ok(());
     }
     let len_b = unsafe { crate::syscall::user_slice_mut(len_ptr, 4) }.ok_or(EFAULT)?;
     let room = u32::from_le_bytes(len_b[..4].try_into().unwrap()) as usize;
-    len_b.copy_from_slice(&16u32.to_le_bytes());
+    len_b.copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+    let n = room.min(bytes.len());
+    let out = unsafe { crate::syscall::user_slice_mut(ptr, n as u64) }.ok_or(EFAULT)?;
+    out.copy_from_slice(&bytes[..n]);
+    Ok(())
+}
+
+fn write_sockaddr(ptr: u64, len_ptr: u64, ep: smoltcp::wire::IpEndpoint) -> Result<(), i64> {
     let smoltcp::wire::IpAddress::Ipv4(a) = ep.addr;
     let mut sa = [0u8; 16];
     sa[0..2].copy_from_slice(&(sock::AF_INET as u16).to_le_bytes());
     sa[2..4].copy_from_slice(&ep.port.to_be_bytes());
     sa[4..8].copy_from_slice(&a.octets());
-    let n = room.min(16);
-    let out = unsafe { crate::syscall::user_slice_mut(ptr, n as u64) }.ok_or(EFAULT)?;
-    out.copy_from_slice(&sa[..n]);
-    Ok(())
+    write_addr(ptr, len_ptr, &sa)
+}
+
+/// A Unix socket's address (unnamed: just the family).
+fn write_sockaddr_un(ptr: u64, len_ptr: u64, name: Option<&unix::Name>) -> Result<(), i64> {
+    let mut sa = Vec::with_capacity(110);
+    sa.extend_from_slice(&(unix::AF_UNIX as u16).to_le_bytes());
+    match name {
+        Some(unix::Name::Path { given, .. }) => {
+            sa.extend_from_slice(given.as_bytes());
+            sa.push(0);
+        }
+        Some(unix::Name::Abstract(b)) => {
+            sa.push(0);
+            sa.extend_from_slice(b);
+        }
+        None => {}
+    }
+    write_addr(ptr, len_ptr, &sa)
 }
 
 fn result(r: Result<i64, i64>) -> i64 {
     r.unwrap_or_else(|e| -e)
 }
 
-/// socket(domain, type, protocol): AF_INET, SOCK_STREAM (TCP) or
-/// SOCK_DGRAM (UDP), with SOCK_NONBLOCK / SOCK_CLOEXEC.
+fn new_socket_fd(s: AnySock, cloexec: bool) -> Result<i64, i64> {
+    with_process(|p| alloc_fd(p, handle(Kind::Socket(s)), cloexec)).map(|fd| fd as i64)
+}
+
+/// socket(domain, type, protocol): AF_INET (TCP, UDP, raw) or AF_UNIX
+/// (stream, datagram), with SOCK_NONBLOCK / SOCK_CLOEXEC.
 pub fn sys_socket(domain: u64, ty: u64, protocol: u64) -> i64 {
-    if domain != sock::AF_INET {
-        return -EAFNOSUPPORT; // no IPv6 or Unix-domain sockets yet
-    }
-    let s = match Socket::new(ty, protocol) {
-        Ok(s) => s,
-        Err(e) => return -e,
-    };
     let cloexec = ty & sock::SOCK_CLOEXEC != 0;
-    match with_process(|p| alloc_fd(p, handle(Kind::Socket(Arc::new(s))), cloexec)) {
-        Ok(fd) => fd as i64,
-        Err(e) => -e,
-    }
+    let nonblocking = ty & sock::SOCK_NONBLOCK != 0;
+    result(match domain {
+        sock::AF_INET => Socket::new(ty, protocol).and_then(|s| new_socket_fd(AnySock::Inet(Arc::new(s)), cloexec)),
+        unix::AF_UNIX => match ty & 0xf {
+            sock::SOCK_STREAM | sock::SOCK_DGRAM => {
+                let s = UnixSocket::new(ty & 0xf == sock::SOCK_STREAM, nonblocking);
+                new_socket_fd(AnySock::Unix(Arc::new(s)), cloexec)
+            }
+            _ => Err(crate::syscall::EPROTONOSUPPORT),
+        },
+        _ => Err(EAFNOSUPPORT), // no IPv6 yet
+    })
+}
+
+/// socketpair(AF_UNIX, type, protocol, sv): two connected sockets.
+pub fn sys_socketpair(domain: u64, ty: u64, _protocol: u64, sv: u64) -> i64 {
+    result((|| {
+        if domain != unix::AF_UNIX {
+            return Err(crate::syscall::EOPNOTSUPP);
+        }
+        let stream = match ty & 0xf {
+            sock::SOCK_STREAM => true,
+            sock::SOCK_DGRAM => false,
+            _ => return Err(crate::syscall::EPROTONOSUPPORT),
+        };
+        let out = unsafe { crate::syscall::user_slice_mut(sv, 8) }.ok_or(EFAULT)?;
+        let (a, b) = UnixSocket::pair(stream, ty & sock::SOCK_NONBLOCK != 0);
+        let cloexec = ty & sock::SOCK_CLOEXEC != 0;
+        let fa = new_socket_fd(AnySock::Unix(a), cloexec)?;
+        let fb = match new_socket_fd(AnySock::Unix(b), cloexec) {
+            Ok(fd) => fd,
+            Err(e) => {
+                sys_close(fa as u64);
+                return Err(e);
+            }
+        };
+        out[0..4].copy_from_slice(&(fa as i32).to_le_bytes());
+        out[4..8].copy_from_slice(&(fb as i32).to_le_bytes());
+        Ok(0)
+    })())
 }
 
 pub fn sys_bind(fd: u64, addr: u64, len: u64) -> i64 {
-    result((|| {
-        let (a, port) = read_sockaddr(addr, len)?;
-        socket_of(fd)?.bind(a, port).map(|_| 0)
+    result((|| match any_socket(fd)? {
+        AnySock::Inet(s) => {
+            let (a, port) = read_sockaddr(addr, len)?;
+            s.bind(a, port).map(|_| 0)
+        }
+        AnySock::Unix(s) => s.bind(read_sockaddr_un(addr, len)?).map(|_| 0),
     })())
 }
 
 pub fn sys_listen(fd: u64, backlog: u64) -> i64 {
-    result(socket_of(fd).and_then(|s| s.listen(backlog as usize)).map(|_| 0))
+    result((|| match any_socket(fd)? {
+        AnySock::Inet(s) => s.listen(backlog as usize).map(|_| 0),
+        AnySock::Unix(s) => s.listen().map(|_| 0),
+    })())
 }
 
 pub fn sys_connect(fd: u64, addr: u64, len: u64) -> i64 {
-    result((|| {
-        let (a, port) = read_sockaddr(addr, len)?;
-        socket_of(fd)?.connect(a, port).map(|_| 0)
+    result((|| match any_socket(fd)? {
+        AnySock::Inet(s) => {
+            let (a, port) = read_sockaddr(addr, len)?;
+            s.connect(a, port).map(|_| 0)
+        }
+        AnySock::Unix(s) => s.connect(read_sockaddr_un(addr, len)?).map(|_| 0),
     })())
 }
 
 /// accept4(fd, addr, addrlen, flags) (and accept)
 pub fn sys_accept(fd: u64, addr: u64, len_ptr: u64, flags: u64) -> i64 {
     result((|| {
-        let listener = socket_of(fd)?;
-        let (conn, peer) = listener.accept(flags & sock::SOCK_NONBLOCK != 0)?;
-        if let Some(peer) = peer {
-            write_sockaddr(addr, len_ptr, peer)?;
-        }
+        let nonblocking = flags & sock::SOCK_NONBLOCK != 0;
         let cloexec = flags & sock::SOCK_CLOEXEC != 0;
-        with_process(|p| alloc_fd(p, handle(Kind::Socket(Arc::new(conn))), cloexec)).map(|fd| fd as i64)
+        match any_socket(fd)? {
+            AnySock::Inet(listener) => {
+                let (conn, peer) = listener.accept(nonblocking)?;
+                if let Some(peer) = peer {
+                    write_sockaddr(addr, len_ptr, peer)?;
+                }
+                new_socket_fd(AnySock::Inet(Arc::new(conn)), cloexec)
+            }
+            AnySock::Unix(listener) => {
+                let (conn, peer) = listener.accept(nonblocking)?;
+                write_sockaddr_un(addr, len_ptr, peer.as_ref())?;
+                new_socket_fd(AnySock::Unix(conn), cloexec)
+            }
+        }
     })())
 }
 
 /// sendto(fd, buf, len, flags, addr, addrlen) (and send)
 pub fn sys_sendto(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, alen: u64) -> i64 {
     result((|| {
-        let s = socket_of(fd)?;
-        let to = if addr != 0 && !s.is_stream() {
-            // (raw sockets: the port in the address is ignored, as on Linux)
-            let (a, port) = read_sockaddr(addr, alen)?;
-            Some(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(a), port))
-        } else {
-            None
-        };
         let data = unsafe { crate::syscall::user_slice(buf, len) }.ok_or(EFAULT)?;
-        s.send(data, flags, to).map(|n| n as i64)
+        match any_socket(fd)? {
+            AnySock::Inet(s) => {
+                let to = if addr != 0 && !s.is_stream() {
+                    // (raw sockets: the port in the address is ignored, as on Linux)
+                    let (a, port) = read_sockaddr(addr, alen)?;
+                    Some(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(a), port))
+                } else {
+                    None
+                };
+                s.send(data, flags, to).map(|n| n as i64)
+            }
+            AnySock::Unix(s) => {
+                let to = if addr != 0 && !s.is_stream() { Some(read_sockaddr_un(addr, alen)?) } else { None };
+                s.send(data, flags, to).map(|n| n as i64)
+            }
+        }
     })())
 }
 
 /// recvfrom(fd, buf, len, flags, addr, addrlen) (and recv)
 pub fn sys_recvfrom(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, len_ptr: u64) -> i64 {
     result((|| {
-        let s = socket_of(fd)?;
         let out = unsafe { crate::syscall::user_slice_mut(buf, len) }.ok_or(EFAULT)?;
-        let (n, from) = s.recv(out, flags)?;
-        if let Some(from) = from {
-            write_sockaddr(addr, len_ptr, from)?;
-        } else if !s.is_stream() {
-        } else if addr != 0 {
-            write_sockaddr(addr, len_ptr, s.peer().unwrap_or(s.local()))?;
+        match any_socket(fd)? {
+            AnySock::Inet(s) => {
+                let (n, from) = s.recv(out, flags)?;
+                if let Some(from) = from {
+                    write_sockaddr(addr, len_ptr, from)?;
+                } else if s.is_stream() && addr != 0 {
+                    write_sockaddr(addr, len_ptr, s.peer().unwrap_or(s.local()))?;
+                }
+                Ok(n as i64)
+            }
+            AnySock::Unix(s) => {
+                let (n, from) = s.recv(out, flags)?;
+                if addr != 0 {
+                    write_sockaddr_un(addr, len_ptr, from.as_ref())?;
+                }
+                Ok(n as i64)
+            }
         }
-        Ok(n as i64)
     })())
 }
 
 pub fn sys_shutdown(fd: u64, how: u64) -> i64 {
-    result(socket_of(fd).and_then(|s| s.shutdown(how)).map(|_| 0))
+    result((|| match any_socket(fd)? {
+        AnySock::Inet(s) => s.shutdown(how).map(|_| 0),
+        AnySock::Unix(s) => s.shutdown(how).map(|_| 0),
+    })())
 }
 
 pub fn sys_getsockname(fd: u64, addr: u64, len_ptr: u64) -> i64 {
-    result(socket_of(fd).and_then(|s| write_sockaddr(addr, len_ptr, s.local())).map(|_| 0))
+    result((|| match any_socket(fd)? {
+        AnySock::Inet(s) => write_sockaddr(addr, len_ptr, s.local()).map(|_| 0),
+        AnySock::Unix(s) => write_sockaddr_un(addr, len_ptr, s.local().as_ref()).map(|_| 0),
+    })())
 }
 
 pub fn sys_getpeername(fd: u64, addr: u64, len_ptr: u64) -> i64 {
-    result(socket_of(fd).and_then(|s| s.peer()).and_then(|p| write_sockaddr(addr, len_ptr, p)).map(|_| 0))
+    result((|| match any_socket(fd)? {
+        AnySock::Inet(s) => s.peer().and_then(|p| write_sockaddr(addr, len_ptr, p)).map(|_| 0),
+        AnySock::Unix(s) => s.peer().and_then(|p| write_sockaddr_un(addr, len_ptr, p.as_ref())).map(|_| 0),
+    })())
 }
 
 /// setsockopt: IP_HDRINCL and IP_TTL for raw sockets; the rest
@@ -1581,33 +1754,42 @@ pub fn sys_getpeername(fd: u64, addr: u64, len_ptr: u64) -> i64 {
 pub fn sys_setsockopt(fd: u64, level: u64, name: u64, val: u64, len: u64) -> i64 {
     const IPPROTO_IP: u64 = 0;
     result((|| {
-        let s = socket_of(fd)?;
-        if level == IPPROTO_IP && val != 0 && len >= 4 {
-            let b = unsafe { crate::syscall::user_slice(val, 4) }.ok_or(EFAULT)?;
-            s.set_ip_option(name, u32::from_le_bytes(b.try_into().unwrap()));
+        if let AnySock::Inet(s) = any_socket(fd)? {
+            if level == IPPROTO_IP && val != 0 && len >= 4 {
+                let b = unsafe { crate::syscall::user_slice(val, 4) }.ok_or(EFAULT)?;
+                s.set_ip_option(name, u32::from_le_bytes(b.try_into().unwrap()));
+            }
         }
         Ok(0)
     })())
 }
 
-/// getsockopt: SO_ERROR (a failed non-blocking connect) and SO_TYPE;
-/// anything else reads as 0.
+/// getsockopt: SO_ERROR (a failed non-blocking connect), SO_TYPE and, for
+/// Unix sockets, SO_PEERCRED; anything else reads as 0.
 pub fn sys_getsockopt(fd: u64, level: u64, name: u64, val: u64, len_ptr: u64) -> i64 {
     const SOL_SOCKET: u64 = 1;
     const SO_TYPE: u64 = 3;
     const SO_ERROR: u64 = 4;
+    const SO_PEERCRED: u64 = 17;
     result((|| {
-        let s = socket_of(fd)?;
-        let v: u32 = match (level, name) {
-            (SOL_SOCKET, SO_ERROR) => s.take_error() as u32,
-            (SOL_SOCKET, SO_TYPE) => if s.is_stream() { 1 } else { 2 },
-            _ => 0,
+        let s = any_socket(fd)?;
+        let bytes: Vec<u8> = match (level, name, &s) {
+            (SOL_SOCKET, SO_PEERCRED, AnySock::Unix(u)) => {
+                let c = u.peer_creds();
+                [c.pid, c.uid, c.gid].iter().flat_map(|v| v.to_le_bytes()).collect()
+            }
+            (SOL_SOCKET, SO_ERROR, AnySock::Inet(i)) => (i.take_error() as u32).to_le_bytes().to_vec(),
+            (SOL_SOCKET, SO_TYPE, _) => {
+                let stream = match &s {
+                    AnySock::Inet(i) => i.is_stream(),
+                    AnySock::Unix(u) => u.is_stream(),
+                };
+                (if stream { 1u32 } else { 2 }).to_le_bytes().to_vec()
+            }
+            _ => 0u32.to_le_bytes().to_vec(),
         };
         if val != 0 && len_ptr != 0 {
-            let out = unsafe { crate::syscall::user_slice_mut(val, 4) }.ok_or(EFAULT)?;
-            out.copy_from_slice(&v.to_le_bytes());
-            let l = unsafe { crate::syscall::user_slice_mut(len_ptr, 4) }.ok_or(EFAULT)?;
-            l.copy_from_slice(&4u32.to_le_bytes());
+            write_addr(val, len_ptr, &bytes)?;
         }
         Ok(0)
     })())
@@ -1633,19 +1815,26 @@ fn read_msghdr(msg: u64) -> Result<(u64, u64, Vec<(u64, u64)>), i64> {
 /// sendmsg(fd, msg, flags): the buffers, sent as one message (no control data).
 pub fn sys_sendmsg(fd: u64, msg: u64, flags: u64) -> i64 {
     result((|| {
-        let s = socket_of(fd)?;
         let (name, namelen, iovs) = read_msghdr(msg)?;
         let mut data = Vec::new();
         for (base, len) in iovs {
             data.extend_from_slice(unsafe { crate::syscall::user_slice(base, len) }.ok_or(EFAULT)?);
         }
-        let to = if name != 0 && !s.is_stream() {
-            let (a, port) = read_sockaddr(name, namelen)?;
-            Some(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(a), port))
-        } else {
-            None
-        };
-        s.send(&data, flags, to).map(|n| n as i64)
+        match any_socket(fd)? {
+            AnySock::Inet(s) => {
+                let to = if name != 0 && !s.is_stream() {
+                    let (a, port) = read_sockaddr(name, namelen)?;
+                    Some(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(a), port))
+                } else {
+                    None
+                };
+                s.send(&data, flags, to).map(|n| n as i64)
+            }
+            AnySock::Unix(s) => {
+                let to = if name != 0 && !s.is_stream() { Some(read_sockaddr_un(name, namelen)?) } else { None };
+                s.send(&data, flags, to).map(|n| n as i64)
+            }
+        }
     })())
 }
 
@@ -1653,11 +1842,18 @@ pub fn sys_sendmsg(fd: u64, msg: u64, flags: u64) -> i64 {
 /// sender's address in msg_name (no control data).
 pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
     result((|| {
-        let s = socket_of(fd)?;
+        let s = any_socket(fd)?;
         let (name, _, iovs) = read_msghdr(msg)?;
         let total: u64 = iovs.iter().map(|(_, l)| *l).sum();
         let mut buf = alloc::vec![0u8; total.min(1 << 20) as usize];
-        let (n, from) = s.recv(&mut buf, flags)?;
+        enum From {
+            Inet(Option<smoltcp::wire::IpEndpoint>),
+            Unix(Option<unix::Name>),
+        }
+        let (n, from) = match &s {
+            AnySock::Inet(i) => i.recv(&mut buf, flags).map(|(n, f)| (n, From::Inet(f)))?,
+            AnySock::Unix(u) => u.recv(&mut buf, flags).map(|(n, f)| (n, From::Unix(f)))?,
+        };
         let mut done = 0usize;
         for (base, len) in iovs {
             if done >= n {
@@ -1670,9 +1866,13 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
         let m = unsafe { crate::syscall::user_slice_mut(msg, 56) }.ok_or(EFAULT)?;
         m[40..48].copy_from_slice(&0u64.to_le_bytes()); // msg_controllen: no control data
         m[48..52].copy_from_slice(&0u32.to_le_bytes()); // msg_flags
-        if let (Some(from), true) = (from, name != 0) {
+        if name != 0 {
             let namelen_ptr = msg + 8;
-            write_sockaddr(name, namelen_ptr, from)?;
+            match from {
+                From::Inet(Some(ep)) => write_sockaddr(name, namelen_ptr, ep)?,
+                From::Unix(n) => write_sockaddr_un(name, namelen_ptr, n.as_ref())?,
+                From::Inet(None) => {}
+            }
         }
         Ok(n as i64)
     })())

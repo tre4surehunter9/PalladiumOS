@@ -1933,3 +1933,13 @@ fn busybox_ping_over_loopback() {
     // Raw sockets are for root: an ordinary user's ping is refused.
     assert_ne!(sh("su user -c 'ping -c 1 127.0.0.1' > /tmp/ping2.out 2>&1"), 0);
 }
+
+#[test_case]
+fn unix_domain_sockets() {
+    let Some(_) = c_program("test_unix") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let status = sh("test_unix > /tmp/unix.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/unix.out"));
+    assert!(file("/tmp/unix.out").contains("all checks passed"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
