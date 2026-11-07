@@ -5,6 +5,13 @@
 //!
 //!   palladium-runner KERNEL [--uefi] [QEMU ARGS...]   cargo run / cargo test
 //!   palladium-runner image KERNEL OUT.img [--uefi]    just make the disk image
+//!   palladium-runner usb KERNEL OUT.img               one UEFI disk with everything
+//!
+//! `usb` makes a GPT disk image for a USB stick (or any disk): the UEFI
+//! boot partition, then ext2 partitions the kernel finds by name:
+//! palladium-data (/, fresh, 256 MiB), palladium-usr (/usr, from
+//! target/usr.img) and palladium-alpine (/alpine, empty, 1 GiB). The file
+//! is sparse; `dd ... conv=sparse` or any flashing tool writes it.
 //!
 //! `cargo run` boots with UEFI when the OVMF firmware is installed (Arch:
 //! edk2-ovmf; or point OVMF at the file): a UEFI disk image (GPT, an EFI
@@ -55,6 +62,12 @@ fn main() {
         Some("image") if args.len() == 3 => {
             make_image(Path::new(&args[1]), Path::new(&args[2]), want_uefi);
         }
+        Some("usb") if args.len() == 3 => {
+            if let Err(e) = make_usb_image(Path::new(&args[1]), Path::new(&args[2])) {
+                eprintln!("palladium-runner: can't make the USB image: {e}");
+                exit(1);
+            }
+        }
         Some(kernel) => {
             let kernel = Path::new(kernel);
             // cargo run: UEFI if there's firmware for it; tests: BIOS.
@@ -83,6 +96,101 @@ fn make_image(kernel: &Path, out: &Path, uefi: bool) {
         eprintln!("palladium-runner: can't make a disk image from {}: {e}", kernel.display());
         exit(1);
     }
+}
+
+const MIB: u64 = 1024 * 1024;
+
+/// See `usb` at the top.
+fn make_usb_image(kernel: &Path, out: &Path) -> Result<(), String> {
+    use std::fs;
+    let work = PathBuf::from(format!("{}.parts", out.display()));
+    fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let stripped = work.join("kernel");
+    let source = if strip(kernel, &stripped) { stripped.clone() } else { kernel.to_path_buf() };
+
+    let esp = work.join("esp.img");
+    bootloader::DiskImageBuilder::new(source)
+        .create_uefi_fat_partition(&esp)
+        .map_err(|e| format!("boot partition: {e}"))?;
+    let data = work.join("data.img");
+    mke2fs(&data, "256M")?;
+    let alpine = work.join("alpine.img");
+    mke2fs(&alpine, "1G")?;
+    let usr = repo_root(kernel).join("target/usr.img");
+    if !usr.exists() {
+        return Err(format!("{} is missing (cargo build makes it)", usr.display()));
+    }
+
+    let parts: [(&str, &Path, gpt::partition_types::Type); 4] = [
+        ("boot", &esp, gpt::partition_types::EFI),
+        ("palladium-data", &data, gpt::partition_types::LINUX_FS),
+        ("palladium-usr", &usr, gpt::partition_types::LINUX_FS),
+        ("palladium-alpine", &alpine, gpt::partition_types::LINUX_FS),
+    ];
+    let size_of = |p: &Path| fs::metadata(p).map(|m| m.len().next_multiple_of(MIB)).map_err(|e| e.to_string());
+    let mut total = 2 * MIB; // GPT at both ends, 1 MiB alignment
+    for (_, path, _) in &parts {
+        total += size_of(path)?;
+    }
+
+    let _ = fs::remove_file(out);
+    let mut disk = fs::OpenOptions::new().create(true).read(true).write(true).open(out).map_err(|e| e.to_string())?;
+    disk.set_len(total).map_err(|e| e.to_string())?;
+    let mbr = gpt::mbr::ProtectiveMBR::with_lb_size(u32::try_from(total / 512 - 1).unwrap_or(u32::MAX));
+    mbr.overwrite_lba0(&mut disk).map_err(|e| e.to_string())?;
+    let lb = gpt::disk::LogicalBlockSize::Lb512;
+    let mut table = gpt::GptConfig::new()
+        .writable(true)
+        .initialized(false)
+        .logical_block_size(lb)
+        .create_from_device(Box::new(&mut disk), None)
+        .map_err(|e| e.to_string())?;
+    table.update_partitions(Default::default()).map_err(|e| e.to_string())?;
+    let mut offsets = Vec::new();
+    for (name, path, kind) in &parts {
+        let id = table.add_partition(name, size_of(path)?, kind.clone(), 0, Some(MIB / 512)).map_err(|e| e.to_string())?;
+        let start = table.partitions()[&id].bytes_start(lb).map_err(|e| e.to_string())?;
+        offsets.push(start);
+    }
+    table.write().map_err(|e| e.to_string())?;
+    for ((name, path, _), start) in parts.iter().zip(offsets) {
+        copy_sparse(path, out, start).map_err(|e| format!("{name}: {e}"))?;
+    }
+    let _ = fs::remove_dir_all(&work);
+    Ok(())
+}
+
+/// Copy `src` into `dst` at `offset`, skipping all-zero blocks (they are
+/// zero already, and the image stays sparse).
+fn copy_sparse(src: &Path, dst: &Path, offset: u64) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut from = std::fs::File::open(src)?;
+    let mut to = std::fs::OpenOptions::new().write(true).open(dst)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut pos = offset;
+    loop {
+        let n = from.read(&mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+        if buf[..n].iter().any(|&b| b != 0) {
+            to.seek(SeekFrom::Start(pos))?;
+            to.write_all(&buf[..n])?;
+        }
+        pos += n as u64;
+    }
+}
+
+/// An empty ext2 filesystem, with the options build.rs uses.
+fn mke2fs(image: &Path, size: &str) -> Result<(), String> {
+    let _ = std::fs::remove_file(image);
+    let ok = Command::new("mke2fs")
+        .args(["-q", "-t", "ext2", "-b", "1024", "-O", "^dir_index,^resize_inode,^ext_attr", "-L", "palladium", "-F"])
+        .arg(image)
+        .arg(size)
+        .status()
+        .is_ok_and(|s| s.success());
+    if ok { Ok(()) } else { Err("mke2fs failed (is e2fsprogs installed?)".into()) }
 }
 
 /// Copy `kernel` to `out` without debug info, with llvm-objcopy from Rust's

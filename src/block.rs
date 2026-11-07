@@ -7,7 +7,10 @@
 //! - `RamDisk`: a disk image held in memory (used by the tests).
 
 use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use spin::Mutex;
 use x86_64::instructions::port::Port;
 
 pub const SECTOR_SIZE: usize = 512;
@@ -87,6 +90,12 @@ pub struct AtaDisk {
 }
 
 impl AtaDisk {
+    /// The disk on the primary IDE bus in the master position (QEMU's
+    /// `index=0`, usually the boot disk).
+    pub fn primary_master() -> Option<AtaDisk> {
+        AtaDisk::probe(0x1F0, 0x3F6, false)
+    }
+
     /// The disk on the primary IDE bus in the slave position (QEMU puts a
     /// `-drive ...,index=1` there; the boot disk is the master). Returns
     /// None if there's no disk.
@@ -264,6 +273,7 @@ impl BlockDevice for AtaDisk {
 /// (QEMU's q35 machine, and most real PCs). Each disk is handed out once.
 pub fn disk(index: u8) -> Option<Box<dyn BlockDevice>> {
     let ide = match index {
+        0 => AtaDisk::primary_master(),
         1 => AtaDisk::primary_slave(),
         2 => AtaDisk::secondary_master(),
         3 => AtaDisk::secondary_slave(),
@@ -275,22 +285,127 @@ pub fn disk(index: u8) -> Option<Box<dyn BlockDevice>> {
     }
 }
 
-/// The data disk (disk 1), mounted at /.
+// ---------------------------------------------------------------- partitions
+
+/// A part of a disk, as a block device of its own. Several partitions can
+/// share one disk.
+pub struct Partition {
+    disk: Arc<Mutex<Box<dyn BlockDevice>>>,
+    start: u64,
+    sectors: u64,
+}
+
+impl BlockDevice for Partition {
+    fn sectors(&self) -> u64 {
+        self.sectors
+    }
+
+    fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        if sector + (buf.len() / SECTOR_SIZE) as u64 > self.sectors {
+            return Err("read past the end of the partition");
+        }
+        self.disk.lock().read(self.start + sector, buf)
+    }
+
+    fn write(&mut self, sector: u64, data: &[u8]) -> Result<(), &'static str> {
+        if sector + (data.len() / SECTOR_SIZE) as u64 > self.sectors {
+            return Err("write past the end of the partition");
+        }
+        self.disk.lock().write(self.start + sector, data)
+    }
+
+    fn flush(&mut self) -> Result<(), &'static str> {
+        self.disk.lock().flush()
+    }
+}
+
+/// The partitions of a GPT-partitioned disk: (name, first sector, sectors).
+pub fn gpt_partitions(disk: &mut dyn BlockDevice) -> Vec<(String, u64, u64)> {
+    let mut found = Vec::new();
+    let mut header = [0u8; SECTOR_SIZE];
+    if disk.read(1, &mut header).is_err() || &header[0..8] != b"EFI PART" {
+        return found;
+    }
+    let u32_at = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let u64_at = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    let entries_lba = u64_at(&header, 72);
+    let count = u32_at(&header, 80).min(256) as usize;
+    let size = u32_at(&header, 84) as usize;
+    if !(128..=SECTOR_SIZE).contains(&size) || SECTOR_SIZE % size != 0 {
+        return found;
+    }
+    let mut table = alloc::vec![0u8; (count * size).next_multiple_of(SECTOR_SIZE)];
+    if disk.read(entries_lba, &mut table).is_err() {
+        return found;
+    }
+    for entry in table.chunks(size).take(count) {
+        if entry[0..16].iter().all(|&b| b == 0) {
+            continue; // unused entry
+        }
+        let (first, last) = (u64_at(entry, 32), u64_at(entry, 40));
+        if last < first || last >= disk.sectors() {
+            continue;
+        }
+        let name: String = char::decode_utf16(
+            entry[56..128].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0),
+        )
+        .map(|c| c.unwrap_or('?'))
+        .collect();
+        found.push((name, first, last - first + 1));
+    }
+    found
+}
+
+/// PalladiumOS's partitions (named palladium-...) on any disk, found once.
+/// Disks without any are left alone (and free for disk(N)).
+static NAMED: Mutex<Option<Vec<(String, Partition)>>> = Mutex::new(None);
+
+fn take_named(name: &str) -> Option<Box<dyn BlockDevice>> {
+    let mut named = NAMED.lock();
+    let list = named.get_or_insert_with(|| {
+        let mut list = Vec::new();
+        let ahci_ports = crate::ahci::ports_with_disks();
+        let candidates = (0..4u8).filter_map(|i| match i {
+            0 => AtaDisk::primary_master(),
+            1 => AtaDisk::primary_slave(),
+            2 => AtaDisk::secondary_master(),
+            _ => AtaDisk::secondary_slave(),
+        }.map(|d| Box::new(d) as Box<dyn BlockDevice>))
+        .chain(ahci_ports.into_iter().filter_map(crate::ahci::boxed));
+        for mut disk in candidates {
+            let parts: Vec<_> = gpt_partitions(disk.as_mut()).into_iter().filter(|p| p.0.starts_with("palladium-")).collect();
+            if parts.is_empty() {
+                continue; // (dropped: an AHCI port is handed back)
+            }
+            let shared = Arc::new(Mutex::new(disk));
+            for (pname, start, sectors) in parts {
+                crate::serial_println!("partition {}: sectors {}..+{}", pname, start, sectors);
+                list.push((pname, Partition { disk: shared.clone(), start, sectors }));
+            }
+        }
+        list
+    });
+    let i = list.iter().position(|(n, _)| n == name)?;
+    Some(Box::new(list.remove(i).1))
+}
+
+/// The data disk, mounted at /: a partition named palladium-data on any
+/// disk (see `palladium-runner usb`), or else disk 1.
 pub fn data_disk() -> Option<Box<dyn BlockDevice>> {
-    disk(1)
+    take_named("palladium-data").or_else(|| disk(1))
 }
 
-/// The system disk (disk 2): the files under /usr (C headers and
-/// libraries for tcc), made by build.rs as target/usr.img.
+/// The system disk: the files under /usr (C headers and libraries for
+/// tcc), made by build.rs as target/usr.img. palladium-usr, or disk 2.
 pub fn system_disk() -> Option<Box<dyn BlockDevice>> {
-    disk(2)
+    take_named("palladium-usr").or_else(|| disk(2))
 }
 
-/// Mount the Alpine disk (disk 3, target/alpine.img from build.rs) at
-/// /alpine, if there is one: room for an Alpine Linux root filesystem (see
-/// /bin/alpine). Returns its size in MiB.
+/// Mount the Alpine disk (palladium-alpine, or disk 3: target/alpine.img
+/// from build.rs) at /alpine, if there is one: room for an Alpine Linux
+/// root filesystem (see /bin/alpine). Returns its size in MiB.
 pub fn mount_alpine_disk() -> Option<u64> {
-    let dev = disk(3)?;
+    let dev = take_named("palladium-alpine").or_else(|| disk(3))?;
     let mib = dev.sectors() * 512 / 1024 / 1024;
     let fs = crate::ext2::Ext2::mount(dev).ok()?;
     let _ = crate::filesystem::make_dir("/alpine");
