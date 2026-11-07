@@ -55,8 +55,10 @@ pub const BOOTLOADER_CONFIG: bootloader_api::BootloaderConfig = {
     c.mappings.dynamic_range_start = Some(0xFFFF_A000_0000_0000);
     c.mappings.dynamic_range_end = Some(0xFFFF_BFFF_FFFF_F000);
     c.kernel_stack_size = 512 * 1024;
-    c.frame_buffer.minimum_framebuffer_width = Some(1024);
-    c.frame_buffer.minimum_framebuffer_height = Some(768);
+    // No minimum screen size: under UEFI the bootloader then keeps the
+    // firmware's mode (QEMU: the EDID resolution the runner asks for, 720p;
+    // real PCs: usually the screen's own). With a minimum it would switch
+    // to the biggest mode there is. (Its BIOS stage picks up to 1280x720.)
     c
 };
 

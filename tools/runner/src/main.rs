@@ -8,7 +8,7 @@
 //!
 //! `cargo run` boots with UEFI when the OVMF firmware is installed (Arch:
 //! edk2-ovmf; or point OVMF at the file): a UEFI disk image (GPT, an EFI
-//! system partition), at 1920x1080. --bios (or PALLADIUM_BIOS=1) boots with
+//! system partition), at 1280x720. --bios (or PALLADIUM_BIOS=1) boots with
 //! BIOS instead (the bootloader's BIOS stage goes up to 1280x720). Test
 //! kernels boot with BIOS unless --uefi / PALLADIUM_UEFI=1.
 //!
@@ -25,10 +25,9 @@ use std::time::{Duration, Instant};
 /// the Alpine disk, and a network card (port 2222 on this machine, localhost
 /// only, reaches PalladiumOS's SSH server).
 const RUN_ARGS: &[&str] = &[
-    // 8 MiB of video memory: the biggest UEFI screen mode that fits is
-    // 1920x1080 (OVMF would otherwise pick 2560x1600). BIOS: 1280x720.
-    // (-global VGA.vgamem_mb=8 would leave OVMF without a screen.)
-    "-vga", "none", "-device", "VGA,vgamem_mb=8",
+    // The screen tells the firmware it prefers 1280x720 (EDID), and UEFI
+    // booting keeps the firmware's mode: 720p, as with BIOS.
+    "-vga", "none", "-device", "VGA,edid=on,xres=1280,yres=720",
     "-drive", "format=raw,file=target/disk.img,index=1,media=disk",
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
     "-drive", "format=raw,file=target/alpine.img,index=3,media=disk",
