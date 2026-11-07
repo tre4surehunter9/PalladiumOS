@@ -809,7 +809,7 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
 /// wait4(pid, wstatus, options, rusage): pid > 0 is one child, -1 any,
 /// 0 any in our process group, < -1 any in group -pid. Options: WNOHANG,
 /// WUNTRACED (also report stopped children), WCONTINUED (and continued).
-pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> i64 {
+pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64, rusage: u64) -> i64 {
     const WNOHANG: u64 = 1;
     const WUNTRACED: u64 = 2;
     const WCONTINUED: u64 = 8;
@@ -846,8 +846,12 @@ pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> i64 {
             if let Some(zpid) = table.values().find(|p| matches(p) && matches!(p.state, State::Zombie(_))).map(|p| p.pid) {
                 let p = table.remove(&zpid).unwrap();
                 let State::Zombie(reason) = p.state else { unreachable!() };
+                let cpu = p.cpu_ticks;
                 drop(table);
                 free_process(p);
+                if rusage != 0 {
+                    fill_rusage(rusage, cpu);
+                }
                 Some((zpid, reason.wait_status() as u32))
             } else {
                 // A stop (status 0x7f) or continue (0xffff) not yet reported?
@@ -1038,7 +1042,7 @@ pub fn sys_brk(addr: u64) -> i64 {
             let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
             if let Ok((frame, flush)) = mapper.unmap(page) {
                 flush.flush();
-                unsafe { frames.deallocate_frame(frame) };
+                frames.release(frame); // it may be shared with a fork
             }
             page_addr += 4096;
         }
@@ -2116,4 +2120,15 @@ pub fn sys_clock_getres(clock: u64, res: u64) -> i64 {
         out[8..16].copy_from_slice(&(TICK_NS as i64).to_le_bytes());
     }
     0
+}
+
+/// struct rusage for wait4: the child's CPU time (all counted as user
+/// time: the kernel doesn't split it); the other fields are zero.
+fn fill_rusage(ptr: u64, cpu_ticks: u64) {
+    if let Some(out) = unsafe { user_slice_mut(ptr, 144) } {
+        out.fill(0);
+        let us = cpu_ticks * TICK_NS / 1000;
+        out[0..8].copy_from_slice(&((us / 1_000_000) as i64).to_le_bytes()); // ru_utime.tv_sec
+        out[8..16].copy_from_slice(&((us % 1_000_000) as i64).to_le_bytes()); // ru_utime.tv_usec
+    }
 }

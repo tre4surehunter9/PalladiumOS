@@ -94,7 +94,7 @@ fn unmap_pages(start: u64, end: u64) {
     for a in (start..end).step_by(4096) {
         if let Ok((frame, flush)) = mapper.unmap(page(a)) {
             flush.flush();
-            unsafe { frames.deallocate_frame(frame) };
+            frames.release(frame); // freed when no fork shares it any more
         }
     }
 }
@@ -248,7 +248,14 @@ pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> i64 {
         match (mapped, flags) {
             (true, f) => {
                 // PROT_NONE keeps the page (and its data) but denies user access.
-                let f = f.unwrap_or(F::PRESENT);
+                let mut f = f.unwrap_or(F::PRESENT);
+                // A page shared with a fork stays read-only (copy-on-write):
+                // the first write gets a private copy.
+                let frame = mapper.translate_page(page(a)).ok();
+                let shared = frame.is_some_and(|fr| FRAME_ALLOCATOR.lock().as_ref().is_some_and(|fa| fa.users(fr) > 1));
+                if shared && f.contains(F::WRITABLE) {
+                    f = (f - F::WRITABLE) | memory::COW;
+                }
                 if let Ok(flush) = unsafe { mapper.update_flags(page(a), f) } {
                     flush.flush();
                 }

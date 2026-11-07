@@ -124,6 +124,10 @@ pub struct BootInfoFrameAllocator {
     free_list: Option<u64>,
     free_count: usize,
     total: usize,
+    /// How many address spaces use each frame shared by fork (copy-on-
+    /// write), indexed by frame number; 0 means "not shared" (one user).
+    /// A flat array: fork and exit touch every page, so this must be O(1).
+    shared: alloc::vec::Vec<u16>,
 }
 
 impl BootInfoFrameAllocator {
@@ -137,12 +141,53 @@ impl BootInfoFrameAllocator {
             free_list: None,
             free_count: 0,
             total: 0,
+            shared: alloc::vec::Vec::new(),
         }
     }
 
     /// Number of frames handed out and not yet freed.
     pub fn frames_in_use(&self) -> usize {
         self.next - self.free_count
+    }
+
+    fn index(frame: PhysFrame) -> usize {
+        (frame.start_address().as_u64() / 4096) as usize
+    }
+
+    /// One more address space uses `frame` (fork shared it).
+    pub fn share(&mut self, frame: PhysFrame) {
+        if self.shared.is_empty() {
+            // One counter per frame of usable RAM (allocated on the first
+            // fork). Only usable regions hand out frames; the map also lists
+            // device regions far above the RAM.
+            let top = self
+                .memory_map
+                .iter()
+                .filter(|r| r.region_type == MemoryRegionType::Usable)
+                .map(|r| r.range.end_addr())
+                .max()
+                .unwrap_or(0);
+            self.shared = alloc::vec![0; (top / 4096) as usize];
+        }
+        let n = &mut self.shared[Self::index(frame)];
+        *n = if *n == 0 { 2 } else { *n + 1 };
+    }
+
+    /// How many address spaces use `frame`.
+    pub fn users(&self, frame: PhysFrame) -> u32 {
+        self.shared.get(Self::index(frame)).map_or(1, |&n| (n as u32).max(1))
+    }
+
+    /// An address space stopped using a user page's frame: free it if it
+    /// was the last one. (Use this, not deallocate_frame, for user pages.)
+    pub fn release(&mut self, frame: PhysFrame) {
+        if let Some(n) = self.shared.get_mut(Self::index(frame)) {
+            if *n >= 2 {
+                *n = if *n == 2 { 0 } else { *n - 1 };
+                return;
+            }
+        }
+        unsafe { self.deallocate_frame(frame) };
     }
 
     /// Number of usable frames in the machine (counted once, then cached).
@@ -243,7 +288,12 @@ pub fn is_user_range(ptr: u64, len: u64, write: bool) -> bool {
     let mut page = ptr & !0xfff;
     while page < end {
         if !is_user_page(VirtAddr::new(page), write) {
-            return false;
+            // A shared copy-on-write page: the kernel is about to write it
+            // for the program (read() into a buffer...), so copy it first.
+            let cow = write && is_user_page(VirtAddr::new(page), false) && break_cow_current(page);
+            if !cow {
+                return false;
+            }
         }
         page += 4096;
     }
@@ -351,7 +401,7 @@ pub fn free_address_space(p4: PhysFrame, frames: &mut BootInfoFrameAllocator) {
             if level > 1 {
                 free_table(child, level - 1, frames);
             } else {
-                unsafe { frames.deallocate_frame(child) };
+                frames.release(child); // shared pages stay until their last user
             }
         }
         unsafe { frames.deallocate_frame(table) };
@@ -398,40 +448,141 @@ fn for_each_user_page(p4: PhysFrame, mut f: impl FnMut(u64, PhysFrame, PageTable
     Ok(())
 }
 
-/// Make a full copy of an address space (for fork): every user page is
-/// duplicated into a new frame with the same permissions.
-pub fn copy_address_space(src: PhysFrame, frames: &mut BootInfoFrameAllocator) -> Result<PhysFrame, &'static str> {
-    let dst = new_address_space(frames).ok_or("out of memory")?;
-    let mut mapper = mapper_for(dst);
-    let keep = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
+/// Page-table bit 9 (free for the OS): this page was writable, and is
+/// shared copy-on-write. It's mapped read-only; the first write copies it.
+pub const COW: PageTableFlags = PageTableFlags::BIT_9;
 
-    let result = for_each_user_page(src, |va, frame, flags| {
-        let copy = frames.allocate_frame().ok_or("out of memory")?;
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                phys_ptr(frame.start_address()) as *const u8,
-                phys_ptr(copy.start_address()),
-                4096,
-            );
-            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
-            match mapper.map_to(page, copy, flags & keep, frames) {
-                // The new address space is not active, so no TLB flush is needed.
-                Ok(flush) => flush.ignore(),
-                Err(_) => {
-                    frames.deallocate_frame(copy);
-                    return Err("map_to failed");
+/// The address space for a fork: the same pages, shared. Writable pages
+/// become read-only + COW in both (the first write to one makes a private
+/// copy, see break_cow); read-only pages are simply shared. Only the page
+/// tables are new. The source must be the active address space (its TLB
+/// is flushed).
+pub fn copy_address_space(src: PhysFrame, frames: &mut BootInfoFrameAllocator) -> Result<PhysFrame, &'static str> {
+    /// Mirror `table` (at `level`, 4 = the top) into a new table: lower
+    /// tables are copied, pages are shared (writable ones become COW).
+    fn copy_table(table: PhysFrame, level: u8, frames: &mut BootInfoFrameAllocator) -> Result<PhysFrame, &'static str> {
+        let new = frames.allocate_frame().ok_or("out of memory")?;
+        zero_frame(new);
+        let (from, to) = (table_at(table), table_at(new));
+        for i in 0..512 {
+            let entry = &mut from[i];
+            if entry.is_unused() {
+                continue;
+            }
+            let child = PhysFrame::containing_address(entry.addr());
+            if level > 1 {
+                match copy_table(child, level - 1, frames) {
+                    Ok(copy) => to[i].set_addr(copy.start_address(), entry.flags()),
+                    Err(e) => {
+                        // Free what this table got so far, then give up.
+                        free_partial(new, level, frames);
+                        return Err(e);
+                    }
                 }
+            } else {
+                let mut flags = entry.flags();
+                if flags.contains(PageTableFlags::WRITABLE) {
+                    flags = (flags - PageTableFlags::WRITABLE) | COW;
+                    entry.set_flags(flags); // the parent's copy is read-only now too
+                }
+                to[i].set_addr(entry.addr(), flags);
+                frames.share(child);
             }
         }
-        Ok(())
-    });
+        Ok(new)
+    }
 
+    /// Undo a partly copied table (its pages were shared, its tables new).
+    fn free_partial(table: PhysFrame, level: u8, frames: &mut BootInfoFrameAllocator) {
+        for entry in table_at(table).iter() {
+            if entry.is_unused() {
+                continue;
+            }
+            let child = PhysFrame::containing_address(entry.addr());
+            if level > 1 {
+                free_partial(child, level - 1, frames);
+            } else {
+                frames.release(child);
+            }
+        }
+        unsafe { frames.deallocate_frame(table) };
+    }
+
+    let dst = new_address_space(frames).ok_or("out of memory")?;
+    let (from, to) = (table_at(src), table_at(dst));
+    let mut result = Ok(());
+    for i in 0..256 {
+        if !is_user_slot(i) || from[i].is_unused() {
+            continue;
+        }
+        match copy_table(PhysFrame::containing_address(from[i].addr()), 3, frames) {
+            Ok(copy) => to[i].set_addr(copy.start_address(), from[i].flags()),
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        }
+    }
+    // The parent's pages just became read-only: drop stale TLB entries.
+    x86_64::instructions::tlb::flush_all();
     match result {
         Ok(()) => Ok(dst),
         Err(e) => {
             free_address_space(dst, frames);
             Err(e)
         }
+    }
+}
+
+/// The current address space's page-table entry for `addr`, if mapped.
+fn current_entry(addr: u64) -> Option<&'static mut x86_64::structures::paging::page_table::PageTableEntry> {
+    use x86_64::registers::control::Cr3;
+    let va = VirtAddr::new(addr);
+    let mut table = table_at(Cr3::read().0);
+    for index in [va.p4_index(), va.p3_index(), va.p2_index()] {
+        let entry = &table[index];
+        if entry.is_unused() || entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            return None;
+        }
+        table = table_at(PhysFrame::containing_address(entry.addr()));
+    }
+    let entry = &mut table[va.p1_index()];
+    (!entry.is_unused()).then_some(entry)
+}
+
+/// A write to a copy-on-write page at `addr` (current address space):
+/// give this process its own writable copy (or just make it writable if
+/// nobody else uses the frame any more). Returns false if the page isn't
+/// copy-on-write (a real protection fault) or memory ran out.
+pub fn break_cow(addr: u64, frames: &mut BootInfoFrameAllocator) -> bool {
+    let Some(entry) = current_entry(addr) else { return false };
+    let flags = entry.flags();
+    if !flags.contains(COW) {
+        return false;
+    }
+    let old = PhysFrame::containing_address(entry.addr());
+    let writable = (flags - COW) | PageTableFlags::WRITABLE;
+    if frames.users(old) == 1 {
+        entry.set_flags(writable); // the last user: keep the frame
+    } else {
+        let Some(copy) = frames.allocate_frame() else { return false };
+        unsafe {
+            core::ptr::copy_nonoverlapping(phys_ptr(old.start_address()) as *const u8, phys_ptr(copy.start_address()), 4096);
+        }
+        entry.set_addr(copy.start_address(), writable);
+        frames.release(old);
+    }
+    x86_64::instructions::tlb::flush(VirtAddr::new(addr & !0xfff));
+    true
+}
+
+/// break_cow with the global frame allocator. try_lock: this is also
+/// called from the page fault handler, which must not wait for a lock the
+/// interrupted code may hold.
+pub fn break_cow_current(addr: u64) -> bool {
+    match FRAME_ALLOCATOR.try_lock() {
+        Some(mut guard) => guard.as_mut().is_some_and(|frames| break_cow(addr, frames)),
+        None => false,
     }
 }
 

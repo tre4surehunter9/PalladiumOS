@@ -452,7 +452,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         // vfork may be implemented as fork (POSIX allows it).
         SYS_FORK | SYS_VFORK => process::fork(frame),
         SYS_EXECVE => process::execve(frame, a1, a2, a3),
-        SYS_WAIT4 => process::sys_wait4(a1, a2, a3),
+        SYS_WAIT4 => process::sys_wait4(a1, a2, a3, a4),
         SYS_KILL => process::sys_kill(a1, a2),
         SYS_GETUID | SYS_GETEUID | SYS_GETGID | SYS_GETEGID | SYS_SETUID | SYS_SETGID | SYS_SETREUID
         | SYS_SETREGID | SYS_SETRESUID | SYS_SETRESGID | SYS_GETRESUID | SYS_GETRESGID => process::sys_id(frame.rax, a1, a2, a3),

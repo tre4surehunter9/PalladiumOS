@@ -22,7 +22,9 @@ pub fn fork() -> isize {
 /// waitpid(2) via wait4: wait for child `pid` (-1 = any). Returns the pid
 /// that changed state (0 with WNOHANG if none yet) and stores its status.
 pub fn waitpid(pid: i32, status: &mut i32, options: u64) -> isize {
-    unsafe { syscall3(sys::WAIT4, pid as i64 as u64, status as *mut i32 as u64, options) as isize }
+    // wait4's 4th argument (rusage) must be NULL: the kernel fills it in
+    // if it's not, so leaving the register as it happens to be corrupts memory.
+    unsafe { crate::sys::syscall4(sys::WAIT4, pid as i64 as u64, status as *mut i32 as u64, options, 0) as isize }
 }
 
 // Decoding wait statuses, like the C macros.

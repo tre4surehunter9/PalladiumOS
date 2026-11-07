@@ -1843,3 +1843,11 @@ fn busybox_versions_are_the_defaults() {
     assert_eq!(file("/tmp/r"), "/bin/busybox\n");
     assert!(file("/tmp/d2").trim().parse::<u64>().is_ok(), "the original still runs");
 }
+
+#[test_case]
+fn fork_is_copy_on_write() {
+    let before = frames_in_use();
+    assert_eq!(run(prog("test_cow"), &["test_cow"]), Ok(0));
+    assert_eq!(frames_in_use(), before, "every shared and copied page was freed");
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
