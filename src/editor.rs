@@ -9,7 +9,15 @@ use alloc::vec;
 
 pub static EDITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-const EDIT_ROWS: usize = 24;
+/// Text rows on screen (the rest of the console is the status bar).
+fn edit_rows() -> usize {
+    crate::vga_buffer::size().0.saturating_sub(1).max(1)
+}
+
+/// Columns on screen.
+fn edit_cols() -> usize {
+    crate::vga_buffer::size().1
+}
 
 pub struct Editor {
     pub lines:         Vec<String>,
@@ -73,7 +81,7 @@ impl Editor {
         self.lines.insert(row + 1, rest);
         self.cursor_row += 1;
         self.cursor_col = 0;
-        if self.cursor_row >= self.scroll_offset + EDIT_ROWS {
+        if self.cursor_row >= self.scroll_offset + edit_rows() {
             self.scroll_offset += 1;
         }
         self.dirty = true;
@@ -95,7 +103,7 @@ impl Editor {
             self.cursor_row += 1;
             let line_len = self.lines[self.cursor_row].len();
             if self.cursor_col > line_len { self.cursor_col = line_len; }
-            if self.cursor_row >= self.scroll_offset + EDIT_ROWS {
+            if self.cursor_row >= self.scroll_offset + edit_rows() {
                 self.scroll_offset += 1;
             }
         }
@@ -120,7 +128,7 @@ impl Editor {
         } else if self.cursor_row + 1 < self.lines.len() {
             self.cursor_row += 1;
             self.cursor_col = 0;
-            if self.cursor_row >= self.scroll_offset + EDIT_ROWS {
+            if self.cursor_row >= self.scroll_offset + edit_rows() {
                 self.scroll_offset += 1;
             }
         }
@@ -129,11 +137,12 @@ impl Editor {
     pub fn render(&self) {
         crate::vga_buffer::clear_screen();
 
-        for screen_row in 0..EDIT_ROWS {
+        for screen_row in 0..edit_rows() {
             let file_row = self.scroll_offset + screen_row;
             if file_row < self.lines.len() {
                 let line = &self.lines[file_row];
-                let display = if line.len() > 80 { &line[..80] } else { line.as_str() };
+                let cols = edit_cols();
+                let display = if line.len() > cols { &line[..cols] } else { line.as_str() };
                 println!("{}", display);
             } else {
                 println!("~");
@@ -155,8 +164,9 @@ impl Editor {
             crate::vga_buffer::Color::Black,
             crate::vga_buffer::Color::LightGray,
         );
-        let padded = alloc::format!("{:<80}", &status[..80.min(status.len())]);
-        print!("{}", &padded[..80]);
+        let cols = edit_cols();
+        let padded = alloc::format!("{:<width$}", &status[..cols.min(status.len())], width = cols);
+        print!("{}", &padded[..cols]);
         WRITER.lock().set_color(
             crate::vga_buffer::Color::Yellow,
             crate::vga_buffer::Color::Black,

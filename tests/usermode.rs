@@ -9,7 +9,7 @@
 
 extern crate alloc;
 
-use bootloader::{entry_point, BootInfo};
+use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use palladiumos::memory;
 use palladiumos::usermode::{launch_program, run};
@@ -17,17 +17,18 @@ use palladiumos::{elf, programs};
 use alloc::vec;
 use alloc::vec::Vec;
 
-entry_point!(main);
+entry_point!(main, config = &palladiumos::BOOTLOADER_CONFIG);
 
-fn main(boot_info: &'static BootInfo) -> ! {
+fn main(boot_info: &'static mut BootInfo) -> ! {
+    let boot_info: &'static BootInfo = boot_info;
     use palladiumos::allocator;
     use memory::BootInfoFrameAllocator;
     use x86_64::VirtAddr;
 
     palladiumos::init();
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset.into_option().unwrap());
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_regions) };
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
 
     memory::PHYS_MEM_OFFSET.store(phys_mem_offset.as_u64(), core::sync::atomic::Ordering::Relaxed);
@@ -1684,7 +1685,7 @@ fn fastfetch_port_works() {
     let _ = filesystem::make_dir("/tmp");
     assert_eq!(sh("fastfetch --logo none > /tmp/ff 2>&1"), 0);
     let out = file("/tmp/ff");
-    for want in ["OS: PalladiumOS 0.5.7 x86_64", "Kernel: PalladiumOS 0.5.7", "Memory: ", "Disk (/): "] {
+    for want in ["OS: PalladiumOS 0.5.8 x86_64", "Kernel: PalladiumOS 0.5.8", "Memory: ", "Disk (/): "] {
         assert!(out.contains(want), "{:?} missing from:\n{}", want, out);
     }
     assert!(!out.contains("not implemented"), "{}", out);

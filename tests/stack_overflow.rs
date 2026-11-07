@@ -11,8 +11,9 @@ fn panic(info: &PanicInfo) -> ! {
 
 use palladiumos::serial_print;
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
+bootloader_api::entry_point!(kernel_main, config = &palladiumos::BOOTLOADER_CONFIG);
+
+fn kernel_main(_boot_info: &'static mut bootloader_api::BootInfo) -> ! {
     serial_print!("stack_overflow::stack_overflow...\t");
 
     palladiumos::gdt::init();
@@ -26,7 +27,7 @@ pub extern "C" fn _start() -> ! {
 #[allow(unconditional_recursion)]
 fn stack_overflow() {
     stack_overflow();
-    volatile::Volatile::new(0).read();
+    unsafe { core::ptr::read_volatile(&0u8) }; // (keeps the recursion from becoming a loop)
 }
 
 use lazy_static::lazy_static;

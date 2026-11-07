@@ -582,8 +582,9 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
         TIOCGWINSZ => {
             let Some(out) = (unsafe { user_slice_mut(arg, 8) }) else { return -EFAULT };
             out.fill(0);
-            out[0..2].copy_from_slice(&25u16.to_le_bytes()); // ws_row
-            out[2..4].copy_from_slice(&80u16.to_le_bytes()); // ws_col
+            let (rows, cols) = crate::vga_buffer::size();
+            out[0..2].copy_from_slice(&(rows as u16).to_le_bytes()); // ws_row
+            out[2..4].copy_from_slice(&(cols as u16).to_le_bytes()); // ws_col
             0
         }
         _ => -EINVAL,

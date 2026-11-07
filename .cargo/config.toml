@@ -5,7 +5,9 @@ panic-abort-tests = true
 build-std = ["core", "compiler_builtins", "alloc"]
 
 [target.x86_64-palladiumos]
-runner = "bootimage runner"
+# tools/runner (built by build.rs): makes a bootable disk image from the
+# kernel with the bootloader crate and starts QEMU.
+runner = "target/runner/release/palladium-runner"
 # The kernel (and the test kernels) live in the top 2 GiB: the "kernel"
 # code model. (The userland uses the same target, but build.rs gives it
 # its own flags through CARGO_ENCODED_RUSTFLAGS, which take precedence.)

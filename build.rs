@@ -92,6 +92,30 @@ fn main() {
     fs::write(out_dir.join("user_programs.rs"), out).unwrap();
 
     make_disk_images(&root, &out_dir);
+    build_runner(&root);
+}
+
+/// tools/runner, the program cargo runs kernels with (it makes the bootable
+/// disk image and starts QEMU). A host program: built from outside the
+/// repository, so this repository's cargo settings (the kernel's target,
+/// build-std) don't apply to it, with the nightly toolchain the bootloader
+/// crate needs.
+fn build_runner(root: &std::path::Path) {
+    println!("cargo:rerun-if-changed=tools/runner/src");
+    println!("cargo:rerun-if-changed=tools/runner/Cargo.toml");
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(env::temp_dir())
+        .args(["+nightly", "build", "--release", "--manifest-path"])
+        .arg(root.join("tools/runner/Cargo.toml"))
+        .arg("--target-dir")
+        .arg(root.join("target/runner"));
+    for (key, _) in env::vars() {
+        if key.starts_with("CARGO") || key.starts_with("RUSTUP_TOOLCHAIN") || key == "RUSTFLAGS" || key == "RUST_TARGET_PATH" || key.starts_with("RUSTC") {
+            cmd.env_remove(key);
+        }
+    }
+    let status = cmd.status().expect("failed to run cargo for tools/runner");
+    assert!(status.success(), "building tools/runner failed");
 }
 
 /// Format an ext2 image with mke2fs (from e2fsprogs). `populate` fills it

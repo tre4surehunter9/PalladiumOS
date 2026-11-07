@@ -1,4 +1,10 @@
 // Copyright (c) 2026 tre4surehunter9
+//! The console: a grid of character cells with VGA colors, drawn into the
+//! framebuffer the bootloader set up (bootloader 0.11: a graphics mode, not
+//! VGA text mode) with a 9x16 font, at as many cells as fit (113x48 at
+//! 1024x768). Before the framebuffer is set up (early boot), text goes into
+//! the grid only. The grid stays readable for tests and for QEMU's monitor
+//! (its address is logged to the serial port at boot).
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,20 +45,55 @@ struct ScreenChar {
     color_code: ColorCode,
 }
 
-const BUFFER_HEIGHT: usize = 25;
-const BUFFER_WIDTH:  usize = 80;
+/// The largest grid (cells); the real size depends on the framebuffer.
+pub const MAX_WIDTH: usize = 160;
+pub const MAX_HEIGHT: usize = 64;
+/// The grid's size before the framebuffer is set up.
+const EARLY_WIDTH: usize = 80;
+const EARLY_HEIGHT: usize = 25;
+/// A cell in pixels (the font's glyphs).
+const CELL_W: usize = noto_sans_mono_bitmap::get_raster_width(FontWeight::Regular, RasterHeight::Size16);
+const CELL_H: usize = 16;
 
-use volatile::Volatile;
+use noto_sans_mono_bitmap::{get_raster, FontWeight, RasterHeight};
 
-struct Buffer {
-    chars: [[Volatile<ScreenChar>; BUFFER_WIDTH]; BUFFER_HEIGHT],
+type Grid = [[ScreenChar; MAX_WIDTH]; MAX_HEIGHT];
+static mut GRID: Grid = [[ScreenChar { ascii_character: b' ', color_code: ColorCode(0x0e) }; MAX_WIDTH]; MAX_HEIGHT];
+
+/// The framebuffer, as the bootloader described it.
+struct Fb {
+    buf: *mut u8,
+    len: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
+    bpp: usize,
+    bgr: bool,
+    gray: bool,
 }
+
+// (Only touched with the WRITER lock held.)
+unsafe impl Send for Fb {}
+
+/// The 16 VGA colors, as RGB.
+const PALETTE: [[u8; 3]; 16] = [
+    [0x00, 0x00, 0x00], [0x00, 0x00, 0xaa], [0x00, 0xaa, 0x00], [0x00, 0xaa, 0xaa],
+    [0xaa, 0x00, 0x00], [0xaa, 0x00, 0xaa], [0xaa, 0x55, 0x00], [0xaa, 0xaa, 0xaa],
+    [0x55, 0x55, 0x55], [0x55, 0x55, 0xff], [0x55, 0xff, 0x55], [0x55, 0xff, 0xff],
+    [0xff, 0x55, 0x55], [0xff, 0x55, 0xff], [0xff, 0xff, 0x55], [0xff, 0xff, 0xff],
+];
 
 pub struct Writer {
     row_position: usize,
     column_position: usize,
     color_code: ColorCode,
-    buffer: &'static mut Buffer,
+    grid: &'static mut Grid,
+    /// The grid's size in use (cells).
+    width: usize,
+    height: usize,
+    fb: Option<Fb>,
+    /// Where the cursor is drawn (an underline), to erase it when it moves.
+    cursor_at: Option<(usize, usize)>,
     /// ANSI text attributes (see write_ansi), as VGA color numbers.
     fg: u8,
     bg: u8,
@@ -83,25 +124,25 @@ impl Writer {
                 } else if self.row_position > 0 {
                     // The line wrapped: go back to the end of the row above.
                     self.row_position -= 1;
-                    self.column_position = BUFFER_WIDTH - 1;
+                    self.column_position = self.width - 1;
                 } else {
                     return;
                 }
                 let row = self.row_position;
                 let col = self.column_position;
-                self.buffer.chars[row][col].write(ScreenChar {
+                self.put(row, col, ScreenChar {
                     ascii_character: b' ',
                     color_code: self.color_code,
                 });
             }
             byte => {
-                if self.column_position >= BUFFER_WIDTH {
+                if self.column_position >= self.width {
                     self.new_line();
                 }
                 let row = self.row_position;
                 let col = self.column_position;
                 let color_code = self.color_code;
-                self.buffer.chars[row][col].write(ScreenChar {
+                self.put(row, col, ScreenChar {
                     ascii_character: byte,
                     color_code,
                 });
@@ -142,20 +183,30 @@ impl fmt::Write for Writer {
 //new lines
 impl Writer {
     fn new_line(&mut self) {
-        if self.row_position < BUFFER_HEIGHT - 1 {
+        if self.row_position < self.height - 1 {
             self.row_position += 1;
         } else {
-            for row in 1..BUFFER_HEIGHT {
-                for col in 0..BUFFER_WIDTH {
-                    let character = self.buffer.chars[row][col].read();
-                    self.buffer.chars[row - 1][col].write(character);
-                }
-            }
-
-            self.clear_row(BUFFER_HEIGHT - 1);
-
+            self.scroll_up_one();
         }
         self.column_position = 0;
+    }
+
+    /// Scroll the whole screen up a line: the grid, and the framebuffer's
+    /// pixels in one copy (not redrawn cell by cell).
+    fn scroll_up_one(&mut self) {
+        self.hide_cursor();
+        for row in 1..self.height {
+            self.grid[row - 1] = self.grid[row];
+        }
+        if let Some(fb) = &self.fb {
+            let row_bytes = fb.stride * fb.bpp * CELL_H;
+            let used = row_bytes * self.height;
+            if used <= fb.len {
+                // SAFETY: inside the framebuffer; copy handles the overlap.
+                unsafe { core::ptr::copy(fb.buf.add(row_bytes), fb.buf, used - row_bytes) };
+            }
+        }
+        self.clear_row(self.height - 1);
     }
 }
 
@@ -168,8 +219,8 @@ impl Writer {
             ascii_character: b' ',
             color_code: self.color_code
         };
-        for col in 0..BUFFER_WIDTH {
-            self.buffer.chars[row][col].write(blank);
+        for col in 0..self.width {
+            self.put(row, col, blank);
         }
     }
 }
@@ -184,9 +235,11 @@ lazy_static! {
         column_position: 0,
         row_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
-        // The text buffer (physical 0xb8000), through the kernel's
-        // physical-memory window (the low half belongs to programs).
-        buffer: unsafe { &mut *((crate::memory::PHYS_OFFSET + 0xb8000) as *mut Buffer) },
+        grid: unsafe { &mut *core::ptr::addr_of_mut!(GRID) },
+        width: EARLY_WIDTH,
+        height: EARLY_HEIGHT,
+        fb: None,
+        cursor_at: None,
         fg: DEFAULT_FG,
         bg: DEFAULT_BG,
         bold: false,
@@ -235,7 +288,7 @@ fn test_ansi_editing_sequences() {
         let mut w = WRITER.lock();
         // (No heap in this test kernel: compare rows as bytes.)
         let is = |w: &Writer, r: usize, want: &str| -> bool {
-            (0..BUFFER_WIDTH).all(|c| w.buffer.chars[r][c].read().ascii_character == *want.as_bytes().get(c).unwrap_or(&b' '))
+            (0..w.width).all(|c| w.get(r, c).ascii_character == *want.as_bytes().get(c).unwrap_or(&b' '))
         };
         w.write_ansi(b"\x1b[2J\x1b[H");
         // Absolute row (d) and column (G).
@@ -279,7 +332,7 @@ fn test_println_output() {
         let mut writer = WRITER.lock();
         writeln!(writer, "\n{}", s).expect("writeln failed");
         for (i, c) in s.chars().enumerate() {
-            let screen_char = writer.buffer.chars[BUFFER_HEIGHT - 2][i].read();
+            let screen_char = writer.get(writer.height - 2, i);
             assert_eq!(char::from(screen_char.ascii_character), c);
         }
     });
@@ -312,34 +365,147 @@ impl Writer {
 pub fn draw_cursor_inner(&mut self) {
     // At the end of a line the next character wraps (see write_byte),
     // so the cursor belongs at the start of the next line.
-    if self.column_position >= BUFFER_WIDTH {
+    if self.column_position >= self.width {
         self.new_line();
     }
     self.update_hw_cursor();
  }
 
-pub fn update_hw_cursor(&self) {
-    use x86_64::instructions::port::Port;
-    let pos = (self.row_position * BUFFER_WIDTH + self.column_position.min(BUFFER_WIDTH - 1)) as u16;
-    unsafe {
-        let mut index: Port<u8> = Port::new(0x3D4);
-        let mut data: Port<u8> = Port::new(0x3D5);
-        // Make sure the cursor is enabled, as an underline (scanlines 14-15).
-        index.write(0x0A);
-        data.write(14);
-        index.write(0x0B);
-        data.write(15);
-        index.write(0x0F);
-        data.write((pos & 0xFF) as u8);
-        index.write(0x0E);
-        data.write((pos >> 8) as u8);
+/// Show the cursor (an underline in the cell) where the next character goes.
+pub fn update_hw_cursor(&mut self) {
+    let at = (self.row_position.min(self.height - 1), self.column_position.min(self.width - 1));
+    if self.cursor_at == Some(at) {
+        return;
+    }
+    self.hide_cursor();
+    self.cursor_at = Some(at);
+    self.draw(at.0, at.1);
+}
+
+/// Erase the drawn cursor (redraw its cell plainly).
+fn hide_cursor(&mut self) {
+    if let Some((r, c)) = self.cursor_at.take() {
+        if r < self.height && c < self.width {
+            self.draw(r, c);
+        }
     }
 }
 }
 
 impl Writer {
-/// Nothing to erase with a hardware cursor; kept so callers don't change.
-pub fn erase_cursor_inner(&mut self) {}
+    fn get(&self, row: usize, col: usize) -> ScreenChar {
+        self.grid[row][col]
+    }
+
+    /// Change a cell: in the grid, and on the screen.
+    fn put(&mut self, row: usize, col: usize, ch: ScreenChar) {
+        if self.grid[row][col] == ch && self.fb.is_none() {
+            return;
+        }
+        self.grid[row][col] = ch;
+        self.draw(row, col);
+    }
+
+    /// Draw cell (row, col) into the framebuffer (with the cursor's
+    /// underline if it's there).
+    fn draw(&mut self, row: usize, col: usize) {
+        let Some(fb) = &self.fb else { return };
+        let ch = self.grid[row][col];
+        let fg = PALETTE[(ch.color_code.0 & 0xf) as usize];
+        let bg = PALETTE[(ch.color_code.0 >> 4 & 0xf) as usize];
+        let cursor = self.cursor_at == Some((row, col));
+        let glyph = match ch.ascii_character {
+            c @ 0x21..=0x7e => get_raster(c as char, FontWeight::Regular, RasterHeight::Size16),
+            _ => None,
+        };
+        let (x0, y0) = (col * CELL_W, row * CELL_H);
+        if x0 + CELL_W > fb.width || y0 + CELL_H > fb.height {
+            return;
+        }
+        for y in 0..CELL_H {
+            let line = unsafe { fb.buf.add(((y0 + y) * fb.stride + x0) * fb.bpp) };
+            for x in 0..CELL_W {
+                // How much foreground: the glyph's coverage, a solid block for
+                // 0xfe (the VGA font's square), full for the cursor's line.
+                let mut on: u32 = match (ch.ascii_character, &glyph) {
+                    (0xfe, _) => if (2..CELL_W - 1).contains(&x) && (4..CELL_H - 3).contains(&y) { 255 } else { 0 },
+                    (_, Some(g)) => g.raster().get(y).and_then(|r| r.get(x)).copied().unwrap_or(0) as u32,
+                    _ => 0,
+                };
+                if cursor && y >= CELL_H - 2 {
+                    on = 255;
+                }
+                let mix = |f: u8, b: u8| ((f as u32 * on + b as u32 * (255 - on)) / 255) as u8;
+                let (r, g, b) = (mix(fg[0], bg[0]), mix(fg[1], bg[1]), mix(fg[2], bg[2]));
+                unsafe {
+                    let px = line.add(x * fb.bpp);
+                    if fb.gray {
+                        *px = ((r as u16 + g as u16 + b as u16) / 3) as u8;
+                    } else if fb.bgr {
+                        *px = b;
+                        *px.add(1) = g;
+                        *px.add(2) = r;
+                    } else {
+                        *px = r;
+                        *px.add(1) = g;
+                        *px.add(2) = b;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Start drawing into the framebuffer: as many cells as fit, cleared.
+    fn use_framebuffer(&mut self, fb: Fb) {
+        self.width = (fb.width / CELL_W).clamp(1, MAX_WIDTH);
+        self.height = (fb.height / CELL_H).clamp(1, MAX_HEIGHT);
+        // Black around the cells (the right and bottom edges).
+        unsafe { core::ptr::write_bytes(fb.buf, 0, fb.len) };
+        self.fb = Some(fb);
+        self.cursor_at = None;
+        self.clear_screen_inner();
+    }
+}
+
+/// Set up the console on the bootloader's framebuffer.
+pub fn init_framebuffer(fb: bootloader_api::info::FrameBuffer) {
+    use bootloader_api::info::PixelFormat;
+    let info = fb.info();
+    let buffer = fb.into_buffer();
+    let fb = Fb {
+        buf: buffer.as_mut_ptr(),
+        len: buffer.len(),
+        width: info.width,
+        height: info.height,
+        stride: info.stride,
+        bpp: info.bytes_per_pixel,
+        bgr: !matches!(info.pixel_format, PixelFormat::Rgb),
+        gray: matches!(info.pixel_format, PixelFormat::U8),
+    };
+    x86_64::instructions::interrupts::without_interrupts(|| WRITER.lock().use_framebuffer(fb));
+}
+
+/// The console's size in cells: (rows, columns).
+pub fn size() -> (usize, usize) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let w = WRITER.lock();
+        (w.height, w.width)
+    })
+}
+
+/// Where the cell grid is (for tests and QEMU's monitor): its address, the
+/// cells per row in memory, and the size in use. Each cell is 2 bytes, as
+/// in VGA text memory: the character, then the color.
+pub fn grid_info() -> (u64, usize, usize, usize) {
+    let (rows, cols) = size();
+    (core::ptr::addr_of!(GRID) as u64, MAX_WIDTH, cols, rows)
+}
+
+impl Writer {
+/// Hide the cursor (while output is written elsewhere).
+pub fn erase_cursor_inner(&mut self) {
+    self.hide_cursor();
+}
 }
 
 pub fn clear_screen() {
@@ -348,7 +514,7 @@ pub fn clear_screen() {
 
 impl Writer {
     pub fn clear_screen_inner(&mut self) {
-        for row in 0..BUFFER_HEIGHT {
+        for row in 0..self.height {
             self.clear_row(row);
         }
         self.row_position = 0;
@@ -364,8 +530,8 @@ impl Writer {
 
 impl Writer {
     pub fn set_cursor_pos(&mut self, row: usize, col: usize) {
-        self.row_position    = row.min(BUFFER_HEIGHT - 1);
-        self.column_position = col.min(BUFFER_WIDTH  - 1);
+        self.row_position    = row.min(self.height - 1);
+        self.column_position = col.min(self.width  - 1);
     }
 }
 
@@ -468,7 +634,7 @@ impl Writer {
                     b'c' => {
                         self.reset_attributes();
                         self.apply_attributes();
-                        self.blank(0, BUFFER_WIDTH * BUFFER_HEIGHT);
+                        self.blank(0, self.width * self.height);
                         self.row_position = 0;
                         self.column_position = 0;
                         i += 2;
@@ -528,7 +694,7 @@ impl Writer {
                 0x08 => self.write_byte(0x08),
                 b'\t' => {
                     let next = (self.column_position / 8 + 1) * 8;
-                    while self.column_position < next.min(BUFFER_WIDTH) {
+                    while self.column_position < next.min(self.width) {
                         self.write_byte(b' ');
                     }
                 }
@@ -551,30 +717,30 @@ impl Writer {
                 Some(&v) => v as usize,
             }
         };
-        let total = BUFFER_WIDTH * BUFFER_HEIGHT;
-        let pos = self.row_position * BUFFER_WIDTH + self.column_position;
+        let total = self.width * self.height;
+        let pos = self.row_position * self.width + self.column_position;
         let set_pos = |w: &mut Writer, p: usize| {
             let p = p.min(total - 1);
-            w.row_position = p / BUFFER_WIDTH;
-            w.column_position = p % BUFFER_WIDTH;
+            w.row_position = p / w.width;
+            w.column_position = p % w.width;
         };
         match cmd {
             // Moves wrap across lines, so line editors can move over wrapped input.
             b'A' => self.row_position = self.row_position.saturating_sub(arg(0, 1)),
-            b'B' => self.row_position = (self.row_position + arg(0, 1)).min(BUFFER_HEIGHT - 1),
+            b'B' => self.row_position = (self.row_position + arg(0, 1)).min(self.height - 1),
             b'C' => set_pos(self, pos + arg(0, 1)),
             b'D' => set_pos(self, pos.saturating_sub(arg(0, 1))),
             b'H' | b'f' => {
-                self.row_position = (arg(0, 1) - 1).min(BUFFER_HEIGHT - 1);
-                self.column_position = (arg(1, 1) - 1).min(BUFFER_WIDTH - 1);
+                self.row_position = (arg(0, 1) - 1).min(self.height - 1);
+                self.column_position = (arg(1, 1) - 1).min(self.width - 1);
             }
             // Absolute column / row, relative moves, next / previous line.
-            b'G' | b'`' => self.column_position = (arg(0, 1) - 1).min(BUFFER_WIDTH - 1),
-            b'd' => self.row_position = (arg(0, 1) - 1).min(BUFFER_HEIGHT - 1),
-            b'a' => self.column_position = (self.column_position + arg(0, 1)).min(BUFFER_WIDTH - 1),
-            b'e' => self.row_position = (self.row_position + arg(0, 1)).min(BUFFER_HEIGHT - 1),
+            b'G' | b'`' => self.column_position = (arg(0, 1) - 1).min(self.width - 1),
+            b'd' => self.row_position = (arg(0, 1) - 1).min(self.height - 1),
+            b'a' => self.column_position = (self.column_position + arg(0, 1)).min(self.width - 1),
+            b'e' => self.row_position = (self.row_position + arg(0, 1)).min(self.height - 1),
             b'E' => {
-                self.row_position = (self.row_position + arg(0, 1)).min(BUFFER_HEIGHT - 1);
+                self.row_position = (self.row_position + arg(0, 1)).min(self.height - 1);
                 self.column_position = 0;
             }
             b'F' => {
@@ -585,7 +751,7 @@ impl Writer {
             b'@' => self.insert_chars(arg(0, 1)),
             b'P' => self.delete_chars(arg(0, 1)),
             b'X' => {
-                let line_end = self.row_position * BUFFER_WIDTH + BUFFER_WIDTH;
+                let line_end = self.row_position * self.width + self.width;
                 self.blank(pos, (pos + arg(0, 1)).min(line_end));
             }
             b'L' => self.insert_lines(arg(0, 1)),
@@ -593,7 +759,7 @@ impl Writer {
             b'S' => self.scroll(arg(0, 1), true),
             b'T' => self.scroll(arg(0, 1), false),
             b'b' => {
-                for _ in 0..arg(0, 1).min(BUFFER_WIDTH * BUFFER_HEIGHT) {
+                for _ in 0..arg(0, 1).min(self.width * self.height) {
                     self.write_byte(self.last_char);
                 }
             }
@@ -606,11 +772,11 @@ impl Writer {
                 self.blank(from, to);
             }
             b'K' => {
-                let line = self.row_position * BUFFER_WIDTH;
+                let line = self.row_position * self.width;
                 let (from, to) = match params.first().copied().unwrap_or(0) {
-                    0 => (pos, line + BUFFER_WIDTH),
+                    0 => (pos, line + self.width),
                     1 => (line, pos + 1),
-                    _ => (line, line + BUFFER_WIDTH),
+                    _ => (line, line + self.width),
                 };
                 self.blank(from, to);
             }
@@ -659,34 +825,34 @@ impl Writer {
 
     /// CSI @: insert `n` blanks at the cursor; the rest of the line moves right.
     fn insert_chars(&mut self, n: usize) {
-        let (row, col) = (self.row_position, self.column_position.min(BUFFER_WIDTH - 1));
-        for c in (col..BUFFER_WIDTH).rev() {
-            let ch = if c >= col + n { self.buffer.chars[row][c - n].read() } else { self.blank_cell() };
-            self.buffer.chars[row][c].write(ch);
+        let (row, col) = (self.row_position, self.column_position.min(self.width - 1));
+        for c in (col..self.width).rev() {
+            let ch = if c >= col + n { self.get(row, c - n) } else { self.blank_cell() };
+            self.put(row, c, ch);
         }
     }
 
     /// CSI P: delete `n` characters at the cursor; the rest moves left.
     fn delete_chars(&mut self, n: usize) {
-        let (row, col) = (self.row_position, self.column_position.min(BUFFER_WIDTH - 1));
-        for c in col..BUFFER_WIDTH {
-            let ch = if c + n < BUFFER_WIDTH { self.buffer.chars[row][c + n].read() } else { self.blank_cell() };
-            self.buffer.chars[row][c].write(ch);
+        let (row, col) = (self.row_position, self.column_position.min(self.width - 1));
+        for c in col..self.width {
+            let ch = if c + n < self.width { self.get(row, c + n) } else { self.blank_cell() };
+            self.put(row, c, ch);
         }
     }
 
     /// Move rows [from, end) down (`down`) or up by `n`, blanking what's left.
     /// (No allocation: the console also prints during boot and panics.)
     fn shift_rows(&mut self, from: usize, n: usize, down: bool) {
-        for i in 0..BUFFER_HEIGHT.saturating_sub(from) {
-            let r = if down { BUFFER_HEIGHT - 1 - i } else { from + i };
-            let src = if down { r.checked_sub(n).filter(|&s| s >= from) } else { Some(r + n).filter(|&s| s < BUFFER_HEIGHT) };
-            for c in 0..BUFFER_WIDTH {
+        for i in 0..self.height.saturating_sub(from) {
+            let r = if down { self.height - 1 - i } else { from + i };
+            let src = if down { r.checked_sub(n).filter(|&s| s >= from) } else { Some(r + n).filter(|&s| s < self.height) };
+            for c in 0..self.width {
                 let ch = match src {
-                    Some(s) => self.buffer.chars[s][c].read(),
+                    Some(s) => self.get(s, c),
                     None => self.blank_cell(),
                 };
-                self.buffer.chars[r][c].write(ch);
+                self.put(r, c, ch);
             }
         }
     }
@@ -711,8 +877,8 @@ impl Writer {
 
     fn blank(&mut self, from: usize, to: usize) {
         let blank = ScreenChar { ascii_character: b' ', color_code: self.color_code };
-        for p in from..to.min(BUFFER_WIDTH * BUFFER_HEIGHT) {
-            self.buffer.chars[p / BUFFER_WIDTH][p % BUFFER_WIDTH].write(blank);
+        for p in from..to.min(self.width * self.height) {
+            self.put(p / self.width, p % self.width, blank);
         }
     }
 

@@ -108,10 +108,10 @@ unsafe impl FrameAllocator<Size4KiB> for EmptyFrameAllocator {
 }
 
 
-use bootloader::bootinfo::MemoryMap;
+use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
 
 pub struct BootInfoFrameAllocator {
-    memory_map: &'static MemoryMap,
+    memory_map: &'static MemoryRegions,
     /// Frames handed out from the memory map so far (not from the free list).
     next: usize,
     /// Where the next never-used frame comes from: a memory map region and
@@ -132,12 +132,12 @@ pub struct BootInfoFrameAllocator {
 
 impl BootInfoFrameAllocator {
 
-    pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
+    pub unsafe fn init(memory_map: &'static MemoryRegions) -> Self {
         BootInfoFrameAllocator {
             memory_map,
             next: 0,
             region: 0,
-            next_addr: memory_map.first().map_or(0, |r| r.range.start_addr()),
+            next_addr: memory_map.first().map_or(0, |r| r.start),
             free_list: None,
             free_count: 0,
             total: 0,
@@ -156,14 +156,15 @@ impl BootInfoFrameAllocator {
     pub fn allocate_contiguous(&mut self, n: usize) -> Option<PhysFrame> {
         let bytes = n as u64 * 4096;
         while let Some(r) = self.memory_map.get(self.region) {
-            if r.region_type == MemoryRegionType::Usable && self.next_addr + bytes <= r.range.end_addr() {
+            self.next_addr = usable_start(self.next_addr);
+            if r.kind == MemoryRegionKind::Usable && self.next_addr + bytes <= r.end {
                 let frame = PhysFrame::containing_address(PhysAddr::new(self.next_addr));
                 self.next_addr += bytes;
                 self.next += n;
                 return Some(frame);
             }
             self.region += 1;
-            self.next_addr = self.memory_map.get(self.region).map_or(0, |r| r.range.start_addr());
+            self.next_addr = self.memory_map.get(self.region).map_or(0, |r| r.start);
         }
         None
     }
@@ -181,8 +182,8 @@ impl BootInfoFrameAllocator {
             let top = self
                 .memory_map
                 .iter()
-                .filter(|r| r.region_type == MemoryRegionType::Usable)
-                .map(|r| r.range.end_addr())
+                .filter(|r| r.kind == MemoryRegionKind::Usable)
+                .map(|r| r.end)
                 .max()
                 .unwrap_or(0);
             self.shared = alloc::vec![0; (top / 4096) as usize];
@@ -218,15 +219,14 @@ impl BootInfoFrameAllocator {
 }
 
 
-use bootloader::bootinfo::MemoryRegionType;
 
 impl BootInfoFrameAllocator {
     fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
         let regions = self.memory_map.iter();
         let usable_regions = regions
-        .filter(|r| r.region_type == MemoryRegionType::Usable);
+        .filter(|r| r.kind == MemoryRegionKind::Usable);
         let addr_ranges = usable_regions
-        .map(|r| r.range.start_addr()..r.range.end_addr());
+        .map(|r| usable_start(r.start)..r.end);
         let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
@@ -237,6 +237,13 @@ fn phys_to_virt(phys: u64) -> *mut u64 {
     let offset = PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
     assert!(offset != 0, "PHYS_MEM_OFFSET not set");
     (offset + phys) as *mut u64
+}
+
+/// Memory below 1 MiB (the BIOS's area, frame 0) is never handed out, even
+/// when the memory map calls some of it usable; and frames start on a page
+/// boundary.
+fn usable_start(addr: u64) -> u64 {
+    addr.max(0x10_0000).next_multiple_of(4096)
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
@@ -250,14 +257,15 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
             return Some(PhysFrame::containing_address(PhysAddr::new(phys)));
         }
         while let Some(r) = self.memory_map.get(self.region) {
-            if r.region_type == MemoryRegionType::Usable && self.next_addr < r.range.end_addr() {
+            self.next_addr = usable_start(self.next_addr);
+            if r.kind == MemoryRegionKind::Usable && self.next_addr < r.end {
                 let frame = PhysFrame::containing_address(PhysAddr::new(self.next_addr));
                 self.next_addr += 4096;
                 self.next += 1;
                 return Some(frame);
             }
             self.region += 1;
-            self.next_addr = self.memory_map.get(self.region).map_or(0, |r| r.range.start_addr());
+            self.next_addr = self.memory_map.get(self.region).map_or(0, |r| r.start);
         }
         None
     }

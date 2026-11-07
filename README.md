@@ -334,14 +334,14 @@ The date comes from the PC's real-time clock, so file times and `date` are real.
 The kernel reports each boot step like Linux with systemd: timestamped facts (`[    0.164] CPU: ...`) and a green `[  OK  ]`, yellow `[ WARN ]` or red `[FAILED]` for each step (paging, heap, interrupts, disks, mounts, programs...), then the login prompt. The log is kept: `dmesg` shows it again (`dmesg -n` without colors), and it's in `/proc/kmsg`.
 
 ## Building and Running
-You need Rust (the nightly toolchain in `rust-toolchain.toml` is picked automatically, with `rust-src` and `llvm-tools-preview`), [bootimage](https://github.com/rust-osdev/bootimage) (`cargo install bootimage`), QEMU, and `mke2fs` (e2fsprogs, for the disk images). Then:
+You need Rust (the nightly toolchain in `rust-toolchain.toml` is picked automatically, with `rust-src` and `llvm-tools-preview`), QEMU, and `mke2fs` (e2fsprogs, for the disk images). Then:
 
 ```sh
 cargo run                  # build and boot in QEMU, with a disk and a network card (SSH: port 2222)
 tools/build-all.sh         # optional: musl and the ported software (see above)
 ```
 
-`cargo build` builds the kernel, and `cargo bootimage` makes the bootable image (`target/x86_64-palladiumos/debug/bootimage-palladiumos.bin`), which also runs on its own: `qemu-system-x86_64 -drive format=raw,file=bootimage-palladiumos.bin`. The default build is optimized but keeps debug checks (overflow checks, assertions, a kernel stack canary); `cargo bootimage --release` (or `cargo run --release`) makes the fastest kernel, the one the releases use (`target/x86_64-palladiumos/release/`). With KVM, adding `-enable-kvm -cpu host` to QEMU's command makes everything faster again.
+`cargo build` builds the kernel. PalladiumOS boots with the [bootloader](https://github.com/rust-osdev/bootloader) crate (0.11): cargo runs kernels through `tools/runner` (built by `build.rs`), which turns the kernel into a bootable BIOS disk image and starts QEMU, for `cargo run` and for each test kernel of `cargo test`. To make an image yourself: `target/runner/release/palladium-runner image KERNEL OUT.img` (it runs on its own: `qemu-system-x86_64 -drive format=raw,file=OUT.img`). The default build is optimized but keeps debug checks (overflow checks, assertions, a kernel stack canary); `cargo run --release` (or `cargo build --release`, then an image of `target/x86_64-palladiumos/release/palladiumos`) is the fastest kernel, the one the releases use. With KVM, adding `-enable-kvm -cpu host` to QEMU's command makes everything faster again.
 
 ## The Shell
 After you log in, you get `/bin/sh`, a POSIX-style shell that runs in userland as a normal process.

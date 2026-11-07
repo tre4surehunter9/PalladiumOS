@@ -40,14 +40,34 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
     hlt_loop();
 }
 
-#[cfg(test)]
-use bootloader::{entry_point, BootInfo};
+/// How the bootloader (0.11) should set things up, for the kernel and every
+/// test kernel: all physical memory mapped at PHYS_OFFSET, and its own
+/// mappings (framebuffer, boot information, the boot stack, anything else)
+/// in the upper half. The lower half belongs to programs: the kernel clears
+/// it.
+pub const BOOTLOADER_CONFIG: bootloader_api::BootloaderConfig = {
+    use bootloader_api::config::Mapping;
+    let mut c = bootloader_api::BootloaderConfig::new_default();
+    c.mappings.physical_memory = Some(Mapping::FixedAddress(memory::PHYS_OFFSET));
+    c.mappings.kernel_stack = Mapping::FixedAddress(0xFFFF_FE80_0000_0000);
+    c.mappings.boot_info = Mapping::FixedAddress(0xFFFF_FF00_0000_0000);
+    c.mappings.framebuffer = Mapping::FixedAddress(0xFFFF_FD00_0000_0000);
+    c.mappings.dynamic_range_start = Some(0xFFFF_A000_0000_0000);
+    c.mappings.dynamic_range_end = Some(0xFFFF_BFFF_FFFF_F000);
+    c.kernel_stack_size = 512 * 1024;
+    c.frame_buffer.minimum_framebuffer_width = Some(1024);
+    c.frame_buffer.minimum_framebuffer_height = Some(768);
+    c
+};
 
 #[cfg(test)]
-entry_point!(test_kernel_main);
+use bootloader_api::{entry_point, BootInfo};
 
 #[cfg(test)]
-fn test_kernel_main(_boot_info: &'static BootInfo) -> ! {
+entry_point!(test_kernel_main, config = &BOOTLOADER_CONFIG);
+
+#[cfg(test)]
+fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
     init();
     test_main();
     hlt_loop();

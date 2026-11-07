@@ -55,16 +55,16 @@ T: Fn(),
 // would create a second screen writer with its own cursor position.
 use palladiumos::{println, serial_print, serial_println};
 
-use bootloader::{BootInfo, entry_point};
+use bootloader_api::{BootInfo, entry_point};
 use palladiumos::hlt_loop;
 use palladiumos::task::{Task, simple_executor::SimpleExecutor};
 
-entry_point!(kernel_main);
+entry_point!(kernel_main, config = &palladiumos::BOOTLOADER_CONFIG);
 extern crate alloc;
 use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
 
     // start function
-    fn kernel_main(boot_info: &'static BootInfo) -> ! {
+    fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         use palladiumos::allocator;
         use palladiumos::memory;
         use palladiumos::memory::BootInfoFrameAllocator;
@@ -74,15 +74,25 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
 
         use palladiumos::{boot_failed, boot_info, boot_ok};
 
+        // The console draws into the bootloader's framebuffer (the kernel
+        // keeps it for good); then the boot information is only read.
+        if let Some(fb) = core::mem::replace(&mut boot_info.framebuffer, bootloader_api::info::Optional::None).into_option() {
+            palladiumos::vga_buffer::init_framebuffer(fb);
+        }
+        let boot_info: &'static BootInfo = boot_info;
+        {
+            let (addr, stride, cols, rows) = palladiumos::vga_buffer::grid_info();
+            serial_println!("console: {}x{} cells, grid at {:#x} ({} cells per row)", cols, rows, addr, stride);
+        }
         // A Linux-style boot log (see boot.rs; `dmesg` shows it again).
         palladiumos::vga_buffer::clear_screen();
         palladiumos::boot::set_verbose(true);
         boot_info!("PalladiumOS {} (x86_64) is booting", palladiumos::VERSION);
         palladiumos::init();
 
-        let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
-        let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-        assert_eq!(phys_mem_offset.as_u64(), memory::PHYS_OFFSET, "physical-memory-offset in Cargo.toml changed?");
+        let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_regions) };
+        let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset.into_option().expect("no physical memory mapping"));
+        assert_eq!(phys_mem_offset.as_u64(), memory::PHYS_OFFSET, "BOOTLOADER_CONFIG's physical memory mapping changed?");
         let mut mapper = unsafe { memory::init(phys_mem_offset) };
         memory::PHYS_MEM_OFFSET.store(phys_mem_offset.as_u64(), core::sync::atomic::Ordering::Relaxed);
         boot_ok!("Set up paging (physical memory mapped at {:#x})", phys_mem_offset.as_u64());

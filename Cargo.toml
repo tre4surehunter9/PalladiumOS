@@ -1,52 +1,28 @@
 [package]
 name = "palladiumos"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2024"
 
 # The kernel lives in the higher half (it's linked at 0xffffffff80000000,
 # see .cargo/config.toml), so the whole lower half is for programs.
-[package.metadata.bootloader]
-physical-memory-offset = "0xFFFF800000000000"
-kernel-stack-address = "0xFFFFFE8000000000"
-kernel-stack-size = 128
-boot-info-address = "0xFFFFFF0000000000"
-
-[package.metadata.bootimage]
-test-timeout = 300 # (seconds)
-# The ext2 data disk (created by build.rs) is attached as the second IDE
-# disk, and the system disk (/usr, rebuilt every build) as the third.
-run-args = [
-    "-drive", "format=raw,file=target/disk.img,index=1,media=disk",
-    "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
-    # Room for Alpine Linux, mounted at /alpine (see /bin/alpine).
-    "-drive", "format=raw,file=target/alpine.img,index=3,media=disk",
-    # A network card on QEMU's user network (NAT; DHCP and DNS built in).
-    # Port 2222 on this machine (localhost only) reaches PalladiumOS's SSH
-    # server: ssh -p 2222 root@localhost
-    "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22", "-device", "rtl8139,netdev=net0",
-]
-test-args = [
-    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio",
-    "-display", "none",
-    "-drive", "format=raw,file=target/test-disk.img,index=1,media=disk",
-    "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
-    "-netdev", "user,id=net0", "-device", "rtl8139,netdev=net0",
-]
-test-success-exit-code = 33     # (0x10 << 1 | 1
+# (QEMU's arguments for cargo run and cargo test are in tools/runner.)
 
 [dependencies.lazy_static]
 version = "1.0"
 features = ["spin_no_std"]
 
 [dependencies]
-bootloader = { version = "0.9", features = ["map_physical_memory"]}
+# The kernel's side of the bootloader (bootloader 0.11: BIOS or UEFI, a
+# framebuffer). tools/runner builds the bootable disk images.
+bootloader_api = "0.11.17"
+# The console's font (pre-rendered Noto Sans Mono, 9x16).
+noto-sans-mono-bitmap = { version = "0.2", default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
 # TCP/IP (no_std): Ethernet, IPv4, ARP, DHCP, TCP, UDP, ICMP.
 smoltcp = { version = "0.14", default-features = false, features = [
     "alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "proto-dhcpv4",
     "socket-tcp", "socket-udp", "socket-icmp", "socket-dhcpv4", "socket-raw",
     "auto-icmp-echo-reply", # answer pings
 ] }
-volatile = "0.2.6"
 spin = "0.5.2"
 # step_trait is left out: it no longer compiles on current nightly (Step trait changed)
 x86_64 = { version = "0.14.2", default-features = false, features = ["instructions", "abi_x86_interrupt", "const_fn"] }
@@ -81,7 +57,8 @@ harness = false
 panic = "abort"
 # Optimized, but with debug checks (overflow checks, assertions, the kernel
 # stack canary): cargo run and the tests are several times faster than
-# unoptimized code. Release images: cargo bootimage --release.
+# unoptimized code. Release kernels: cargo build --release (images: see
+# tools/runner).
 opt-level = 2
 
 [profile.release]

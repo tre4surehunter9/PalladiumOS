@@ -1,0 +1,12 @@
+[package]
+name = "palladium-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A host program, not part of the kernel's build: it turns a kernel ELF into
+# a bootable disk image (with the bootloader crate) and starts QEMU.
+[workspace]
+
+[dependencies]
+bootloader = "0.11.17"

@@ -10,23 +10,24 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec;
-use bootloader::{entry_point, BootInfo};
+use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use palladiumos::fdfs::Fdfs;
 use palladiumos::filesystem;
 use palladiumos::shell::process_command;
 
-entry_point!(main);
+entry_point!(main, config = &palladiumos::BOOTLOADER_CONFIG);
 
-fn main(boot_info: &'static BootInfo) -> ! {
+fn main(boot_info: &'static mut BootInfo) -> ! {
+    let boot_info: &'static BootInfo = boot_info;
     use palladiumos::allocator;
     use palladiumos::memory::{self, BootInfoFrameAllocator};
     use x86_64::VirtAddr;
 
     palladiumos::init();
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset.into_option().unwrap());
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_regions) };
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
 
     test_main();
