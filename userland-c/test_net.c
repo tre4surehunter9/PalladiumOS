@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -195,6 +196,22 @@ int main(void)
     struct sockaddr_in nobody = loopback(7999);
     c = socket(AF_INET, SOCK_STREAM, 0);
     CHECK(connect(c, (struct sockaddr *)&nobody, sizeof nobody) == -1 && errno == ECONNREFUSED);
+    close(c);
+    /* The same, non-blocking (as ssh clients do): select says writable,
+     * and SO_ERROR says why. */
+    c = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    int r = connect(c, (struct sockaddr *)&nobody, sizeof nobody);
+    CHECK(r == -1 && (errno == EINPROGRESS || errno == ECONNREFUSED));
+    if (errno == EINPROGRESS) {
+        fd_set w;
+        FD_ZERO(&w);
+        FD_SET(c, &w);
+        struct timeval tv = {3, 0};
+        CHECK(select(c + 1, NULL, &w, NULL, &tv) == 1 && FD_ISSET(c, &w));
+        int err = 0;
+        socklen_t el = sizeof err;
+        CHECK(getsockopt(c, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == ECONNREFUSED);
+    }
     close(c);
 
     /* ---- non-blocking: EINPROGRESS, poll, EAGAIN ---- */

@@ -646,7 +646,10 @@ impl Socket {
                 let s = set.get::<tcp::Socket>(*handle);
                 let connecting = matches!(s.state(), tcp::State::SynSent | tcp::State::SynReceived);
                 let closed = s.state() == tcp::State::Closed;
-                (s.can_recv() || (!s.may_recv() && !connecting), s.can_send() && !connecting, closed)
+                // A closed socket (a refused or reset connection) is writable
+                // too, as on Linux: a program waiting for a non-blocking
+                // connect wakes up and finds the error with SO_ERROR.
+                (s.can_recv() || (!s.may_recv() && !connecting), (s.can_send() && !connecting) || closed, closed)
             })
             .unwrap_or((false, false, true)),
             State::Listening { waiting, .. } => {

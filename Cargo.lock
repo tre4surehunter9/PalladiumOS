@@ -192,7 +192,7 @@ checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
 
 [[package]]
 name = "palladiumos"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "bootloader",
  "conquer-once",
