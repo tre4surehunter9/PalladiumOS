@@ -178,7 +178,7 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
         buf
     };
 
-    let mut maps = process::with_current(|p| core::mem::take(&mut p.maps));
+    let mut maps = process::with_current_mm(|mm| core::mem::take(&mut mm.maps));
     let result = (|| {
         let start = if fixed {
             if !in_user_space(addr, addr + len) {
@@ -205,7 +205,7 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
         remember(&mut maps, start, start + len);
         Ok(start)
     })();
-    process::with_current(|p| p.maps = maps);
+    process::with_current_mm(|mm| mm.maps = maps);
     match result {
         Ok(start) => start as i64,
         Err(e) => -e,
@@ -222,7 +222,7 @@ pub fn sys_munmap(addr: u64, len: u64) -> i64 {
         return -EINVAL;
     }
     unmap_pages(addr, end);
-    process::with_current(|p| forget(&mut p.maps, addr, end));
+    process::with_current_mm(|mm| forget(&mut mm.maps, addr, end));
     0
 }
 
@@ -239,7 +239,7 @@ pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> i64 {
     if !in_user_space(addr, end) {
         return -ENOMEM;
     }
-    let maps = process::with_current(|p| p.maps.clone());
+    let maps = process::with_current_mm(|mm| mm.maps.clone());
     let reserved = |a: u64| maps.iter().any(|&(s, e)| s <= a && a < e);
     let flags = flags_for(prot);
     for a in (addr..end).step_by(4096) {

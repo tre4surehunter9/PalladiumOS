@@ -15,6 +15,7 @@
 //! or reading the keyboard while others want to run).
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -75,6 +76,21 @@ pub enum State {
     Zombie(ExitReason),
 }
 
+/// A process's memory bookkeeping (shared by its threads).
+#[derive(Clone)]
+pub struct Mm {
+    /// Current program break (end of the brk heap), see sys_brk.
+    pub brk: u64,
+    /// Memory mapped with mmap (start, end), sorted.
+    pub maps: Vec<(u64, u64)>,
+}
+
+impl Mm {
+    fn new() -> Arc<Mutex<Mm>> {
+        Arc::new(Mutex::new(Mm { brk: HEAP_BASE, maps: Vec::new() }))
+    }
+}
+
 pub struct Process {
     pub pid: u64,
     pub ppid: u64,
@@ -85,9 +101,12 @@ pub struct Process {
     /// None for task 0, which runs on the boot stack.
     kernel_stack: Option<Box<[u8]>>,
     pub p4: PhysFrame,
-    pub files: Files,
+    /// Open files and the working directory: shared by a process's threads.
+    pub files: Arc<Mutex<Files>>,
     /// Current program break (end of the brk heap), see sys_brk.
-    pub brk: u64,
+    /// The heap end and mmap list: shared by a process's threads (they share
+    /// the address space).
+    pub mm: Arc<Mutex<Mm>>,
     /// Process group (for Ctrl-C and kill(-pgid)).
     pub pgid: u64,
     /// Signals sent but not yet acted on (bit n-1 = signal n).
@@ -122,8 +141,12 @@ pub struct Process {
     /// FS and GS base addresses (thread-local storage, see arch_prctl).
     fs_base: u64,
     gs_base: u64,
-    /// Memory mapped with mmap (start, end), sorted.
-    pub maps: Vec<(u64, u64)>,
+    /// The thread group (process) this thread belongs to: its first
+    /// thread's pid. getpid() returns it; gettid() returns `pid`.
+    pub tgid: u64,
+    /// set_tid_address / CLONE_CHILD_CLEARTID: zeroed and futex-woken when
+    /// the thread exits (pthread_join waits on it).
+    clear_child_tid: u64,
     /// A vfork child using its parent's address space (until it calls
     /// execve or exits; the parent waits meanwhile). It must not free `p4`.
     borrowed_vm: bool,
@@ -222,8 +245,8 @@ pub fn init() {
         kernel_rsp: 0,
         kernel_stack: None,
         p4: memory::kernel_p4(),
-        files: Files::new("/"),
-        brk: HEAP_BASE,
+        files: Arc::new(Mutex::new(Files::new("/"))),
+        mm: Mm::new(),
         pgid: 0,
         pending: 0,
         actions: Box::new([SigAction::DEFAULT; MAX_SIGNAL as usize]),
@@ -242,7 +265,8 @@ pub fn init() {
         fpu: Box::new(crate::fpu::FpuState::initial()),
         fs_base: 0,
         gs_base: 0,
-        maps: Vec::new(),
+        tgid: 0,
+        clear_child_tid: 0,
         borrowed_vm: false,
     }));
     CURRENT.store(0, Ordering::SeqCst);
@@ -258,9 +282,18 @@ pub fn current_ppid() -> u64 {
 
 /// Run `f` on the current process's open files.
 pub fn with_current_files<T>(f: impl FnOnce(&mut Files) -> T) -> T {
-    let mut table = TABLE.lock();
-    let p = table.get_mut(&current_pid()).expect("no current process");
-    f(&mut p.files)
+    // (The table lock is released first: the files are shared with other
+    // threads, and have their own lock.)
+    let files = TABLE.lock().get(&current_pid()).expect("no current process").files.clone();
+    let mut guard = files.lock();
+    f(&mut guard)
+}
+
+/// Run `f` on the current process's memory bookkeeping (brk, mmap list).
+pub fn with_current_mm<T>(f: impl FnOnce(&mut Mm) -> T) -> T {
+    let mm = TABLE.lock().get(&current_pid()).expect("no current process").mm.clone();
+    let mut guard = mm.lock();
+    f(&mut guard)
 }
 
 /// (pid, ppid, name, state) of every process, for debugging and tests.
@@ -449,7 +482,9 @@ pub fn exit_current(reason: ExitReason) -> ! {
         let ppid = {
             let p = table.get_mut(&cur).unwrap();
             p.state = State::Zombie(reason);
-            p.files = Files::empty(); // closes everything (pipe ends included)
+            // Closes everything (pipe ends included) unless other threads
+            // still share the files.
+            p.files = Arc::new(Mutex::new(Files::empty()));
             p.ppid
         };
         for p in table.values_mut() {
@@ -584,13 +619,25 @@ fn fork_with(frame: &SyscallFrame, share: bool, stack: u64) -> i64 {
     // The child gets the FPU registers as they are now.
     let mut fpu = Box::new(crate::fpu::FpuState::initial());
     crate::fpu::save(&mut fpu);
-    let (p4, files, name, ppid, brk, pgid, (actions, blocked), argv, exe, cred, (fs_base, gs_base, maps)) = {
+    let (p4, files, name, ppid, mm, pgid, (actions, blocked), argv, exe, cred, (fs_base, gs_base)) = {
         let table = TABLE.lock();
         if table.len() >= MAX_PROCESSES {
             return -EAGAIN;
         }
         let cur = table.get(&current_pid()).unwrap();
-        (cur.p4, cur.files.clone(), cur.name.clone(), cur.pid, cur.brk, cur.pgid, (cur.actions.clone(), cur.blocked), cur.argv.clone(), cur.exe.clone(), cur.cred.clone(), (cur.fs_base, cur.gs_base, cur.maps.clone()))
+        (
+            cur.p4,
+            Arc::new(Mutex::new(cur.files.lock().clone())),
+            cur.name.clone(),
+            cur.pid,
+            Arc::new(Mutex::new(cur.mm.lock().clone())), // copied with the address space
+            cur.pgid,
+            (cur.actions.clone(), cur.blocked),
+            cur.argv.clone(),
+            cur.exe.clone(),
+            cur.cred.clone(),
+            (cur.fs_base, cur.gs_base),
+        )
     };
 
     let child_p4 = if share {
@@ -619,7 +666,7 @@ fn fork_with(frame: &SyscallFrame, share: bool, stack: u64) -> i64 {
         kernel_stack: Some(kernel_stack),
         p4: child_p4,
         files,
-        brk, // the heap pages were copied with the rest of the address space
+        mm,
         pgid,
         pending: 0,
         actions, // handlers and the mask are inherited; pending signals and alarms aren't
@@ -638,7 +685,8 @@ fn fork_with(frame: &SyscallFrame, share: bool, stack: u64) -> i64 {
         fpu,
         fs_base,
         gs_base,
-        maps,
+        tgid: pid,
+        clear_child_tid: 0,
         borrowed_vm: share,
     };
     match add_process(child) {
@@ -770,12 +818,11 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
     let old_p4 = {
         let mut table = TABLE.lock();
         let p = table.get_mut(&current_pid()).unwrap();
-        p.files.close_on_exec();
+        p.files.lock().close_on_exec();
         p.name = basename(&path);
         p.argv = argv.clone();
-        p.exe = crate::filesystem::normalize(&p.files.cwd, &path);
-        p.brk = HEAP_BASE; // the new program starts with an empty heap
-        p.maps.clear();
+        p.exe = crate::filesystem::normalize(&p.files.lock().cwd, &path);
+        p.mm = Mm::new(); // the new program starts with an empty heap and no mmaps
         p.fs_base = 0;
         p.gs_base = 0;
         let borrowed = core::mem::replace(&mut p.borrowed_vm, false);
@@ -913,8 +960,8 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         kernel_rsp,
         kernel_stack: Some(kernel_stack),
         p4: image.p4,
-        files: Files::new(&cwd),
-        brk: HEAP_BASE,
+        files: Arc::new(Mutex::new(Files::new(&cwd))),
+        mm: Mm::new(),
         pgid: pid, // leader of a new process group
         pending: 0,
         actions: Box::new([SigAction::DEFAULT; MAX_SIGNAL as usize]),
@@ -933,7 +980,8 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         fpu: Box::new(crate::fpu::FpuState::initial()),
         fs_base: 0,
         gs_base: 0,
-        maps: Vec::new(),
+        tgid: pid,
+        clear_child_tid: 0,
         borrowed_vm: false,
     };
     add_process(process).map_err(|_| {
@@ -991,7 +1039,7 @@ pub fn sys_brk(addr: u64) -> i64 {
     let (p4, current) = {
         let table = TABLE.lock();
         let p = table.get(&current_pid()).unwrap();
-        (p.p4, p.brk)
+        (p.p4, p.mm.lock().brk)
     };
     if addr < HEAP_BASE || addr > HEAP_BASE + HEAP_MAX {
         return current as i64;
@@ -1049,7 +1097,7 @@ pub fn sys_brk(addr: u64) -> i64 {
     }
     drop(alloc);
 
-    TABLE.lock().get_mut(&current_pid()).unwrap().brk = addr;
+    with_current_mm(|mm| mm.brk = addr);
     addr as i64
 }
 
@@ -1852,6 +1900,13 @@ pub fn snapshot(only: Option<u64>) -> Vec<ProcInfo> {
         .map(|p| {
             let running = if p.pid == cur { now.saturating_sub(p.running_since) } else { 0 };
             let zombie = matches!(p.state, State::Zombie(_));
+            // Lock each once, here: a guard made inside the struct literal
+            // below would live until its end, and a second lock() would spin.
+            let (cwd, fds) = {
+                let files = p.files.lock();
+                (files.cwd.clone(), files.describe())
+            };
+            let brk = p.mm.lock().brk;
             ProcInfo {
                 pid: p.pid,
                 ppid: p.ppid,
@@ -1859,13 +1914,13 @@ pub fn snapshot(only: Option<u64>) -> Vec<ProcInfo> {
                 name: p.name.clone(),
                 argv: p.argv.clone(),
                 exe: p.exe.clone(),
-                cwd: p.files.cwd.clone(),
+                cwd,
                 state: state_letter(p.state),
                 start_tick: p.start_tick,
                 cpu_ticks: p.cpu_ticks + running,
                 pages: if p.kernel_stack.is_some() && !zombie { memory::count_user_pages(p.p4) } else { 0 },
-                heap: p.brk.saturating_sub(HEAP_BASE),
-                fds: p.files.describe(),
+                heap: brk.saturating_sub(HEAP_BASE),
+                fds,
                 kernel: p.kernel_stack.is_none(),
                 cred: p.cred.clone(),
                 uid: p.cred.ruid,
