@@ -29,8 +29,9 @@ use std::process::{exit, Command};
 use std::time::{Duration, Instant};
 
 /// QEMU's arguments for `cargo run`: the data disk, the system disk (/usr),
-/// the Alpine disk, and a network card (port 2222 on this machine, localhost
-/// only, reaches PalladiumOS's SSH server).
+/// the Alpine disk, and a network card. Ports on this machine (localhost
+/// only) reach PalladiumOS: 2222 its SSH server (22), 8080 a web server on
+/// port 80 (Apache, BusyBox httpd...).
 const RUN_ARGS: &[&str] = &[
     // 1 GiB of memory: Node.js and other big programs don't fit in
     // QEMU's default 128 MiB.
@@ -41,7 +42,7 @@ const RUN_ARGS: &[&str] = &[
     "-drive", "format=raw,file=target/disk.img,index=1,media=disk",
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
     "-drive", "format=raw,file=target/alpine.img,index=3,media=disk",
-    "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22", "-device", "rtl8139,netdev=net0",
+    "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:80", "-device", "rtl8139,netdev=net0",
     // A USB keyboard (QEMU sends the window's keys to it, not to PS/2).
     "-device", "qemu-xhci", "-device", "usb-kbd",
 ];
