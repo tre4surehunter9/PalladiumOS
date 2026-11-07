@@ -2,7 +2,7 @@
 
 ## An OS (more of a kernel) coded entirely in Rust
 
-![Screenshot](Screenshot_20260811_212123.png)
+![Screenshot](Screenshot_20261106_231314.png)
 
 ## Notice
 > [!WARNING]
