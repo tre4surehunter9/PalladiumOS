@@ -31,7 +31,8 @@
 * **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control
 * **Users and permissions**: login, passwords, POSIX file permissions, setuid programs, `su`
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
-* **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink
+* **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink, and an **SSH server** (Dropbear): log in from your own terminal with `ssh -p 2222 root@localhost`
+* **Terminals**: pseudo-terminals (`/dev/ptmx`, `/dev/pts/N`), sessions and controlling terminals, job control
 * **A userland**: a POSIX-style shell, about 50 of PalladiumOS's own tools, and ported software: BusyBox, Lua, dash, MicroPython, fastfetch and TinyCC (a C compiler that runs inside PalladiumOS)
 * **A Linux-style boot log** with `[  OK  ]` lines, and `dmesg`
 
@@ -108,18 +109,19 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 4 | stat | yes |
 | 5 | fstat | yes |
 | 6 | lstat | yes |
-| 7 / 271 | poll, ppoll | yes (pipes, sockets, the terminal; files are always ready) |
+| 7 / 271 | poll, ppoll | yes (pipes, sockets, terminals; files are always ready) |
 | 8 | lseek | yes |
 | 9 / 10 / 11 | mmap, mprotect, munmap | anonymous and private file mappings (no writable shared file mappings) |
 | 12 | brk | yes (the heap behind `userlib`'s allocator) |
 | 13 | rt_sigaction | yes (handlers, `SA_RESTART`, `SA_NODEFER`, `SA_RESETHAND`, `SA_NOCLDSTOP`, `sa_mask`) |
 | 14 | rt_sigprocmask | yes |
 | 15 | rt_sigreturn | yes |
-| 16 | ioctl | console: `TCGETS`/`TCSETS` (raw and cooked mode), `TIOCGWINSZ`, `TIOCGPGRP`/`TIOCSPGRP`; sockets: `FIONBIO`, `FIONREAD`, and the interface queries (`SIOCGIFNAME`, `SIOCGIFADDR`...) |
+| 16 | ioctl | terminals: `TCGETS`/`TCSETS` (raw and cooked mode), `TIOCGWINSZ`/`TIOCSWINSZ`, `TIOCGPGRP`/`TIOCSPGRP`, `TIOCSCTTY`/`TIOCNOTTY`, `TIOCGSID`, `TCFLSH`, and for pseudo-terminals `TIOCGPTN`/`TIOCSPTLCK`; pipes and sockets: `FIONBIO`, `FIONREAD`; sockets: the interface queries (`SIOCGIFNAME`, `SIOCGIFADDR`...) |
 | 17 / 18 | pread64, pwrite64 | yes |
 | 19 / 20 | readv, writev | yes |
 | 21 | access | yes |
 | 22 | pipe | yes |
+| 23 / 270 | select, pselect6 | yes (on top of poll) |
 | 24 | sched_yield | yes |
 | 32 | dup | yes |
 | 33 | dup2 | yes |
@@ -158,6 +160,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 109 | setpgid | yes |
 | 110 | getppid | yes |
 | 111 | getpgrp | yes |
+| 112 / 124 | setsid, getsid | yes |
 | 115/116 | getgroups, setgroups | yes |
 | 118/120 | getresuid, getresgid | yes |
 | 121 | getpgid | yes |
@@ -179,7 +182,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 258-263 | mkdirat, newfstatat, unlinkat | yes |
 | 280 | utimensat | modification time |
 | 292 | dup3 | yes (`O_CLOEXEC`) |
-| 293 | pipe2 | yes (`O_CLOEXEC`) |
+| 293 | pipe2 | yes (`O_CLOEXEC`, `O_NONBLOCK`) |
 | 318 | getrandom | yes (RDRAND when available) |
 | 332 | statx | yes |
 
@@ -215,6 +218,7 @@ Real-world programs are built from their original source by scripts in `tools/po
 * `tools/ports/busybox.sh`: BusyBox 1.38.0, about 400 Unix tools in one program (`vi`, `awk`, `sed`, `find`, `tar`, `gzip`, `diff`, `cmp`, `cut`, `xargs`, `printf`, `less`, `md5sum`, `expr`, the `ash` shell...). Their links are in `/usr/bin` on the system disk, and `PATH` is `/bin:/usr/bin`. Where BusyBox's version is clearly better (`cp date env grep head mv readlink sort tail touch uniq`), `/bin/NAME` links to it and PalladiumOS's own version moves to `/bin/palladium`. The rest of PalladiumOS's tools (`ls`, `ps`, `top`, `free`, `stat`, the account tools, `edit`...) stay the defaults: they match its `/proc`, password format and tests. `busybox NAME` runs BusyBox's version of anything; without BusyBox built, PalladiumOS's own tools are used.
 * `tools/ports/micropython.sh`: MicroPython 1.29.0 (the unix port, without threads, FFI or TLS). The `>>>` REPL, scripts (also as `#!/bin/micropython`), files, `os.system`, `time`, `json`, `re`, `hashlib`..., and Ctrl-C as `KeyboardInterrupt`. The heap is 2 MB by default (`micropython -X heapsize=8M` for more).
 * `tools/ports/fastfetch.sh`: fastfetch 2.71.0 (needs `cmake` on the host). Shows the system with a PalladiumOS logo (configured in `/etc/xdg/fastfetch/config.jsonc`; the OS name comes from `/etc/os-release`).
+* `tools/ports/dropbear.sh`: Dropbear SSH 2026.94 (GPG-signed release, checksum-pinned): `dropbear` (the server), `dbclient` (a client), `dropbearkey` and `scp`. See [SSH](#ssh).
 
 The binaries are ordinary Linux static executables too, so they can be run on a Linux host to compare behaviour.
 
@@ -234,11 +238,33 @@ PalladiumOS boots into `login`. A fresh disk has two accounts, `root` and `user`
 * Permissions are enforced POSIX-style: read/write/execute for owner, group and others; search (`x`) is needed on every directory in a path; creating, removing and renaming need write permission on the directory; in sticky directories (like `/tmp`, mode 1777) only a file's owner may remove it. Root may read and write anything.
 * Only the owner may `chmod` a file; only root may `chown` it to someone else. `access()` checks with the real IDs.
 * Setuid/setgid programs run as the file's owner/group (`su` and `passwd` are setuid root); the bits are ignored on `#!` scripts.
-* Accounts live in `/etc/passwd`, `/etc/group` and `/etc/shadow` (mode 600). Passwords are hashed with iterated, salted SHA-256 (`$sha256$salt$hash`, PalladiumOS's own format).
+* Accounts live in `/etc/passwd`, `/etc/group` and `/etc/shadow` (mode 600). Passwords are hashed with SHA-256 crypt (`$5$salt$hash`), the standard format Linux and libc's `crypt()` use, so C programs like Dropbear can check them. Hashes in the format PalladiumOS 0.5.0 and earlier wrote (`$sha256$...`) still work; setting the password again converts them.
 * Tools: `login`, `su [-] [user] [-c cmd]`, `passwd [-d] [user]`, `whoami`, `id`, `groups`, `useradd [-u uid] [-G groups] name`, `userdel [-r] name`, `chown user[:group]`, `chgrp`. `ls -l` shows owners, and the prompt shows `user@palladium:~ $` (`#` for root).
 
 ## Files, Pipes and Signals
-Open files work like POSIX: an fd refers to a shared open file description, so after `fork` or `dup` both fds share one file offset. Pipes hold 16 KiB; readers wait for data and get end-of-file when every writer has closed, writers wait for room and get SIGPIPE/`EPIPE` when no reader is left. `O_CLOEXEC` fds are closed by `execve`.
+Open files work like POSIX: an fd refers to a shared open file description, so after `fork` or `dup` both fds share one file offset. Pipes hold 16 KiB; readers wait for data and get end-of-file when every writer has closed, writers wait for room and get SIGPIPE/`EPIPE` when no reader is left. With `O_NONBLOCK` (`pipe2`, `fcntl` or `FIONBIO`) they return `EAGAIN` instead of waiting. `O_CLOEXEC` fds are closed by `execve`.
+
+## Terminals and Sessions
+Besides the console, programs can make terminals of their own: **pseudo-terminals**. Opening `/dev/ptmx` gives the *master* end (the program playing the terminal, like an SSH server), and `/dev/pts/N` is the terminal programs run on (musl's `openpty`, `posix_openpt`, `grantpt`, `unlockpt` and `ptsname` work). Between them is a line discipline, as on Linux:
+* Typed input is echoed and edited a line at a time (Backspace, Ctrl-U, Ctrl-W; Ctrl-D is end-of-file), or handed over at once in raw mode (`VMIN`/`VTIME`). Ctrl-C, Ctrl-Z and Ctrl-\\ send SIGINT, SIGTSTP and SIGQUIT to the terminal's foreground process group. Output gets `\r\n` line ends.
+* The window size (`TIOCSWINSZ`) sends SIGWINCH to the foreground group.
+* Closing the master hangs up: the session gets SIGHUP and the terminal reads end-of-file. Once every program has closed the terminal, the master reads `EIO`.
+
+**Sessions** work as in POSIX: `setsid` starts one, and its leader gets a controlling terminal by opening one or with `TIOCSCTTY` (`login_tty` does both). `/dev/tty` is your controlling terminal (`/dev/console` is always the screen). A background process group reading its terminal gets SIGTTIN, so shells' job control works on pseudo-terminals too.
+
+## SSH
+`cargo run` forwards port 2222 on your machine (localhost only) to PalladiumOS's port 22. Start the server (it's built by `tools/build-all.sh`), give the account a password or a key, and log in from your own terminal:
+
+```sh
+# in PalladiumOS, as root
+passwd root                # SSH only lets accounts with a password (or a key) in
+dropbear -R                # -R: make host keys in /etc/dropbear the first time
+
+# on your machine
+ssh -p 2222 root@localhost
+```
+
+You get a PalladiumOS shell in your own terminal, with its scrolling, copy and paste and window size. Keys work too: put your public key in `~/.ssh/authorized_keys` (mode 600, in a directory of mode 700). `dbclient` and `scp` connect to other machines from inside PalladiumOS.
 
 Signals work as in POSIX:
 * Handlers (`sigaction`), with the Linux x86_64 signal frame and `rt_sigreturn`, so a C library's handlers work unchanged. A handler can interrupt a program in the middle of a computation (the timer interrupt saves every register), not only at syscalls.
@@ -269,7 +295,7 @@ The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh
 | `/bin` | memory | the bundled programs, refreshed every boot |
 | `/usr` | ext2 on the system disk, read-only | BusyBox's links, musl's headers and libraries (for tcc), rebuilt every build as `target/usr.img` |
 | `/tmp` | memory | cleared on reboot |
-| `/dev` | devfs | `null`, `zero`, `random`, `urandom`, `tty`, `console` |
+| `/dev` | devfs | `null`, `zero`, `random`, `urandom`, `tty`, `console`, `ptmx`, `pts/N` |
 | `/proc` | procfs | live process and system information (below) |
 
 The kernel has a small VFS layer: every filesystem implements one interface, and paths are resolved through the mount table. The ext2 driver reads and writes files (including indirect blocks), creates and removes files and directories, and frees a file deleted while open only when it's closed. Linux tools can check and read the disk: `e2fsck -f target/disk.img`, `debugfs -R "ls -l /" target/disk.img`. Run `sync` (or `poweroff`/`reboot`, which sync first) before closing QEMU.
@@ -285,7 +311,7 @@ The kernel reports each boot step like Linux with systemd: timestamped facts (`[
 You need Rust (the nightly toolchain in `rust-toolchain.toml` is picked automatically, with `rust-src` and `llvm-tools-preview`), [bootimage](https://github.com/rust-osdev/bootimage) (`cargo install bootimage`), QEMU, and `mke2fs` (e2fsprogs, for the disk images). Then:
 
 ```sh
-cargo run                  # build and boot in QEMU, with a disk and a network card
+cargo run                  # build and boot in QEMU, with a disk and a network card (SSH: port 2222)
 tools/build-all.sh         # optional: musl and the ported software (see above)
 ```
 

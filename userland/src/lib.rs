@@ -20,6 +20,7 @@ use core::fmt;
 
 /// Raw syscalls. Numbers match Linux x86_64.
 pub mod sys {
+    pub const GETRANDOM: u64 = 318;
     use super::asm;
 
     pub const READ: u64 = 0;
@@ -157,6 +158,11 @@ pub fn read(fd: i32, buf: &mut [u8]) -> isize {
 pub fn exit(status: i32) -> ! {
     unsafe { sys::syscall3(sys::EXIT, status as u64, 0, 0) };
     loop {} // unreachable: exit never returns
+}
+
+/// getrandom(2): fill `buf` with random bytes. Returns how many.
+pub fn getrandom(buf: &mut [u8]) -> isize {
+    unsafe { sys::syscall3(sys::GETRANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0) as isize }
 }
 
 pub fn getpid() -> i32 {

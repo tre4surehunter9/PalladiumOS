@@ -35,7 +35,9 @@ use crate::vfs::{self, Files};
 
 /// Processes and threads together.
 pub const MAX_PROCESSES: usize = 64;
-const KERNEL_STACK_SIZE: usize = 16 * 1024;
+/// Each process's kernel stack (debug builds need plenty: unoptimized code
+/// has big stack frames, and syscall dispatch is one big function).
+const KERNEL_STACK_SIZE: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitReason {
@@ -333,8 +335,17 @@ pub fn others_ready() -> bool {
 
 /// Create a kernel stack for a new process whose first run "returns" to
 /// ring 3 through `syscall_return` with the registers in `frame`.
+/// Written at the bottom of every kernel stack; schedule() checks it, so an
+/// overflow (which would silently overwrite the heap next to the stack) is
+/// caught.
+const STACK_CANARY: u64 = 0x57AC_C0DE_DEAD_BEEF;
+const CANARY_WORDS: usize = 8;
+
 fn new_kernel_stack(frame: &SyscallFrame) -> (Box<[u8]>, u64) {
-    let stack = vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice();
+    let mut stack = vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice();
+    for w in stack[..CANARY_WORDS * 8].chunks_mut(8) {
+        w.copy_from_slice(&STACK_CANARY.to_le_bytes());
+    }
     let top = (stack.as_ptr() as u64 + stack.len() as u64) & !0xf;
     let frame_size = core::mem::size_of::<SyscallFrame>() as u64;
     let frame_addr = top - frame_size;
@@ -370,6 +381,16 @@ fn basename(path: &str) -> String {
 /// is still runnable and nothing else is ready, return immediately; if it
 /// can't run (waiting or exited) and nothing is ready, halt until something is.
 pub fn schedule() {
+    {
+        let table = TABLE.lock();
+        if let Some(p) = table.get(&current_pid()) {
+            if let Some(stack) = &p.kernel_stack {
+                if stack[..CANARY_WORDS * 8].chunks(8).any(|w| u64::from_le_bytes(w.try_into().unwrap()) != STACK_CANARY) {
+                    panic!("kernel stack overflow in pid {} ({})", p.pid, p.name);
+                }
+            }
+        }
+    }
     // Did we halt while waiting? Then the wait isn't CPU time.
     let mut idled = false;
     interrupts::without_interrupts(|| loop {
@@ -480,6 +501,14 @@ pub fn idle_halt() {
 /// Let other ready processes run (sched_yield).
 pub fn yield_now() {
     schedule();
+    // Let pending interrupts in (keys, the timer, the network card). Two
+    // processes waiting in the kernel by yielding to each other (a shell
+    // reading the keyboard, a server in select) would otherwise never take
+    // them, and wait forever. Callers are at points where idle_halt would
+    // enable interrupts too.
+    interrupts::enable();
+    core::hint::spin_loop(); // (sti takes effect after one more instruction)
+    interrupts::disable();
 }
 
 /// Called from the timer interrupt when it fires in ring 3.
@@ -1641,6 +1670,14 @@ fn restartable(num: u64) -> bool {
     !matches!(num, SYS_NANOSLEEP | SYS_PAUSE | SYS_RT_SIGSUSPEND)
 }
 
+/// Syscalls that report EINTR after a handler even with SA_RESTART, as
+/// Linux's do (signal(7)): waiting for any of several things. Programs
+/// rely on it: a handler sets a flag, and the select loop sees it.
+/// (Stopped and continued with no handler, they still carry on.)
+fn restartable_after_handler(num: u64) -> bool {
+    restartable(num) && !matches!(num, SYS_POLL | SYS_PPOLL | SYS_SELECT | SYS_PSELECT6 | SYS_CLOCK_NANOSLEEP)
+}
+
 /// Act on pending signals before returning to ring 3 (after a syscall,
 /// with its number and result, or from the timer). A handler is run by
 /// rewriting `frame` so the program "returns" into it; the default action
@@ -1691,7 +1728,7 @@ pub fn handle_signals(frame: &mut SyscallFrame, syscall: Option<(u64, i64)>) {
         }
         (sig, act, old_mask)
     };
-    if matches!(syscall, Some((num, ret)) if ret == -EINTR && restartable(num)) && act.flags & SA_RESTART != 0 {
+    if matches!(syscall, Some((num, ret)) if ret == -EINTR && restartable_after_handler(num)) && act.flags & SA_RESTART != 0 {
         restart(frame);
     }
     // No way back from the handler without a restorer (libc always gives one).

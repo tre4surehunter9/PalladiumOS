@@ -104,8 +104,12 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
     ),
     (
         "network",
-        "the network (BusyBox tools)",
+        "the network",
         &[
+            ("dropbear", "SSH server (dropbear -R: then ssh -p 2222 root@localhost)"),
+            ("dbclient", "SSH client (dbclient user@host)"),
+            ("scp", "copy files over SSH"),
+            ("dropbearkey", "make an SSH key (dropbearkey -t ed25519 -f FILE)"),
             ("wget", "download a URL (wget -O file http://...)"),
             ("nslookup", "look up a name in DNS"),
             ("ping", "check a host answers (as root: ping -c 3 HOST)"),

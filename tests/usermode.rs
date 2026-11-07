@@ -1414,7 +1414,7 @@ fn login_as_user_then_su_and_passwd() {
     assert!(file("/tmp/id1").starts_with("uid=1000(user) gid=1000(user)"), "{}", file("/tmp/id1"));
     assert!(file("/tmp/err1").contains("Permission denied"));
     assert_eq!(file("/tmp/who2"), "root\n");
-    assert!(file("/etc/shadow").contains("user:$sha256$"), "password was set");
+    assert!(file("/etc/shadow").contains("user:$5$"), "password was set (SHA-256 crypt)");
     assert!(filesystem::read_file("/etc/nope").is_err());
 
     // Now the password is needed: a wrong one fails, the right one works.
@@ -1454,7 +1454,7 @@ fn only_login_can_open_the_kernel_shell() {
     type_line("rootpw");
     type_line("exit");
     assert_eq!(run(prog("sh"), &["sh", "-i"]), Ok(0));
-    assert!(file("/etc/shadow").contains("root:$sha256$"));
+    assert!(file("/etc/shadow").contains("root:$5$"));
 
     palladiumos::task::keyboard::init_queue();
     // A user's shell exiting with 99 is just a logout, not the kernel shell:
@@ -1952,4 +1952,49 @@ fn pseudo_terminals_and_sessions() {
     assert_eq!(status, 0, "{}", file("/tmp/pty.out"));
     assert!(file("/tmp/pty.out").contains("all checks passed"));
     assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn passwords_in_the_old_format_still_work() {
+    setup_users();
+    // A hash PalladiumOS 0.5.0 and earlier wrote (password "oldpw").
+    let old = "$sha256$00112233aabbccdd$a4a99cc7bee7c355f7f5e1a738cb66be31ac349558a27625654b550b5564bda7";
+    let shadow = file("/etc/shadow");
+    let changed: alloc::string::String = shadow
+        .lines()
+        .map(|l| if l.starts_with("user:") { alloc::format!("user:{}:0:0:99999:7:::\n", old) } else { alloc::format!("{}\n", l) })
+        .collect();
+    filesystem::write_file("/etc/shadow", &changed).unwrap();
+    let _ = filesystem::make_dir("/tmp");
+    palladiumos::task::keyboard::init_queue();
+    type_line("user");
+    type_line("oldpw");
+    type_line("whoami > /tmp/who-old");
+    type_line("exit");
+    ctrl_d();
+    assert_eq!(run(prog("login"), &["login"]), Ok(99));
+    assert_eq!(file("/tmp/who-old"), "user\n");
+    filesystem::write_file("/etc/shadow", &shadow).unwrap();
+    assert!(only_kernel_left());
+}
+
+#[test_case]
+fn dropbear_ssh_over_loopback() {
+    if c_program("dropbear").is_none() || c_program("dbclient").is_none() {
+        return;
+    }
+    setup_users();
+    let _ = filesystem::make_dir("/tmp");
+    // A key for root, a server on 127.0.0.1:2022, and the client logging in
+    // with the key to run commands.
+    let script = "rm -f /tmp/k /tmp/db.pid; dropbearkey -t ed25519 -f /tmp/k > /dev/null 2>&1 && \
+        mkdir -p /root/.ssh && dropbearkey -y -f /tmp/k | grep '^ssh-' > /root/.ssh/authorized_keys && \
+        chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && \
+        dropbear -R -p 127.0.0.1:2022 -P /tmp/db.pid && sleep 1 && \
+        dbclient -y -i /tmp/k -p 2022 root@127.0.0.1 'echo over ssh; id -u; tty' > /tmp/ssh.out 2>&1; \
+        kill $(cat /tmp/db.pid)";
+    assert_eq!(sh(script), 0, "{}", file("/tmp/ssh.out"));
+    let out = file("/tmp/ssh.out");
+    assert!(out.contains("over ssh\n0\nnot a tty"), "{}", out);
+    assert_eq!(sh("ls /etc/dropbear | grep -q _host_key"), 0, "a host key was made");
 }

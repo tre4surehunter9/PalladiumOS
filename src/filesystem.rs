@@ -180,9 +180,11 @@ pub fn init_default_files() {
              \"terminal\", \"cpu\", \"memory\", \"swap\", \"disk\", \"localip\", \"locale\", \"break\", \"colors\"]\n}\n",
         ),
         ("/etc/xdg/fastfetch/palladium.txt", PALLADIUM_LOGO),
+        // Login shells (SSH servers only let users with one of these in).
+        ("/etc/shells", "/bin/sh\n/bin/dash\n/usr/bin/ash\n/bin/busybox\n"),
     ];
     let _ = make_dir("/etc");
-    for dir in ["/etc/xdg", "/etc/xdg/fastfetch"] {
+    for dir in ["/etc/xdg", "/etc/xdg/fastfetch", "/etc/dropbear"] {
         let _ = make_dir(dir);
     }
     for (path, text) in defaults {

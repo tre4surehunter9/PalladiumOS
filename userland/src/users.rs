@@ -5,10 +5,11 @@
 //!   /etc/group   name:x:gid:member,member
 //!   /etc/shadow  name:hash:...                          (root only)
 //!
-//! Password hashes look like `$sha256$SALT$HASH`: SHA-256 of salt and
-//! password, iterated 5000 times so guessing is slow. (This is
-//! PalladiumOS's own format, not compatible with Linux's crypt(3).) An
-//! empty hash means "no password".
+//! Password hashes are SHA-256 crypt, `$5$SALT$HASH`: the standard format
+//! Linux and libc's crypt(3) use (so C programs like Dropbear and BusyBox
+//! can check them). Hashes in PalladiumOS's older format, `$sha256$SALT$HASH`,
+//! still work; setting the password again converts them. An empty hash
+//! means "no password".
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -253,12 +254,74 @@ fn derive(salt: &str, password: &str) -> String {
     hex(&digest)
 }
 
-/// A random-ish salt from the CPU's cycle counter and the clock.
+/// The characters crypt(3) uses for salts and hashes (its base 64).
+const B64: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/// A 16-character salt from the kernel's random numbers.
 fn salt() -> String {
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    let (s, ns) = monotonic_time();
-    let seed = tsc ^ (s << 32) ^ ns ^ (getpid() as u64) << 48;
-    hex(&sha256(&seed.to_le_bytes())[..8])
+    let mut bytes = [0u8; 16];
+    if getrandom(&mut bytes) != 16 {
+        // (No getrandom: the cycle counter and the clock will do.)
+        let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+        let (s, ns) = monotonic_time();
+        let seed = tsc ^ (s << 32) ^ ns ^ (getpid() as u64) << 48;
+        bytes.copy_from_slice(&sha256(&seed.to_le_bytes())[..16]);
+    }
+    bytes.iter().map(|b| B64[(b & 63) as usize] as char).collect()
+}
+
+/// `len` bytes of `digest` repeated (SHA-crypt's P and S sequences).
+fn repeat_to(digest: &[u8; 32], len: usize) -> Vec<u8> {
+    digest.iter().copied().cycle().take(len).collect()
+}
+
+/// SHA-256 crypt (Ulrich Drepper's specification, as in glibc and musl):
+/// the encoded hash for `password` with `salt` (at most 16 characters
+/// used), and `rounds` (None: the default 5000, not written in the hash).
+pub fn sha256_crypt(password: &[u8], salt: &[u8], rounds: Option<usize>) -> String {
+    let rounds_part = rounds.map_or(String::new(), |r| format!("rounds={}$", r));
+    let rounds = rounds.unwrap_or(ROUNDS);
+    let salt = &salt[..salt.len().min(16)];
+    let (p, s) = (password, salt);
+    let b = sha256(&[p, s, p].concat());
+    let mut a_in = [p, s].concat();
+    a_in.extend(repeat_to(&b, p.len()));
+    let mut n = p.len();
+    while n > 0 {
+        a_in.extend_from_slice(if n & 1 != 0 { &b } else { p });
+        n >>= 1;
+    }
+    let a = sha256(&a_in);
+    let p_seq = repeat_to(&sha256(&p.repeat(p.len())), p.len());
+    let s_seq = repeat_to(&sha256(&s.repeat(16 + a[0] as usize)), s.len());
+    let mut c = a;
+    for i in 0..rounds {
+        let mut input = Vec::with_capacity(32 + 2 * p_seq.len() + s_seq.len() + 32);
+        if i & 1 != 0 { input.extend_from_slice(&p_seq) } else { input.extend_from_slice(&c) }
+        if i % 3 != 0 {
+            input.extend_from_slice(&s_seq);
+        }
+        if i % 7 != 0 {
+            input.extend_from_slice(&p_seq);
+        }
+        if i & 1 != 0 { input.extend_from_slice(&c) } else { input.extend_from_slice(&p_seq) }
+        c = sha256(&input);
+    }
+    // The result, in crypt's base 64 and byte order.
+    let mut out = String::new();
+    let mut put = |b2: u8, b1: u8, b0: u8, n: usize| {
+        let mut w = (b2 as u32) << 16 | (b1 as u32) << 8 | b0 as u32;
+        for _ in 0..n {
+            out.push(B64[(w & 63) as usize] as char);
+            w >>= 6;
+        }
+    };
+    for k in 0..10 {
+        let (i, j, l) = [(0, 10, 20), (21, 1, 11), (12, 22, 2), (3, 13, 23), (24, 4, 14), (15, 25, 5), (6, 16, 26), (27, 7, 17), (18, 28, 8), (9, 19, 29)][k];
+        put(c[i], c[j], c[l], 4);
+    }
+    put(0, c[31], c[30], 3);
+    format!("$5${}{}${}", rounds_part, String::from_utf8_lossy(salt), out)
 }
 
 /// Hash a password for /etc/shadow (an empty password gives "").
@@ -266,8 +329,12 @@ pub fn hash_password(password: &str) -> String {
     if password.is_empty() {
         return String::new();
     }
-    let s = salt();
-    format!("$sha256${}${}", s, derive(&s, password))
+    sha256_crypt(password.as_bytes(), salt().as_bytes(), None)
+}
+
+/// Compare without stopping at the first difference.
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Does `password` match a hash from /etc/shadow?
@@ -275,13 +342,19 @@ pub fn check_password(hash: &str, password: &str) -> bool {
     if hash.is_empty() {
         return true; // no password set
     }
+    if let Some(rest) = hash.strip_prefix("$5$") {
+        // $5$[rounds=N$]SALT$HASH
+        let (rounds, rest) = match rest.strip_prefix("rounds=").and_then(|r| r.split_once('$')) {
+            Some((n, r)) => (Some(n.parse::<usize>().unwrap_or(ROUNDS).clamp(1000, 999_999_999)), r),
+            None => (None, rest),
+        };
+        let Some((salt, _)) = rest.split_once('$') else { return false };
+        return same(&sha256_crypt(password.as_bytes(), salt.as_bytes(), rounds), hash);
+    }
     let mut parts = hash.split('$');
     match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(""), Some("sha256"), Some(salt), Some(expected)) => {
-            // Compare without stopping at the first difference.
-            let got = derive(salt, password);
-            got.len() == expected.len() && got.bytes().zip(expected.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
-        }
+        // PalladiumOS's older format
+        (Some(""), Some("sha256"), Some(salt), Some(expected)) => same(&derive(salt, password), expected),
         _ => false, // locked ("!" or "*") or an unknown format
     }
 }

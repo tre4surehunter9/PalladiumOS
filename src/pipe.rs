@@ -146,6 +146,27 @@ pub fn write(pipe: &Arc<Pipe>, data: &[u8]) -> i64 {
     }
 }
 
+/// A non-blocking write: what fits now, or -EAGAIN (a write of up to
+/// PIPE_BUF bytes goes in whole or not at all). No readers: SIGPIPE/EPIPE.
+pub fn try_write(pipe: &Arc<Pipe>, data: &[u8]) -> i64 {
+    if pipe.readers.load(Ordering::SeqCst) == 0 {
+        process::raise(process::SIGPIPE);
+        return -EPIPE;
+    }
+    let n = {
+        let mut buf = pipe.buf.lock();
+        let space = PIPE_CAPACITY - buf.len();
+        let n = if data.len() <= PIPE_BUF && space < data.len() { 0 } else { space.min(data.len()) };
+        buf.extend(&data[..n]);
+        n
+    };
+    if n == 0 && !data.is_empty() {
+        return -crate::syscall::EAGAIN;
+    }
+    process::wake(pipe.key());
+    n as i64
+}
+
 /// For poll: (has data, every write end closed).
 pub fn read_status(pipe: &Arc<Pipe>) -> (bool, bool) {
     (!pipe.buf.lock().is_empty(), pipe.writers.load(Ordering::SeqCst) == 0)

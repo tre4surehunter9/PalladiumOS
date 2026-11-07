@@ -330,7 +330,7 @@ fn dev_null_zero_tty_random() {
                       ! test -c /n.txt && ls /dev > /d.txt";
         assert_eq!(run("sh", &["sh", "-c", script]), 0);
         assert_eq!(filesystem::read_file("/n.txt").unwrap(), "");
-        assert_eq!(filesystem::read_file("/d.txt").unwrap(), "console\nnull\nrandom\ntty\nurandom\nzero\n");
+        assert_eq!(filesystem::read_file("/d.txt").unwrap(), "console\nnull\nptmx\npts/\nrandom\ntty\nurandom\nzero\n");
         // /dev/urandom: random bytes (not all the same, different each read)
         assert_eq!(run("sh", &["sh", "-c", "cat /dev/urandom | head -n 4 > /r1; cat /dev/urandom | head -n 4 > /r2"]), 0);
         let (r1, r2) = (filesystem::read_bytes("/r1").unwrap(), filesystem::read_bytes("/r2").unwrap());

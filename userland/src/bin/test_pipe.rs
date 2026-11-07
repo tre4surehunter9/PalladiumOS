@@ -182,7 +182,17 @@ fn all() -> i32 {
     check!(fcntl(STDOUT, 12345, 0) == -EINVAL as isize);
 
     // ---- pipe edge cases ----
-    check!(pipe2(0o4000).err() == Some(-EINVAL)); // O_NONBLOCK isn't supported
+    // O_NONBLOCK: an empty pipe reads EAGAIN instead of waiting; data
+    // still comes through; with the writer gone, it's end-of-file.
+    let Ok((r, w)) = pipe2(0o4000) else { return line!() as i32 };
+    let mut b = [0u8; 4];
+    check!(read(r, &mut b) == -EAGAIN);
+    check!(fcntl(r, F_GETFL, 0) & 0o4000 != 0);
+    check!(write(w, b"hi") == 2 && read(r, &mut b) == 2);
+    close(w);
+    check!(read(r, &mut b) == 0);
+    close(r);
+    check!(pipe2(0o40000).err() == Some(-EINVAL)); // O_DIRECT (packet mode) isn't supported
     check!(unsafe { sys::syscall3(sys::PIPE2, 0xffff_8000_0000_0000, 0, 0) } == -EFAULT as i64);
     let mut ends = Vec::new();
     loop {

@@ -108,6 +108,8 @@ struct Description {
     /// Byte offset for files; for directories, the number of entries
     /// getdents64 has returned ("." and ".." first).
     offset: usize,
+    /// O_NONBLOCK, for pipes (sockets and terminals keep their own).
+    nonblocking: bool,
 }
 
 impl Drop for Description {
@@ -149,7 +151,7 @@ fn handle(kind: Kind) -> Handle {
         Kind::PipeRead(r) => alloc::format!("pipe:[{}]", pipe::id(&r.pipe())),
         Kind::PipeWrite(w) => alloc::format!("pipe:[{}]", pipe::id(&w.pipe())),
     };
-    Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0 }) })
+    Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0, nonblocking: false }) })
 }
 
 #[derive(Clone)]
@@ -466,6 +468,34 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
             return crate::pty::ioctl(&end, request, arg);
         }
         Ok(h) => {
+            // Pipes: non-blocking mode, and bytes waiting.
+            {
+                let mut desc = h.lock();
+                let pipe = match &desc.kind {
+                    Kind::PipeRead(r) => Some(r.pipe()),
+                    Kind::PipeWrite(w) => Some(w.pipe()),
+                    _ => None,
+                };
+                if let Some(pipe) = pipe {
+                    return match request {
+                        FIONBIO => match unsafe { user_slice(arg, 4) } {
+                            Some(b) => {
+                                desc.nonblocking = u32::from_le_bytes(b.try_into().unwrap()) != 0;
+                                0
+                            }
+                            None => -EFAULT,
+                        },
+                        FIONREAD => match unsafe { user_slice_mut(arg, 4) } {
+                            Some(out) => {
+                                out.copy_from_slice(&(pipe::buffered(&pipe) as u32).to_le_bytes());
+                                0
+                            }
+                            None => -EFAULT,
+                        },
+                        _ => -ENOTTY,
+                    };
+                }
+            }
             // Sockets: non-blocking mode, bytes waiting, and the
             // interfaces (name, index, address, MTU, MAC...).
             let Kind::Socket(s) = &h.lock().kind else { return -ENOTTY };
@@ -597,15 +627,20 @@ pub fn sys_close(fd: u64) -> i64 {
 
 /// pipe2(fds, flags): fds[0] is the read end, fds[1] the write end.
 pub fn sys_pipe2(fds_out: u64, flags: u64) -> i64 {
-    if flags & !O_CLOEXEC != 0 {
-        return -EINVAL; // O_NONBLOCK and O_DIRECT aren't supported
+    if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
+        return -EINVAL; // O_DIRECT (packet mode) isn't supported
     }
     let Some(out) = (unsafe { user_slice_mut(fds_out, 8) }) else { return -EFAULT };
     let cloexec = flags & O_CLOEXEC != 0;
     let (reader, writer) = pipe::new_pipe();
+    let (rh, wh) = (handle(Kind::PipeRead(reader)), handle(Kind::PipeWrite(writer)));
+    if flags & O_NONBLOCK != 0 {
+        rh.lock().nonblocking = true;
+        wh.lock().nonblocking = true;
+    }
     let result = with_process(|p| {
-        let r = alloc_fd(p, handle(Kind::PipeRead(reader)), cloexec)?;
-        match alloc_fd(p, handle(Kind::PipeWrite(writer)), cloexec) {
+        let r = alloc_fd(p, rh, cloexec)?;
+        match alloc_fd(p, wh, cloexec) {
             Ok(w) => Ok((r, w)),
             Err(e) => {
                 p.fds[r] = None;
@@ -644,28 +679,34 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                 p.fds[fd].as_mut().unwrap().cloexec = arg & FD_CLOEXEC != 0;
                 0
             }
-            F_GETFL => match &slot.handle.lock().kind {
-                Kind::File { readable, writable, append, .. } => {
-                    let mode = match (readable, writable) {
-                        (true, true) => O_RDWR,
-                        (false, true) => O_WRONLY,
-                        _ => O_RDONLY,
-                    };
-                    (mode | if *append { O_APPEND } else { 0 }) as i64
+            F_GETFL => {
+                let desc = slot.handle.lock();
+                let nb = if desc.nonblocking { O_NONBLOCK } else { 0 };
+                match &desc.kind {
+                    Kind::File { readable, writable, append, .. } => {
+                        let mode = match (readable, writable) {
+                            (true, true) => O_RDWR,
+                            (false, true) => O_WRONLY,
+                            _ => O_RDONLY,
+                        };
+                        (mode | if *append { O_APPEND } else { 0 }) as i64
+                    }
+                    Kind::Console | Kind::Null | Kind::Zero | Kind::Random => O_RDWR as i64,
+                    Kind::Socket(s) => (O_RDWR | if s.is_nonblocking() { O_NONBLOCK } else { 0 }) as i64,
+                    Kind::Pty { end, .. } => (O_RDWR | if end.is_nonblocking() { O_NONBLOCK } else { 0 }) as i64,
+                    Kind::PipeWrite(_) => (O_WRONLY | nb) as i64,
+                    Kind::PipeRead(_) => (O_RDONLY | nb) as i64,
+                    Kind::Dir { .. } => O_RDONLY as i64,
                 }
-                Kind::Console | Kind::Null | Kind::Zero | Kind::Random => O_RDWR as i64,
-                Kind::Socket(s) => (O_RDWR | if s.is_nonblocking() { O_NONBLOCK } else { 0 }) as i64,
-                Kind::Pty { end, .. } => (O_RDWR | if end.is_nonblocking() { O_NONBLOCK } else { 0 }) as i64,
-                Kind::PipeWrite(_) => O_WRONLY as i64,
-                Kind::Dir { .. } | Kind::PipeRead(_) => O_RDONLY as i64,
-            },
+            }
             F_SETFL => {
-                // O_NONBLOCK works on sockets and terminals; other changes
-                // are accepted.
-                match &slot.handle.lock().kind {
+                // O_NONBLOCK works on pipes, sockets and terminals; other
+                // changes are accepted.
+                let mut desc = slot.handle.lock();
+                match &desc.kind {
                     Kind::Socket(s) => s.set_nonblocking(arg & O_NONBLOCK != 0),
                     Kind::Pty { end, .. } => end.set_nonblocking(arg & O_NONBLOCK != 0),
-                    _ => {}
+                    _ => desc.nonblocking = arg & O_NONBLOCK != 0,
                 }
                 0
             }
@@ -693,7 +734,11 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
         }
         Kind::PipeRead(r) => {
             let pipe = r.pipe();
+            let nonblocking = desc.nonblocking;
             drop(desc); // or while waiting for data
+            if nonblocking && !buf.is_empty() && pipe::read_status(&pipe) == (false, false) {
+                return -crate::syscall::EAGAIN; // empty, but writers remain
+            }
             pipe::read(&pipe, buf)
         }
         Kind::File { loc, readable, .. } => {
@@ -807,8 +852,9 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
         }
         Kind::PipeWrite(w) => {
             let pipe = w.pipe();
+            let nonblocking = desc.nonblocking;
             drop(desc);
-            pipe::write(&pipe, bytes)
+            if nonblocking { pipe::try_write(&pipe, bytes) } else { pipe::write(&pipe, bytes) }
         }
         Kind::File { loc, writable, append, .. } => {
             if !writable {

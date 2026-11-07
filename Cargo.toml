@@ -19,7 +19,9 @@ run-args = [
     "-drive", "format=raw,file=target/disk.img,index=1,media=disk",
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
     # A network card on QEMU's user network (NAT; DHCP and DNS built in).
-    "-netdev", "user,id=net0", "-device", "rtl8139,netdev=net0",
+    # Port 2222 on this machine (localhost only) reaches PalladiumOS's SSH
+    # server: ssh -p 2222 root@localhost
+    "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22", "-device", "rtl8139,netdev=net0",
 ]
 test-args = [
     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio",
