@@ -111,6 +111,12 @@ pub fn write_bytes(path: &str, contents: &[u8]) -> Result<(), &'static str> {
     .map_err(message)
 }
 
+const OS_RELEASE: &str = concat!(
+    "NAME=\"PalladiumOS\"\nPRETTY_NAME=\"PalladiumOS ", env!("CARGO_PKG_VERSION"), "\"\nID=palladiumos\n",
+    "VERSION=\"", env!("CARGO_PKG_VERSION"), "\"\nVERSION_ID=", env!("CARGO_PKG_VERSION"), "\n",
+    "HOME_URL=\"https://github.com/tre4surehunter9/PalladiumOS/\"\n",
+);
+
 /// The PalladiumOS logo (for fastfetch): element 46 of the periodic table.
 const PALLADIUM_LOGO: &str = "\
 $1+------------------+
@@ -164,12 +170,6 @@ pub fn init_default_files() {
         ),
         // Names for addresses (libc reads this before asking DNS).
         ("/etc/hosts", "127.0.0.1\tlocalhost\n10.0.2.2\tgateway\n"),
-        // Which OS this is, for programs like fastfetch (freedesktop format).
-        (
-            "/etc/os-release",
-            "NAME=\"PalladiumOS\"\nPRETTY_NAME=\"PalladiumOS 0.4.0\"\nID=palladiumos\nVERSION=\"0.4.0\"\nVERSION_ID=0.4.0\n\
-             HOME_URL=\"https://github.com/tre4surehunter9/PalladiumOS/\"\n",
-        ),
         // fastfetch's system-wide config: PalladiumOS's logo, a periodic
         // table tile for palladium.
         (
@@ -190,6 +190,10 @@ pub fn init_default_files() {
             let _ = write_file(path, text);
         }
     }
+    // Which OS this is, for programs like fastfetch (freedesktop format).
+    // Written every boot: it describes the system, so an old disk gets the
+    // current version.
+    let _ = write_file("/etc/os-release", OS_RELEASE);
     init_users();
 }
 

@@ -77,7 +77,7 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         // A Linux-style boot log (see boot.rs; `dmesg` shows it again).
         palladiumos::vga_buffer::clear_screen();
         palladiumos::boot::set_verbose(true);
-        boot_info!("PalladiumOS 0.4.0 (x86_64) is booting");
+        boot_info!("PalladiumOS {} (x86_64) is booting", palladiumos::VERSION);
         palladiumos::init();
 
         let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };

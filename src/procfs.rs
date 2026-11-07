@@ -88,7 +88,7 @@ impl ProcFs {
                 let ns = process::ticks() * process::TICK_NS;
                 format!("{}.{:02} 0.00\n", ns / 1_000_000_000, ns / 10_000_000 % 100)
             }
-            8 => format!("PalladiumOS version 0.4.0 (rustc nightly) #1 x86_64\n"),
+            8 => format!("PalladiumOS version {} (rustc nightly) #1 x86_64\n", crate::VERSION),
             _ => return Err(EINVAL),
         })
     }

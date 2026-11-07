@@ -809,7 +809,7 @@ fn sys_uname(buf: u64) -> i64 {
     const FIELDS: [&str; 6] = [
         "PalladiumOS", // sysname
         "palladium",   // nodename
-        "0.4.0",       // release
+        crate::VERSION, // release
         "#1",          // version
         "x86_64",      // machine
         "(none)",      // domainname

@@ -109,6 +109,9 @@ pub fn hlt_loop() -> ! {
     }
 }
 
+/// The PalladiumOS version (from Cargo.toml).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod serial;
 pub mod vga_buffer;
 pub mod interrupts;
