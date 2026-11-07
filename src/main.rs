@@ -220,6 +220,9 @@ fn mount_filesystems() {
     } else {
         boot_warn!("No system disk: /usr is empty (tcc has no headers or libraries)");
     }
+    if let Some(mib) = block::mount_alpine_disk() {
+        boot_ok!("Mounted the Alpine disk at /alpine ({} MiB)", mib);
+    }
 }
 
 #[cfg(not(test))]

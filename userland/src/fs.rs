@@ -127,6 +127,12 @@ pub fn mkdir(path: &str) -> isize {
     with_cstr(path, |p| unsafe { syscall3(sys::MKDIR, p, 0o755, 0) })
 }
 
+/// mount(2): a new filesystem of type `fstype` ("proc", "devtmpfs",
+/// "tmpfs") at `target`.
+pub fn mount(fstype: &str, target: &str) -> isize {
+    with_cstr(fstype, |t| with_cstr(target, |d| unsafe { sys::syscall4(sys::MOUNT, t, d, t, 0) }) as i64)
+}
+
 pub fn rmdir(path: &str) -> isize {
     with_cstr(path, |p| unsafe { syscall3(sys::RMDIR, p, 0, 0) })
 }

@@ -20,6 +20,7 @@ use core::fmt;
 
 /// Raw syscalls. Numbers match Linux x86_64.
 pub mod sys {
+    pub const MOUNT: u64 = 165;
     pub const GETRANDOM: u64 = 318;
     use super::asm;
 

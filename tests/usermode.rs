@@ -125,6 +125,9 @@ fn pages_are_unmapped_after_exit() {
 #[test_case]
 fn bundled_programs_are_valid_elfs() {
     for (name, bytes) in programs::USER_PROGRAMS {
+        if bytes.starts_with(b"#!") {
+            continue; // a script (userland-sh/), run by its interpreter
+        }
         let image = elf::parse(bytes).unwrap_or_else(|e| panic!("{}: {}", name, e));
         assert!(image.entry >= 0x4000_0000, "{} entry {:#x}", name, image.entry);
     }
@@ -1677,7 +1680,7 @@ fn fastfetch_port_works() {
     let _ = filesystem::make_dir("/tmp");
     assert_eq!(sh("fastfetch --logo none > /tmp/ff 2>&1"), 0);
     let out = file("/tmp/ff");
-    for want in ["OS: PalladiumOS 0.5.3 x86_64", "Kernel: PalladiumOS 0.5.3", "Memory: ", "Disk (/): "] {
+    for want in ["OS: PalladiumOS 0.5.4 x86_64", "Kernel: PalladiumOS 0.5.4", "Memory: ", "Disk (/): "] {
         assert!(out.contains(want), "{:?} missing from:\n{}", want, out);
     }
     assert!(!out.contains("not implemented"), "{}", out);
@@ -2025,4 +2028,14 @@ fn dropbear_ssh_over_loopback() {
     let out = file("/tmp/ssh.out");
     assert!(out.contains("over ssh\n0\nnot a tty"), "{}", out);
     assert_eq!(sh("ls /etc/dropbear | grep -q _host_key"), 0, "a host key was made");
+}
+
+#[test_case]
+fn chroot_mount_fchdir_and_locks() {
+    let Some(_) = c_program("test_chroot") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let status = sh("test_chroot > /tmp/chroot.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/chroot.out"));
+    assert!(file("/tmp/chroot.out").contains("all checks passed"));
+    assert!(only_kernel_left(), "{:?}", process::list());
 }

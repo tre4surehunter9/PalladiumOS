@@ -81,7 +81,7 @@ fn main() {
         writeln!(out, "    ({:?}, include_bytes!({:?})),", name, path.display().to_string()).unwrap();
     }
     let mut c_names = Vec::new();
-    for (name, path) in build_c_programs(&root).into_iter().chain(build_dynamic(&root)).chain(ported_programs(&root)) {
+    for (name, path) in build_c_programs(&root).into_iter().chain(build_dynamic(&root)).chain(scripts(&root)).chain(ported_programs(&root)) {
         assert!(!names.contains(&name) && !c_names.contains(&name), "two programs are called {}", name);
         writeln!(out, "    ({:?}, include_bytes!({:?})),", name, path.display().to_string()).unwrap();
         c_names.push(name);
@@ -123,6 +123,12 @@ fn make_disk_images(root: &std::path::Path, out_dir: &std::path::Path) {
     let disk = target.join("disk.img");
     if !disk.exists() {
         mke2fs(&disk, "32M", None, &[]);
+    }
+    // Room for Alpine Linux (/alpine, see userland-sh/alpine): empty, 1 GiB
+    // (sparse: it only takes space on this machine as it fills). Created once.
+    let alpine = target.join("alpine.img");
+    if !alpine.exists() {
+        mke2fs(&alpine, "1G", None, &[]);
     }
 
     build_linux_test(root);
@@ -241,6 +247,20 @@ fn build_dynamic(root: &std::path::Path) -> Vec<(String, PathBuf)> {
         built.push((name, exe));
     }
     built
+}
+
+/// Shell scripts in userland-sh/ (like `alpine`), installed in /bin as they are.
+fn scripts(root: &std::path::Path) -> Vec<(String, PathBuf)> {
+    println!("cargo:rerun-if-changed=userland-sh");
+    let Ok(entries) = fs::read_dir(root.join("userland-sh")) else { return Vec::new() };
+    let mut found: Vec<(String, PathBuf)> = entries
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            Some((path.file_name()?.to_str()?.to_string(), path.clone())).filter(|_| path.is_file())
+        })
+        .collect();
+    found.sort();
+    found
 }
 
 /// Ported software built by tools/ports/*.sh (lua, ...), in target/ports/bin.

@@ -266,6 +266,10 @@ fn join(dir: &str, name: &str) -> String {
 /// path with all symlinks replaced (the "real" path).
 pub fn resolve_full(abs: &str, follow_last: bool) -> FsResult<(Loc, Meta, String)> {
     ensure_root();
+    // Inside a chroot, a symlink to "/x" means root + "/x", and ".." stops
+    // at the root. (Paths outside it, from the kernel, resolve as usual.)
+    let root = crate::process::current_root();
+    let root = if root != "/" && crate::filesystem::strip_root(&root, abs).is_some() { root } else { String::from("/") };
     let mut path = String::from(abs);
     let mut followed = 0;
     'restart: loop {
@@ -289,9 +293,10 @@ pub fn resolve_full(abs: &str, follow_last: bool) -> FsResult<(Loc, Meta, String
                 }
                 let target = with_fs(l.mount, |fs| fs.readlink(l.ino))?;
                 let rest = comps[i + 1..].join("/");
-                let base = if target.starts_with('/') { target } else { join(&prefix, &target) };
+                let inside = crate::filesystem::strip_root(&root, &prefix).unwrap_or_else(|| String::from("/"));
+                let base = if target.starts_with('/') { target } else { join(&inside, &target) };
                 let joined = if rest.is_empty() { base } else { join(&base, &rest) };
-                path = crate::filesystem::normalize("/", &joined);
+                path = crate::filesystem::with_root(&root, &crate::filesystem::normalize("/", &joined));
                 continue 'restart;
             }
             prefix = candidate;

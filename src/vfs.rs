@@ -167,6 +167,9 @@ struct Slot {
 pub struct Files {
     fds: Vec<Option<Slot>>,
     pub cwd: String,
+    /// The root directory (chroot), as a real path: absolute paths start
+    /// here. "/" normally.
+    pub root: String,
     /// File creation mask: these permission bits are removed from new files.
     pub umask: u32,
 }
@@ -179,12 +182,12 @@ impl Files {
         for slot in &mut fds[..3] {
             *slot = Some(Slot { handle: console.clone(), cloexec: false });
         }
-        Files { fds, cwd: cwd.to_string(), umask: 0o022 }
+        Files { fds, cwd: cwd.to_string(), root: "/".to_string(), umask: 0o022 }
     }
 
     /// A table with nothing open (for exiting processes).
     pub fn empty() -> Self {
-        Files { fds: vec![None; MAX_FDS], cwd: "/".to_string(), umask: 0o022 }
+        Files { fds: vec![None; MAX_FDS], cwd: "/".to_string(), root: "/".to_string(), umask: 0o022 }
     }
 
     /// (fd, what it is) for each open fd: a path, /dev/tty, or pipe:[id].
@@ -273,10 +276,16 @@ fn user_cstr(ptr: u64) -> Result<String, i64> {
     }
 }
 
-/// Resolve a user path to an absolute path, relative to the process cwd.
-fn absolute(path: &str) -> String {
-    let cwd = with_process(|p| p.cwd.clone());
-    filesystem::normalize(&cwd, path)
+/// Resolve a user path to a real absolute path: relative to the process's
+/// working directory, inside its root directory (chroot; ".." stops there).
+pub fn absolute(path: &str) -> String {
+    let (cwd, root) = with_process(|p| (p.cwd.clone(), p.root.clone()));
+    if root == "/" {
+        return filesystem::normalize(&cwd, path);
+    }
+    // (A working directory outside the root counts as the root.)
+    let cwd_inside = filesystem::strip_root(&root, &cwd).unwrap_or_else(|| "/".to_string());
+    filesystem::with_root(&root, &filesystem::normalize(&cwd_inside, path))
 }
 
 /// Put `handle` in the lowest free fd at or above `min`.
@@ -699,6 +708,16 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                     Kind::Dir { .. } => O_RDONLY as i64,
                 }
             }
+            // Record locks: granted (see sys_flock). F_GETLK reports
+            // "unlocked" (struct flock's l_type = F_UNLCK).
+            5 | 36 => match unsafe { crate::syscall::user_slice_mut(arg, 2) } {
+                Some(b) => {
+                    b.copy_from_slice(&2i16.to_le_bytes());
+                    0
+                }
+                None => -EFAULT,
+            },
+            6 | 7 | 37 | 38 => 0,
             F_SETFL => {
                 // O_NONBLOCK works on pipes, sockets and terminals; other
                 // changes are accepted.
@@ -1098,7 +1117,9 @@ pub fn sys_getdents64(fd: u64, out: &mut [u8]) -> i64 {
 
 /// getcwd(buf, size): returns the length including the NUL.
 pub fn sys_getcwd(out: &mut [u8]) -> i64 {
-    let cwd = with_process(|p| p.cwd.clone());
+    // As seen from inside the root directory.
+    let (cwd, root) = with_process(|p| (p.cwd.clone(), p.root.clone()));
+    let cwd = filesystem::strip_root(&root, &cwd).unwrap_or_else(|| "/".to_string());
     let needed = cwd.len() + 1;
     if out.len() < needed {
         return -ERANGE;
@@ -1123,6 +1144,106 @@ pub fn sys_chdir(path: u64) -> i64 {
             0
         }
         Ok(_) => -ENOTDIR,
+        Err(e) => -e,
+    }
+}
+
+/// fchdir(fd): make the directory open as `fd` the working directory.
+pub fn sys_fchdir(fd: u64) -> i64 {
+    let path = match get(fd) {
+        Ok(h) => match &h.lock().kind {
+            Kind::Dir { path, .. } => path.clone(),
+            _ => return -ENOTDIR,
+        },
+        Err(e) => return -e,
+    };
+    with_process(|p| p.cwd = path);
+    0
+}
+
+/// chroot(path): absolute paths start at `path` from now on (root only).
+/// The working directory doesn't change (programs chdir("/") next).
+pub fn sys_chroot(path: u64) -> i64 {
+    if crate::process::current_cred().euid != 0 {
+        return -EPERM;
+    }
+    let abs = match user_path(path) {
+        Ok(p) => absolute(&p),
+        Err(e) => return -e,
+    };
+    match mounts::resolve_full(&abs, true) {
+        Ok((_, meta, real)) if meta.kind == FileType::Dir => {
+            if let Err(e) = perm::check(&meta, &crate::process::current_cred(), perm::EXEC) {
+                return -e;
+            }
+            with_process(|p| p.root = real);
+            0
+        }
+        Ok(_) => -ENOTDIR,
+        Err(e) => -e,
+    }
+}
+
+/// mount(source, target, fstype, flags, data): mount a new proc, devtmpfs
+/// (PalladiumOS's /dev) or tmpfs filesystem at `target` (root only). Disks
+/// are mounted by the kernel at boot.
+pub fn sys_mount(_source: u64, target: u64, fstype: u64, flags: u64, _data: u64) -> i64 {
+    const MS_REMOUNT: u64 = 32;
+    const MS_BIND: u64 = 4096;
+    if crate::process::current_cred().euid != 0 {
+        return -EPERM;
+    }
+    let real = match user_path(target).map(|p| absolute(&p)).and_then(|abs| mounts::resolve_full(&abs, true)) {
+        Ok((_, meta, real)) if meta.kind == FileType::Dir => real,
+        Ok(_) => return -ENOTDIR,
+        Err(e) => return -e,
+    };
+    if flags & MS_REMOUNT != 0 {
+        return 0; // (options like read-only aren't changed)
+    }
+    if flags & MS_BIND != 0 {
+        return -EINVAL;
+    }
+    let kind = match user_path(fstype) {
+        Ok(k) => k,
+        Err(e) => return -e,
+    };
+    let fs: alloc::boxed::Box<dyn mounts::FileSystem> = match kind.as_str() {
+        "proc" => alloc::boxed::Box::new(crate::procfs::ProcFs),
+        "devtmpfs" | "devfs" => alloc::boxed::Box::new(crate::devfs::DevFs),
+        "tmpfs" => alloc::boxed::Box::new(crate::fdfs::Fdfs::new()),
+        _ => return -ENODEV,
+    };
+    if mounts::list().iter().any(|(p, _)| *p == real) {
+        return -EBUSY;
+    }
+    mounts::mount(&real, fs);
+    0
+}
+
+/// umount2(target, flags) (root only).
+pub fn sys_umount2(target: u64, _flags: u64) -> i64 {
+    if crate::process::current_cred().euid != 0 {
+        return -EPERM;
+    }
+    let real = match user_path(target).map(|p| absolute(&p)).and_then(|abs| mounts::resolve_full(&abs, true)) {
+        Ok((_, _, real)) => real,
+        Err(e) => return -e,
+    };
+    match mounts::unmount(&real) {
+        Ok(fs) => {
+            drop(fs);
+            0
+        }
+        Err(e) => -e,
+    }
+}
+
+/// flock(fd, op): always granted. With one user's programs on one CPU there
+/// is nobody to wait for; programs (like apk) take the lock and carry on.
+pub fn sys_flock(fd: u64, _op: u64) -> i64 {
+    match get(fd) {
+        Ok(_) => 0,
         Err(e) => -e,
     }
 }

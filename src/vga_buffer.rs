@@ -62,6 +62,8 @@ pub struct Writer {
     /// write; it continues with the next write (like a real terminal).
     pending: [u8; 32],
     pending_len: usize,
+    /// The last character printed (for CSI b, "repeat it").
+    last_char: u8,
 }
 
 
@@ -97,6 +99,7 @@ impl Writer {
                     ascii_character: byte,
                     color_code,
                 });
+                self.last_char = byte;
                 self.column_position += 1;
             }
         }
@@ -184,6 +187,7 @@ lazy_static! {
         reverse: false,
         pending: [0; 32],
         pending_len: 0,
+        last_char: b' ',
     });
 }
 
@@ -212,6 +216,41 @@ fn test_println_many() {
     for _ in 0..200 {
         println!("test_println_many output")
     }
+}
+
+#[test_case]
+fn test_ansi_editing_sequences() {
+    // What full-screen programs (Alpine's nano, via TERM=ansi) rely on.
+    use x86_64::instructions::interrupts;
+    interrupts::without_interrupts(|| {
+        let mut w = WRITER.lock();
+        // (No heap in this test kernel: compare rows as bytes.)
+        let is = |w: &Writer, r: usize, want: &str| -> bool {
+            (0..BUFFER_WIDTH).all(|c| w.buffer.chars[r][c].read().ascii_character == *want.as_bytes().get(c).unwrap_or(&b' '))
+        };
+        w.write_ansi(b"\x1b[2J\x1b[H");
+        // Absolute row (d) and column (G).
+        w.write_ansi(b"\x1b[25dbottom\x1b[5Gx");
+        assert!(is(&w, 24, "bottxm")); // "bottom" with column 5 overwritten
+        // Insert (@) and delete (P) characters, erase in place (X).
+        w.write_ansi(b"\x1b[1;1Habcdef\x1b[1;3H\x1b[2@");
+        assert!(is(&w, 0, "ab  cdef"));
+        w.write_ansi(b"\x1b[1;3H\x1b[2P");
+        assert!(is(&w, 0, "abcdef"));
+        w.write_ansi(b"\x1b[1;2H\x1b[3X");
+        assert!(is(&w, 0, "a   ef"));
+        // Insert (L) and delete (M) lines, repeat (b).
+        w.write_ansi(b"\x1b[2;1Hsecond\x1b[3;1Hthird\x1b[2;1H\x1b[L");
+        assert!(is(&w, 1, "") && is(&w, 2, "second") && is(&w, 3, "third"));
+        w.write_ansi(b"\x1b[2;1H\x1b[M");
+        assert!(is(&w, 1, "second") && is(&w, 2, "third"));
+        w.write_ansi(b"\x1b[5;1H-\x1b[4b");
+        assert!(is(&w, 4, "-----"));
+        // Scroll up (S).
+        w.write_ansi(b"\x1b[1S");
+        assert!(is(&w, 0, "second") && is(&w, 1, "third"));
+        w.write_ansi(b"\x1b[2J\x1b[H");
+    });
 }
 
 #[test_case]
@@ -429,6 +468,35 @@ impl Writer {
                 self.row_position = (arg(0, 1) - 1).min(BUFFER_HEIGHT - 1);
                 self.column_position = (arg(1, 1) - 1).min(BUFFER_WIDTH - 1);
             }
+            // Absolute column / row, relative moves, next / previous line.
+            b'G' | b'`' => self.column_position = (arg(0, 1) - 1).min(BUFFER_WIDTH - 1),
+            b'd' => self.row_position = (arg(0, 1) - 1).min(BUFFER_HEIGHT - 1),
+            b'a' => self.column_position = (self.column_position + arg(0, 1)).min(BUFFER_WIDTH - 1),
+            b'e' => self.row_position = (self.row_position + arg(0, 1)).min(BUFFER_HEIGHT - 1),
+            b'E' => {
+                self.row_position = (self.row_position + arg(0, 1)).min(BUFFER_HEIGHT - 1);
+                self.column_position = 0;
+            }
+            b'F' => {
+                self.row_position = self.row_position.saturating_sub(arg(0, 1));
+                self.column_position = 0;
+            }
+            // Editing: insert / delete / erase characters and lines, scroll.
+            b'@' => self.insert_chars(arg(0, 1)),
+            b'P' => self.delete_chars(arg(0, 1)),
+            b'X' => {
+                let line_end = self.row_position * BUFFER_WIDTH + BUFFER_WIDTH;
+                self.blank(pos, (pos + arg(0, 1)).min(line_end));
+            }
+            b'L' => self.insert_lines(arg(0, 1)),
+            b'M' => self.delete_lines(arg(0, 1)),
+            b'S' => self.scroll(arg(0, 1), true),
+            b'T' => self.scroll(arg(0, 1), false),
+            b'b' => {
+                for _ in 0..arg(0, 1).min(BUFFER_WIDTH * BUFFER_HEIGHT) {
+                    self.write_byte(self.last_char);
+                }
+            }
             b'J' => {
                 let (from, to) = match params.first().copied().unwrap_or(0) {
                     0 => (pos, total),
@@ -485,6 +553,62 @@ impl Writer {
     }
 
     /// Blank the screen cells [from, to) (linear positions).
+    fn blank_cell(&self) -> ScreenChar {
+        ScreenChar { ascii_character: b' ', color_code: self.color_code }
+    }
+
+    /// CSI @: insert `n` blanks at the cursor; the rest of the line moves right.
+    fn insert_chars(&mut self, n: usize) {
+        let (row, col) = (self.row_position, self.column_position.min(BUFFER_WIDTH - 1));
+        for c in (col..BUFFER_WIDTH).rev() {
+            let ch = if c >= col + n { self.buffer.chars[row][c - n].read() } else { self.blank_cell() };
+            self.buffer.chars[row][c].write(ch);
+        }
+    }
+
+    /// CSI P: delete `n` characters at the cursor; the rest moves left.
+    fn delete_chars(&mut self, n: usize) {
+        let (row, col) = (self.row_position, self.column_position.min(BUFFER_WIDTH - 1));
+        for c in col..BUFFER_WIDTH {
+            let ch = if c + n < BUFFER_WIDTH { self.buffer.chars[row][c + n].read() } else { self.blank_cell() };
+            self.buffer.chars[row][c].write(ch);
+        }
+    }
+
+    /// Move rows [from, end) down (`down`) or up by `n`, blanking what's left.
+    /// (No allocation: the console also prints during boot and panics.)
+    fn shift_rows(&mut self, from: usize, n: usize, down: bool) {
+        for i in 0..BUFFER_HEIGHT.saturating_sub(from) {
+            let r = if down { BUFFER_HEIGHT - 1 - i } else { from + i };
+            let src = if down { r.checked_sub(n).filter(|&s| s >= from) } else { Some(r + n).filter(|&s| s < BUFFER_HEIGHT) };
+            for c in 0..BUFFER_WIDTH {
+                let ch = match src {
+                    Some(s) => self.buffer.chars[s][c].read(),
+                    None => self.blank_cell(),
+                };
+                self.buffer.chars[r][c].write(ch);
+            }
+        }
+    }
+
+    /// CSI L: insert `n` blank lines at the cursor's line.
+    fn insert_lines(&mut self, n: usize) {
+        self.shift_rows(self.row_position, n, true);
+        self.column_position = 0;
+    }
+
+    /// CSI M: delete `n` lines at the cursor's line.
+    fn delete_lines(&mut self, n: usize) {
+        self.shift_rows(self.row_position, n, false);
+        self.column_position = 0;
+    }
+
+    /// CSI S / T: scroll the whole screen up / down `n` lines (the cursor
+    /// stays put).
+    fn scroll(&mut self, n: usize, up: bool) {
+        self.shift_rows(0, n, !up);
+    }
+
     fn blank(&mut self, from: usize, to: usize) {
         let blank = ScreenChar { ascii_character: b' ', color_code: self.color_code };
         for p in from..to.min(BUFFER_WIDTH * BUFFER_HEIGHT) {

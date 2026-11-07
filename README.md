@@ -32,6 +32,7 @@
 * **Users and permissions**: login, passwords, POSIX file permissions, setuid programs, `su`
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
 * **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink, and an **SSH server** (Dropbear): log in from your own terminal with `ssh -p 2222 root@localhost`
+* **Alpine Linux**: `alpine` sets up a real Alpine root filesystem on its own disk, where `apk add` installs Alpine's packages (Python, nano, ...) and they run on PalladiumOS
 * **Terminals**: pseudo-terminals (`/dev/ptmx`, `/dev/pts/N`), sessions and controlling terminals, job control
 * **A userland**: a POSIX-style shell, about 50 of PalladiumOS's own tools, and ported software: BusyBox, Lua, dash, MicroPython, fastfetch and TinyCC (a C compiler that runs inside PalladiumOS)
 * **A Linux-style boot log** with `[  OK  ]` lines, and `dmesg`
@@ -140,10 +141,12 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 61 | wait4 | yes (`WNOHANG`, `WUNTRACED`, `WCONTINUED`, process groups, rusage) |
 | 62 | kill | yes (pid, process group, or -1 for all; `EPERM` for other users' processes) |
 | 63 | uname | yes |
-| 72 | fcntl | `F_DUPFD`(`_CLOEXEC`), `F_GETFD`/`F_SETFD` (close-on-exec), `F_GETFL`/`F_SETFL` (`O_NONBLOCK`) |
+| 72 | fcntl | `F_DUPFD`(`_CLOEXEC`), `F_GETFD`/`F_SETFD` (close-on-exec), `F_GETFL`/`F_SETFL` (`O_NONBLOCK`), record locks (`F_SETLK` & co.: always granted) |
+| 73 | flock | always granted (one user's programs on one CPU: nobody to wait for) |
 | 76 / 77 | truncate, ftruncate | yes |
 | 79 | getcwd | yes |
 | 80 | chdir | yes |
+| 81 | fchdir | yes |
 | 82 | rename | yes (also renameat, renameat2 without flags) |
 | 83 | mkdir | yes |
 | 84 | rmdir | yes |
@@ -168,7 +171,9 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 130 | rt_sigsuspend | yes |
 | 137 | statfs | yes (also fstatfs) |
 | 158 | arch_prctl | FS/GS base (thread-local storage) |
+| 161 | chroot | yes (root only; paths, symlinks, `..` and the program interpreter stay inside) |
 | 162 | sync | yes |
+| 165 / 166 | mount, umount2 | `proc`, `devtmpfs` and `tmpfs` (root only; disks are mounted at boot) |
 | 169 | reboot | yes (restart, power off, halt; syncs first) |
 | 186 | gettid | yes (`getpid` is the process, `gettid` the thread) |
 | 200/234 | tkill, tgkill | yes |
@@ -280,9 +285,23 @@ Signals work as in POSIX:
 * Job control: SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU stop a process, SIGCONT continues it, and `wait4` reports both. Ctrl-C sends SIGINT, Ctrl-Z SIGTSTP and Ctrl-\ SIGQUIT to the foreground process group. As POSIX says, Ctrl-Z doesn't stop orphaned process groups (like programs the kernel started), which nobody could continue.
 * `execve` resets handlers to the default (ignored signals and the mask are kept).
 * Not yet: `SA_SIGINFO` details (the siginfo has only the signal number), `sigaltstack`, handlers for faults (a segfault always ends the program).
-The console understands the usual ANSI escape sequences (cursor movement, clearing, colors and reverse video), so full-screen programs like `edit` work.
+The console understands the usual ANSI escape sequences (cursor movement, absolute row and column, clearing, inserting and deleting characters and lines, scrolling, colors and reverse video), so full-screen programs like `edit`, BusyBox's `vi` and Alpine's `nano` work.
 
 Programs live in `/bin` as ordinary files, installed at boot.
+
+## Alpine Linux
+PalladiumOS can run [Alpine Linux](https://alpinelinux.org)'s userland, its package manager and its packages, unchanged: Alpine builds everything against musl, dynamically linked, which is what PalladiumOS runs.
+
+```sh
+# in PalladiumOS, as root (the network and target/alpine.img are needed)
+alpine                       # the first time: downloads Alpine 3.24 into /alpine, then a shell in it
+apk add python3 nano         # inside it: real packages from Alpine's servers
+python3                      # ...run on PalladiumOS
+exit
+alpine python3 -c 'print(6*7)'   # or one command at a time
+```
+
+How it works: `cargo run` attaches a third disk, `target/alpine.img` (1 GiB, sparse: created empty by `build.rs`), mounted at `/alpine`. The first `alpine` downloads Alpine's minimal root filesystem, checks it against a pinned SHA-256 (the release is GPG-signed by Alpine), and unpacks it there. Then `alpine` mounts PalladiumOS's `/proc` and `/dev` inside it and enters it with `chroot`, so Alpine has its own `/bin`, `/lib`, `/usr`, `/etc` and package database, separate from PalladiumOS's. There is no Linux kernel: Alpine's programs make their system calls to PalladiumOS (like WSL1, or a container). Packages installed with `apk` exist only inside `/alpine`; delete `target/alpine.img` to start over.
 
 ## Running the Tests
 `cargo test` boots each test kernel in QEMU (no window) and reports results over serial.

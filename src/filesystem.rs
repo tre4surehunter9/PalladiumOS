@@ -23,6 +23,27 @@ pub fn resolve_path(path: &str) -> String {
 ///
 ///   normalize("/a/b", "../c")   == "/a/c"
 ///   normalize("/", "./x//y/")   == "/x/y"
+/// `real` (an absolute path) as seen from inside root directory `root`, or
+/// None if it's outside it.
+pub fn strip_root(root: &str, real: &str) -> Option<String> {
+    if root == "/" {
+        return Some(real.to_string());
+    }
+    if real == root {
+        return Some("/".to_string());
+    }
+    real.strip_prefix(root).filter(|r| r.starts_with('/')).map(String::from)
+}
+
+/// The real path of `inside` (an absolute path inside root `root`).
+pub fn with_root(root: &str, inside: &str) -> String {
+    match (root, inside) {
+        ("/", p) => p.to_string(),
+        (r, "/") => r.to_string(),
+        (r, p) => alloc::format!("{}{}", r, p),
+    }
+}
+
 pub fn normalize(cwd: &str, path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     let full = if path.starts_with('/') { [path, ""] } else { [cwd, path] };

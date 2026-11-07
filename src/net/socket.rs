@@ -411,7 +411,7 @@ impl Socket {
         if !self.stream {
             self.ensure_udp()?;
         }
-        wait(self, flags, None, |net| {
+        let r = wait(self, flags, None, |net| {
             let state = self.state.lock();
             match &*state {
                 State::Tcp { which, handle } => with_set(net, *which, |_, set| {
@@ -440,7 +440,15 @@ impl Socket {
                 }
                 _ => Some(Err(ENOTCONN)),
             }
-        })
+        });
+        // Reading made room in the receive buffer: tell the sender now (a
+        // window update). Otherwise, if the buffer had filled, the sender
+        // waits until something else polls the stack (the next tick, or its
+        // own slow retries), and downloads crawl.
+        if self.stream && matches!(r, Ok((n, _)) if n > 0) {
+            super::poll();
+        }
+        r
     }
 
     /// send / write (to `to`, for an unconnected UDP socket).

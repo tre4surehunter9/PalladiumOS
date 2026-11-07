@@ -195,6 +195,7 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
         };
         if let Some(f) = flags_for(prot) {
             for (i, a) in (start..start + len).step_by(4096).enumerate() {
+                crate::interrupts::let_in(); // (big mappings: keys typed meanwhile aren't lost)
                 let chunk = data.get(i * 4096..((i + 1) * 4096).min(data.len())).unwrap_or(&[]);
                 if map_page(a, f, chunk).is_err() {
                     unmap_pages(start, a);

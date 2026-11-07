@@ -66,7 +66,7 @@ pub fn build_image(bytes: &[u8], argv: &[&str], envp: &[&str], ids: Ids) -> Resu
     // A dynamically linked program: read its interpreter first (not while
     // holding the frame allocator).
     let interp = match elf::is_elf(bytes).then(|| elf::parse(bytes)).transpose()?.and_then(|e| e.interp) {
-        Some(path) => Some(crate::filesystem::read_bytes(&path).map_err(|_| ERR_NO_INTERP)?),
+        Some(path) => Some(crate::filesystem::read_bytes(&crate::vfs::absolute(&path)).map_err(|_| ERR_NO_INTERP)?),
         None => None,
     };
     let mut alloc_guard = FRAME_ALLOCATOR.lock();

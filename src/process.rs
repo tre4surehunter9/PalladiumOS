@@ -302,6 +302,13 @@ pub fn with_current_files<T>(f: impl FnOnce(&mut Files) -> T) -> T {
     f(&mut guard)
 }
 
+/// The current process's root directory (chroot), as a real path: "/"
+/// unless it changed it. (Safe during boot, before there's a process.)
+pub fn current_root() -> String {
+    let files = TABLE.lock().get(&current_pid()).map(|p| p.files.clone());
+    files.map_or_else(|| String::from("/"), |f| f.lock().root.clone())
+}
+
 /// Run `f` on the current process's memory bookkeeping (brk, mmap list).
 pub fn with_current_mm<T>(f: impl FnOnce(&mut Mm) -> T) -> T {
     let mm = TABLE.lock().get(&current_pid()).expect("no current process").mm.clone();
@@ -958,7 +965,7 @@ fn load_error_errno(e: &str) -> i64 {
 fn load_executable(path: &str, argv: Vec<String>) -> Result<(String, Vec<u8>, Vec<String>, Option<crate::mounts::Meta>), i64> {
     let cred = current_cred();
     let check = |path: &str| -> Result<(Vec<u8>, crate::mounts::Meta), i64> {
-        let abs = crate::filesystem::normalize(&with_current_files(|f| f.cwd.clone()), path);
+        let abs = crate::vfs::absolute(path);
         let (_, meta) = crate::mounts::stat(&abs)?;
         if meta.kind == crate::mounts::FileType::Dir {
             return Err(EACCES);

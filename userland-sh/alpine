@@ -1,0 +1,62 @@
+#!/bin/busybox sh
+# Copyright (c) 2026 tre4surehunter9
+# alpine: Alpine Linux inside PalladiumOS.
+#
+#   alpine              a shell in Alpine (install packages with: apk add NAME)
+#   alpine CMD [ARGS]   run one command in Alpine
+#
+# The first time, it downloads Alpine's minimal root filesystem into
+# /alpine (its own disk, target/alpine.img) and checks it against the
+# checksum below. Alpine then runs in a chroot: its own /bin, /lib, /usr and
+# /etc, with PalladiumOS's /proc and /dev mounted inside. Needs root.
+VERSION=3.24.4
+# From Alpine's release files (the download is GPG-signed by Natanael Copa,
+# 0482D84022F52DF1C4E7CD43293ACD0907D9495A; checked when this was pinned).
+SHA256=cdaa38cb8de3537967ee5b6c9b6cd00cc962da2b018e6eea48696bb274923012
+# (Plain HTTP: BusyBox's wget here has no TLS of its own. The checksum is
+# what makes the download trustworthy, not the connection.)
+URL=http://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-$VERSION-x86_64.tar.gz
+ROOT=/alpine
+
+if [ "$(id -u)" != 0 ]; then
+    echo "alpine: needs root (log in as root, or: su -c alpine)" >&2
+    exit 1
+fi
+if ! grep -q " $ROOT " /proc/mounts; then
+    echo "alpine: no Alpine disk at $ROOT (cargo run attaches target/alpine.img)" >&2
+    exit 1
+fi
+
+if [ ! -x "$ROOT/bin/busybox" ]; then
+    echo "Installing Alpine Linux $VERSION in $ROOT..."
+    if ! wget -O "$ROOT/minirootfs.tar.gz" "$URL"; then
+        echo "alpine: download failed" >&2
+        exit 1
+    fi
+    sum=$(sha256sum "$ROOT/minirootfs.tar.gz" | cut -d' ' -f1)
+    if [ "$sum" != "$SHA256" ]; then
+        echo "alpine: the download's checksum is wrong ($sum); not installing" >&2
+        rm -f "$ROOT/minirootfs.tar.gz"
+        exit 1
+    fi
+    tar -xzf "$ROOT/minirootfs.tar.gz" -C "$ROOT" || exit 1
+    rm -f "$ROOT/minirootfs.tar.gz"
+    echo "Alpine Linux $VERSION is installed. Install packages with: apk add NAME"
+fi
+
+# DNS from PalladiumOS, and its /proc and /dev.
+cp /etc/resolv.conf "$ROOT/etc/resolv.conf" 2>/dev/null
+grep -q " $ROOT/proc " /proc/mounts || mount -t proc proc "$ROOT/proc"
+grep -q " $ROOT/dev " /proc/mounts || mount -t devtmpfs dev "$ROOT/dev"
+
+# Alpine's programs, with Alpine's usual PATH. PalladiumOS's console
+# (TERM=vga) speaks the basic ANSI sequences, which Alpine's terminfo knows
+# as "ansi"; over SSH, TERM is your terminal's and stays as it is.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+if [ "$TERM" = vga ] || [ -z "$TERM" ]; then
+    export TERM=ansi
+fi
+if [ $# = 0 ]; then
+    exec chroot "$ROOT" /bin/sh -l
+fi
+exec chroot "$ROOT" "$@"

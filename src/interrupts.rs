@@ -97,6 +97,20 @@ pub fn init_idt() {
     IDT.load();
 }
 
+/// Let pending interrupts in for a moment. System calls run with interrupts
+/// off, so long work inside one (reading many disk sectors, filling many
+/// pages) would hold off the keyboard; its controller buffers only a few
+/// keys, and the rest would be lost. Called between units of such work,
+/// never with a lock an interrupt handler takes (PICS, the screen) held.
+/// Does nothing if interrupts are on already.
+pub fn let_in() {
+    if !x86_64::instructions::interrupts::are_enabled() {
+        x86_64::instructions::interrupts::enable();
+        core::hint::spin_loop(); // (sti takes effect after one more instruction)
+        x86_64::instructions::interrupts::disable();
+    }
+}
+
 /// A PCI interrupt: if it's the network card's line, tell the network
 /// stack (which acknowledges the card); then end the interrupt.
 fn pci_irq(line: u8) {

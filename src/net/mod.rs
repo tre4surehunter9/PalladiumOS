@@ -195,6 +195,8 @@ pub fn use_static_config() {
 pub fn write_resolv_conf() {
     let dns = config().and_then(|c| c.dns);
     if let Some(dns) = dns {
+        // (On a fresh disk, /etc doesn't exist yet this early in the boot.)
+        let _ = crate::filesystem::make_dir("/etc");
         let text = alloc::format!("# Written by PalladiumOS from DHCP\nnameserver {}\n", dns);
         let _ = crate::filesystem::write_file("/etc/resolv.conf", &text);
     }

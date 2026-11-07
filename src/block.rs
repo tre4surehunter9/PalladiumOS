@@ -96,6 +96,11 @@ impl AtaDisk {
         AtaDisk::probe(0x170, 0x376, false)
     }
 
+    /// The slave disk on the secondary IDE bus (QEMU's `index=3`).
+    pub fn secondary_slave() -> Option<AtaDisk> {
+        AtaDisk::probe(0x170, 0x376, true)
+    }
+
     fn probe(io: u16, control: u16, slave: bool) -> Option<AtaDisk> {
         let mut disk = AtaDisk { io, control, slave, sectors: 0 };
         unsafe {
@@ -202,6 +207,7 @@ impl BlockDevice for AtaDisk {
 
     fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
         for (i, chunk) in buf.chunks_mut(SECTOR_SIZE).enumerate() {
+            crate::interrupts::let_in(); // (keys typed meanwhile aren't lost)
             self.command(sector + i as u64, CMD_READ_SECTORS)?;
             self.wait_drq()?;
             let mut data: Port<u16> = Port::new(self.io);
@@ -216,6 +222,7 @@ impl BlockDevice for AtaDisk {
 
     fn write(&mut self, sector: u64, data: &[u8]) -> Result<(), &'static str> {
         for (i, chunk) in data.chunks(SECTOR_SIZE).enumerate() {
+            crate::interrupts::let_in();
             self.command(sector + i as u64, CMD_WRITE_SECTORS)?;
             self.wait_drq()?;
             let mut port: Port<u16> = Port::new(self.io);
@@ -244,6 +251,18 @@ pub fn data_disk() -> Option<Box<dyn BlockDevice>> {
 /// libraries for tcc), made by build.rs as target/usr.img.
 pub fn system_disk() -> Option<Box<dyn BlockDevice>> {
     AtaDisk::secondary_master().map(|d| Box::new(d) as Box<dyn BlockDevice>)
+}
+
+/// Mount the Alpine disk (QEMU's `index=3`, target/alpine.img from build.rs)
+/// at /alpine, if there is one: room for an Alpine Linux root filesystem
+/// (see /bin/alpine). Returns its size in MiB.
+pub fn mount_alpine_disk() -> Option<u64> {
+    let dev = AtaDisk::secondary_slave()?;
+    let mib = dev.sectors * 512 / 1024 / 1024;
+    let fs = crate::ext2::Ext2::mount(Box::new(dev)).ok()?;
+    let _ = crate::filesystem::make_dir("/alpine");
+    crate::mounts::mount("/alpine", Box::new(fs));
+    Some(mib)
 }
 
 /// Mount the system disk read-only at /usr, if there is one with files.
