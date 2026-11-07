@@ -38,6 +38,7 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     palladiumos::rtc::init(); // the real date, as at boot (CLOCK_REALTIME)
     palladiumos::net::init(); // loopback, and eth0 if QEMU has a card
     palladiumos::block::mount_system_disk(); // /usr: tcc's headers and libraries, if built
+    palladiumos::block::mount_alpine_disk(); // /alpine: a 64 MiB scratch disk (target/test-scratch.img)
     palladiumos::programs::install();
     for dir in ["/proc", "/dev"] {
         palladiumos::filesystem::make_dir(dir).unwrap();
@@ -129,7 +130,7 @@ fn bundled_programs_are_valid_elfs() {
         if bytes.starts_with(b"#!") {
             continue; // a script (userland-sh/), run by its interpreter
         }
-        let image = elf::parse(bytes).unwrap_or_else(|e| panic!("{}: {}", name, e));
+        let image = elf::parse(bytes, (bytes).len() as u64).unwrap_or_else(|e| panic!("{}: {}", name, e));
         assert!(image.entry >= 0x4000_0000, "{} entry {:#x}", name, image.entry);
     }
 }
@@ -248,50 +249,50 @@ const P_MEMSZ: usize = 40;
 #[test_case]
 fn elf_header_checks() {
     let good = hello();
-    assert!(elf::parse(good).is_ok());
-    assert!(elf::parse(&good[..40]).is_err(), "truncated header");
-    assert!(elf::parse(&good[..200]).is_err(), "truncated segments");
+    assert!(elf::parse(good, (good).len() as u64).is_ok());
+    assert!(elf::parse(&good[..40], (&good[..40]).len() as u64).is_err(), "truncated header");
+    assert!(elf::parse(&good[..200], (&good[..200]).len() as u64).is_err(), "truncated segments");
 
     let mut b = good.to_vec();
     b[4] = 1; // 32-bit
-    assert!(elf::parse(&b).is_err());
+    assert!(elf::parse(&b, (&b).len() as u64).is_err());
 
     let mut b = good.to_vec();
     b[16] = 4; // ET_CORE
-    assert!(elf::parse(&b).is_err());
+    assert!(elf::parse(&b, (&b).len() as u64).is_err());
 
     // ET_DYN (static-PIE) is loaded PIE_BASE higher than its addresses.
     let mut b = good.to_vec();
     b[16] = 3;
-    let (exec, dyn_) = (elf::parse(good).unwrap(), elf::parse(&b).unwrap());
+    let (exec, dyn_) = (elf::parse(good, (good).len() as u64).unwrap(), elf::parse(&b, (&b).len() as u64).unwrap());
     assert_eq!(dyn_.entry, exec.entry + elf::PIE_BASE);
 
     let mut b = good.to_vec();
     b[18] = 3; // EM_386
-    assert!(elf::parse(&b).is_err());
+    assert!(elf::parse(&b, (&b).len() as u64).is_err());
 
     let mut b = good.to_vec();
     b[24..32].copy_from_slice(&0x1234u64.to_le_bytes()); // entry outside code
-    assert!(elf::parse(&b).is_err());
+    assert!(elf::parse(&b, (&b).len() as u64).is_err());
 }
 
 #[test_case]
 fn elf_segment_in_kernel_half_is_rejected() {
     let b = patch_data_segment(hello(), P_VADDR, 0xffff_8000_0000_0000);
-    assert!(elf::parse(&b).is_err());
+    assert!(elf::parse(&b, (&b).len() as u64).is_err());
     assert!(run(&b, &["bad"]).is_err());
 }
 
 #[test_case]
 fn elf_segment_on_null_page_is_rejected() {
     let b = patch_data_segment(hello(), P_VADDR, 0);
-    assert!(elf::parse(&b).is_err());
+    assert!(elf::parse(&b, (&b).len() as u64).is_err());
 }
 
 #[test_case]
 fn elf_huge_segment_is_rejected() {
     let b = patch_data_segment(hello(), P_MEMSZ, 1 << 40);
-    assert!(elf::parse(&b).is_err());
+    assert!(elf::parse(&b, (&b).len() as u64).is_err());
 }
 
 #[test_case]
@@ -1685,7 +1686,7 @@ fn fastfetch_port_works() {
     let _ = filesystem::make_dir("/tmp");
     assert_eq!(sh("fastfetch --logo none > /tmp/ff 2>&1"), 0);
     let out = file("/tmp/ff");
-    for want in ["OS: PalladiumOS 0.6.0 x86_64", "Kernel: PalladiumOS 0.6.0", "Memory: ", "Disk (/): "] {
+    for want in ["OS: PalladiumOS 0.6.1 x86_64", "Kernel: PalladiumOS 0.6.1", "Memory: ", "Disk (/): "] {
         assert!(out.contains(want), "{:?} missing from:\n{}", want, out);
     }
     assert!(!out.contains("not implemented"), "{}", out);
@@ -1889,6 +1890,20 @@ fn posix_threads_work() {
     assert_eq!(file("/tmp/thr2.out"), "the other thread finished\n");
     assert!(only_kernel_left(), "{:?}", process::list());
     assert_eq!(frames_in_use(), before, "threads' stacks and memory were freed");
+}
+
+#[test_case]
+fn epoll_eventfd_and_big_programs() {
+    let Some(_) = c_program("test_events") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let before = frames_in_use();
+    // (The 34 MiB program goes on the scratch disk: memory filesystems
+    // limit files to 4 MiB.)
+    let status = sh("test_events /alpine > /tmp/ev.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/ev.out"));
+    assert!(file("/tmp/ev.out").contains("all checks passed"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+    assert_eq!(frames_in_use(), before, "the big program's memory was freed");
 }
 
 #[test_case]

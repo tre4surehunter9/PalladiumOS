@@ -336,6 +336,36 @@ pub const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
 /// present and USER_ACCESSIBLE at every page-table level (and WRITABLE too
 /// if `write` is set). Syscalls must call this before touching user pointers,
 /// otherwise a ring-3 program could make the kernel read or write kernel memory.
+/// Call `f` with each mapped 4 KiB page in [start, end) of the lower half
+/// of `p4`'s address space. Walks the page tables, so huge unmapped areas
+/// (reservations of gigabytes) cost nothing.
+pub fn for_each_mapped(p4: PhysFrame, start: u64, end: u64, mut f: impl FnMut(u64)) {
+    fn walk(table: PhysFrame, level: u32, base: u64, start: u64, end: u64, f: &mut dyn FnMut(u64)) {
+        let span = 1u64 << (12 + 9 * (level - 1));
+        let t = table_at(table);
+        let first = (start.saturating_sub(base) / span) as usize;
+        for i in first..512 {
+            let lo = base + i as u64 * span;
+            if lo >= end {
+                break;
+            }
+            let e = &t[i];
+            if e.is_unused() || !e.flags().contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            if level == 1 {
+                f(lo);
+            } else if !e.flags().contains(PageTableFlags::HUGE_PAGE) {
+                walk(e.frame().unwrap(), level - 1, lo, start, end, f);
+            }
+        }
+    }
+    let end = end.min(USER_SPACE_END);
+    if start < end {
+        walk(p4, 4, 0, start, end, &mut f);
+    }
+}
+
 pub fn is_user_range(ptr: u64, len: u64, write: bool) -> bool {
     if len == 0 {
         return true;
@@ -347,6 +377,10 @@ pub fn is_user_range(ptr: u64, len: u64, write: bool) -> bool {
 
     let mut page = ptr & !0xfff;
     while page < end {
+        // Memory mmap'd but not touched yet gets its page now.
+        if !is_user_page(VirtAddr::new(page), false) {
+            crate::mmap::fault_in(page);
+        }
         if !is_user_page(VirtAddr::new(page), write) {
             // A shared copy-on-write page: the kernel is about to write it
             // for the program (read() into a buffer...), so copy it first.

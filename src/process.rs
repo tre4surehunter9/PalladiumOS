@@ -84,8 +84,9 @@ pub enum State {
 pub struct Mm {
     /// Current program break (end of the brk heap), see sys_brk.
     pub brk: u64,
-    /// Memory mapped with mmap (start, end), sorted.
-    pub maps: Vec<(u64, u64)>,
+    /// mmap'd ranges, sorted: (start, end, protection). Anonymous memory
+    /// gets its pages when first touched (see mmap::fault_in).
+    pub maps: Vec<(u64, u64, u64)>,
 }
 
 impl Mm {
@@ -313,6 +314,15 @@ pub fn current_root() -> String {
 }
 
 /// Run `f` on the current process's memory bookkeeping (brk, mmap list).
+/// Like with_current_mm, but None instead of waiting if the process table
+/// or the memory description is busy (for the page fault path: a fault
+/// can't wait for a lock the faulting code itself holds).
+pub fn try_with_current_mm<T>(f: impl FnOnce(&mut Mm) -> T) -> Option<T> {
+    let mm = TABLE.try_lock()?.get(&current_pid())?.mm.clone();
+    let mut guard = mm.try_lock()?;
+    Some(f(&mut guard))
+}
+
 pub fn with_current_mm<T>(f: impl FnOnce(&mut Mm) -> T) -> T {
     let mm = TABLE.lock().get(&current_pid()).expect("no current process").mm.clone();
     let mut guard = mm.lock();
@@ -965,20 +975,23 @@ fn load_error_errno(e: &str) -> i64 {
 /// instead: `#!/bin/sh -x` in /s.sh with argv [s.sh, a] becomes
 /// /bin/sh with argv [/bin/sh, -x, /s.sh, a]. Returns (program path,
 /// ELF bytes, argv).
-fn load_executable(path: &str, argv: Vec<String>) -> Result<(String, Vec<u8>, Vec<String>, Option<crate::mounts::Meta>), i64> {
+fn load_executable(path: &str, argv: Vec<String>) -> Result<(String, usermode::Program<'static>, Vec<String>, Option<crate::mounts::Meta>), i64> {
     let cred = current_cred();
-    let check = |path: &str| -> Result<(Vec<u8>, crate::mounts::Meta), i64> {
+    // The file (read piece by piece when loaded) and its first bytes.
+    let check = |path: &str| -> Result<(usermode::Program<'static>, Vec<u8>, crate::mounts::Meta), i64> {
         let abs = crate::vfs::absolute(path);
         let (_, meta) = crate::mounts::stat(&abs)?;
         if meta.kind == crate::mounts::FileType::Dir {
             return Err(EACCES);
         }
         crate::perm::check(&meta, &cred, crate::perm::EXEC)?; // not executable (for us)
-        Ok((vfs::read_whole_file(path)?, meta))
+        let file = usermode::Program::open(&abs)?;
+        let head = file.head(256).map_err(|_| crate::syscall::EIO)?;
+        Ok((file, head, meta))
     };
-    let (bytes, meta) = check(path)?;
+    let (file, bytes, meta) = check(path)?;
     if crate::elf::is_elf(&bytes) {
-        return Ok((path.to_string(), bytes, argv, Some(meta)));
+        return Ok((path.to_string(), file, argv, Some(meta)));
     }
     if !bytes.starts_with(b"#!") {
         // Not an executable format: a text file must not be run as raw code.
@@ -994,8 +1007,8 @@ fn load_executable(path: &str, argv: Vec<String>) -> Result<(String, Vec<u8>, Ve
     if interp.is_empty() {
         return Err(ENOEXEC);
     }
-    let (interp_bytes, _) = check(interp)?;
-    if !crate::elf::is_elf(&interp_bytes) {
+    let (interp_file, interp_head, _) = check(interp)?;
+    if !crate::elf::is_elf(&interp_head) {
         return Err(ENOEXEC); // an interpreter that's a script itself isn't supported
     }
     let mut new_argv = vec![interp.to_string()];
@@ -1005,7 +1018,7 @@ fn load_executable(path: &str, argv: Vec<String>) -> Result<(String, Vec<u8>, Ve
     new_argv.push(path.to_string());
     new_argv.extend(argv.into_iter().skip(1));
     // (setuid/setgid bits on scripts are ignored, as on Linux.)
-    Ok((interp.to_string(), interp_bytes, new_argv, None))
+    Ok((interp.to_string(), interp_file, new_argv, None))
 }
 
 /// execve(path, argv, envp): replace the current program. On success it
@@ -1194,7 +1207,7 @@ fn program_path(name: &str) -> String {
 pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static str> {
     let c = current_cred();
     let ids = usermode::Ids { uid: c.ruid, euid: c.euid, gid: c.rgid, egid: c.egid };
-    let image = usermode::build_image(bytes, argv, envp, ids)?;
+    let image = usermode::build_image(&usermode::Program::Bytes(bytes), argv, envp, ids)?;
     let frame = SyscallFrame::new_user(image.entry, image.stack_pointer);
     let (kernel_stack, kernel_rsp) = new_kernel_stack(&frame);
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
@@ -2636,6 +2649,51 @@ fn fill_rusage(ptr: u64, cpu_ticks: u64) {
 /// getpid(): the process (thread group) ID.
 pub fn current_tgid() -> u64 {
     TABLE.lock().get(&current_pid()).map_or(0, |p| p.tgid)
+}
+
+/// How many processes (and threads) exist.
+pub fn process_count() -> usize {
+    TABLE.lock().len()
+}
+
+/// prctl(option, arg2): naming the thread, and the options programs set
+/// as a precaution (accepted: they change nothing here).
+pub fn sys_prctl(option: u64, arg2: u64) -> i64 {
+    const PR_SET_PDEATHSIG: u64 = 1;
+    const PR_GET_PDEATHSIG: u64 = 2;
+    const PR_GET_DUMPABLE: u64 = 3;
+    const PR_SET_DUMPABLE: u64 = 4;
+    const PR_SET_NAME: u64 = 15;
+    const PR_GET_NAME: u64 = 16;
+    const PR_SET_NO_NEW_PRIVS: u64 = 38;
+    const PR_GET_NO_NEW_PRIVS: u64 = 39;
+    const PR_SET_VMA: u64 = 0x5356_4d41;
+    match option {
+        PR_SET_NAME => {
+            let Some(b) = (unsafe { user_slice(arg2, 16) }) else { return -EFAULT };
+            let name = b.split(|&c| c == 0).next().unwrap_or(&[]);
+            let name = String::from_utf8_lossy(name).into_owned();
+            with_current(|p| p.name = name);
+            0
+        }
+        PR_GET_NAME => {
+            let name = with_current(|p| p.name.clone());
+            let Some(out) = (unsafe { user_slice_mut(arg2, 16) }) else { return -EFAULT };
+            out.fill(0);
+            let n = name.len().min(15);
+            out[..n].copy_from_slice(&name.as_bytes()[..n]);
+            0
+        }
+        PR_GET_PDEATHSIG => {
+            let Some(out) = (unsafe { user_slice_mut(arg2, 4) }) else { return -EFAULT };
+            out.fill(0);
+            0
+        }
+        PR_GET_DUMPABLE => 1,
+        PR_GET_NO_NEW_PRIVS => 0,
+        PR_SET_PDEATHSIG | PR_SET_DUMPABLE | PR_SET_NO_NEW_PRIVS | PR_SET_VMA => 0,
+        _ => -EINVAL,
+    }
 }
 
 /// set_tid_address(addr): zero and futex-wake `addr` when this thread

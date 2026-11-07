@@ -73,6 +73,20 @@ pub const SYS_GETRANDOM: u64 = 318;
 pub const SYS_CLONE: u64 = 56;
 pub const SYS_RSEQ: u64 = 334;
 pub const SYS_FUTEX: u64 = 202;
+pub const SYS_SYSINFO: u64 = 99;
+pub const SYS_PRCTL: u64 = 157;
+pub const SYS_EPOLL_CREATE: u64 = 213;
+pub const SYS_EPOLL_WAIT: u64 = 232;
+pub const SYS_EPOLL_CTL: u64 = 233;
+pub const SYS_EPOLL_PWAIT: u64 = 281;
+pub const SYS_EVENTFD: u64 = 284;
+pub const SYS_EVENTFD2: u64 = 290;
+pub const SYS_EPOLL_CREATE1: u64 = 291;
+pub const SYS_PIDFD_OPEN: u64 = 434;
+pub const SYS_EPOLL_PWAIT2: u64 = 441;
+pub const SYS_CAPGET: u64 = 125;
+pub const SYS_SIGALTSTACK: u64 = 131;
+pub const SYS_IO_URING_SETUP: u64 = 425;
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_CONNECT: u64 = 42;
 pub const SYS_ACCEPT: u64 = 43;
@@ -519,7 +533,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_MMAP => crate::mmap::sys_mmap(a1, a2, a3, a4, a5, frame.r9),
         SYS_MUNMAP => crate::mmap::sys_munmap(a1, a2),
         SYS_MPROTECT => crate::mmap::sys_mprotect(a1, a2, a3),
-        SYS_MREMAP => -ENOMEM, // libc falls back to allocate + copy
+        SYS_MREMAP => crate::mmap::sys_mremap(a1, a2),
         SYS_MADVISE | SYS_MSYNC => 0,
         // files
         SYS_PREAD64 => match unsafe { user_slice_mut(a2, a3) } {
@@ -545,6 +559,22 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_SET_ROBUST_LIST => 0,
         // Restartable sequences: optional (glibc tries it and carries on).
         SYS_RSEQ => -ENOSYS,
+        SYS_PIDFD_OPEN => -ENOSYS, // (callers fall back to waitpid)
+        SYS_IO_URING_SETUP => -ENOSYS, // (callers fall back to epoll)
+        SYS_CAPGET => sys_capget(a1, a2),
+        SYS_SIGALTSTACK => sys_sigaltstack(a1, a2),
+        SYS_SYSINFO => sys_sysinfo(a1),
+        SYS_PRCTL => process::sys_prctl(a1, a2),
+        SYS_EVENTFD => vfs::sys_eventfd2(a1, 0),
+        SYS_EVENTFD2 => vfs::sys_eventfd2(a1, a2),
+        SYS_EPOLL_CREATE => if (a1 as i32) <= 0 { -EINVAL } else { vfs::sys_epoll_create(0) },
+        SYS_EPOLL_CREATE1 => vfs::sys_epoll_create(a1),
+        SYS_EPOLL_CTL => vfs::sys_epoll_ctl(a1, a2, a3, a4),
+        SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT => vfs::sys_epoll_wait(a1, a2, a3, ms_deadline(a4 as i32 as i64)),
+        SYS_EPOLL_PWAIT2 => match timespec_deadline(a4) {
+            Ok(d) => vfs::sys_epoll_wait(a1, a2, a3, d),
+            Err(e) => -e,
+        },
         SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(a2, a3),
         // limits, time, randomness
         SYS_GETRLIMIT => sys_prlimit(a1, 0, a2),
@@ -706,6 +736,89 @@ fn sys_iov(fd: u64, iov: u64, count: u64, write: bool) -> i64 {
         }
     }
     total
+}
+
+/// A timeout in milliseconds (-1: forever) as a deadline in ticks
+/// (Some(0): don't wait).
+fn ms_deadline(ms: i64) -> Option<u64> {
+    match ms {
+        ..0 => None,
+        0 => Some(0),
+        ms => Some(process::ticks() + (ms as u64 * 1_000_000).div_ceil(process::TICK_NS)),
+    }
+}
+
+/// A timeout timespec (NULL: forever) as a deadline in ticks.
+fn timespec_deadline(ts: u64) -> Result<Option<u64>, i64> {
+    if ts == 0 {
+        return Ok(None);
+    }
+    let t = unsafe { user_slice(ts, 16) }.ok_or(EFAULT)?;
+    let sec = u64::from_le_bytes(t[0..8].try_into().unwrap());
+    let nsec = u64::from_le_bytes(t[8..16].try_into().unwrap());
+    let ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
+    Ok(Some(if ns == 0 { 0 } else { process::ticks() + ns.div_ceil(process::TICK_NS) }))
+}
+
+/// capget(header, data): no capabilities (root's power comes from uid 0).
+fn sys_capget(header: u64, data: u64) -> i64 {
+    const VERSION_3: u32 = 0x2008_0522;
+    let Some(h) = (unsafe { user_slice_mut(header, 8) }) else { return -EFAULT };
+    let version = u32::from_le_bytes(h[0..4].try_into().unwrap());
+    if version != VERSION_3 && version != 0x2007_1026 && version != 0x1998_0330 {
+        h[0..4].copy_from_slice(&VERSION_3.to_le_bytes()); // tell the caller ours
+        return if data == 0 { 0 } else { -EINVAL };
+    }
+    if data != 0 {
+        let words = if version == 0x1998_0330 { 1 } else { 2 };
+        let Some(d) = (unsafe { user_slice_mut(data, 12 * words) }) else { return -EFAULT };
+        d.fill(0);
+    }
+    0
+}
+
+/// sigaltstack(new, old): remember an alternate signal stack. (Handlers
+/// still run on the normal stack; programs set one up as a precaution, for
+/// handling a stack overflow.)
+fn sys_sigaltstack(new: u64, old: u64) -> i64 {
+    const SS_DISABLE: u32 = 2;
+    static ALT: spin::Mutex<alloc::collections::BTreeMap<u64, [u8; 24]>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
+    let pid = process::current_pid();
+    if old != 0 {
+        let Some(o) = (unsafe { user_slice_mut(old, 24) }) else { return -EFAULT };
+        match ALT.lock().get(&pid) {
+            Some(s) => o.copy_from_slice(s),
+            None => {
+                o.fill(0);
+                o[8..12].copy_from_slice(&SS_DISABLE.to_le_bytes());
+            }
+        }
+    }
+    if new != 0 {
+        let Some(n) = (unsafe { user_slice(new, 24) }) else { return -EFAULT };
+        let mut s = [0u8; 24];
+        s.copy_from_slice(n);
+        ALT.lock().insert(pid, s);
+    }
+    0
+}
+
+/// sysinfo(info): uptime, memory and the number of processes.
+fn sys_sysinfo(out: u64) -> i64 {
+    let Some(b) = (unsafe { user_slice_mut(out, 112) }) else { return -EFAULT };
+    b.fill(0);
+    let (total, used) = {
+        let mut a = crate::memory::FRAME_ALLOCATOR.lock();
+        let f = a.as_mut().unwrap();
+        (f.total_frames() as u64, f.frames_in_use() as u64)
+    };
+    let uptime = process::ticks() * process::TICK_NS / 1_000_000_000;
+    b[0..8].copy_from_slice(&uptime.to_le_bytes());
+    b[32..40].copy_from_slice(&(total * 4096).to_le_bytes()); // totalram
+    b[40..48].copy_from_slice(&(total.saturating_sub(used) * 4096).to_le_bytes()); // freeram
+    b[80..82].copy_from_slice(&(process::process_count() as u16).to_le_bytes());
+    b[104..108].copy_from_slice(&1u32.to_le_bytes()); // mem_unit
+    0
 }
 
 /// poll(fds, nfds, timeout ms; -1 = forever)

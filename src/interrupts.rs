@@ -211,6 +211,10 @@ extern "x86-interrupt" fn page_fault_handler(
         {
             return;
         }
+        // mmap'd memory touched for the first time: give it a page, retry.
+        if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) && crate::mmap::fault_in(addr) {
+            return;
+        }
         println!("Segmentation fault (address {:?}, rip {:?})",
                  Cr2::read(), stack_frame.instruction_pointer);
         crate::process::kill_current(SIGSEGV);

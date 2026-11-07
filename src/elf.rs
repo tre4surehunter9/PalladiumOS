@@ -32,19 +32,23 @@ const PHDR_SIZE: usize = 56;
 /// Lowest address a segment may use (keeps the null page unmapped).
 const USER_SPACE_START: u64 = 0x1000;
 /// Upper limit on the memory of all segments combined.
-const MAX_IMAGE_SIZE: u64 = 16 * 1024 * 1024;
+const MAX_IMAGE_SIZE: u64 = 1024 * 1024 * 1024;
 
-pub struct Segment<'a> {
+pub struct Segment {
     pub vaddr: u64,
     pub memsz: u64,
-    /// The first `filesz` bytes; the rest (up to memsz) is zero-filled (.bss).
-    pub data: &'a [u8],
+    /// Where its first `filesz` bytes are in the file; the rest (up to
+    /// memsz) is zero-filled (.bss).
+    pub offset: u64,
+    pub filesz: u64,
     pub flags: u32,
 }
 
-pub struct Elf<'a> {
+/// A parsed ELF file. The parser only needs the start of the file (the
+/// headers, see HEAD_SIZE); segments say where their data is in the file.
+pub struct Elf {
     pub entry: u64,
-    pub segments: Vec<Segment<'a>>,
+    pub segments: Vec<Segment>,
     /// Where the program headers are in memory (0 if not loaded), their
     /// count and size: for the aux vector (libc finds TLS etc. there).
     pub phdr: u64,
@@ -75,23 +79,28 @@ fn u64_at(b: &[u8], off: usize) -> Result<u64, &'static str> {
 }
 
 /// A program: ET_EXEC where it says, ET_DYN at PIE_BASE.
-pub fn parse(b: &[u8]) -> Result<Elf<'_>, &'static str> {
-    parse_with(b, PIE_BASE)
+/// How much of the start of a file the parser gets: enough for the ELF
+/// header, the program headers and PT_INTERP in any normal program.
+pub const HEAD_SIZE: usize = 64 * 1024;
+
+/// `b`: the start of the file; `file_size`: the whole file's size.
+pub fn parse(b: &[u8], file_size: u64) -> Result<Elf, &'static str> {
+    parse_with(b, file_size, PIE_BASE)
 }
 
 /// A program's interpreter: a shared object (ET_DYN), loaded at INTERP_BASE.
-pub fn parse_interp(b: &[u8]) -> Result<Elf<'_>, &'static str> {
+pub fn parse_interp(b: &[u8], file_size: u64) -> Result<Elf, &'static str> {
     if b.len() >= 18 && u16_at(b, 16)? != ET_DYN {
         return Err("the program interpreter isn't a shared object");
     }
-    let elf = parse_with(b, INTERP_BASE)?;
+    let elf = parse_with(b, file_size, INTERP_BASE)?;
     if elf.interp.is_some() {
         return Err("the program interpreter has an interpreter itself");
     }
     Ok(elf)
 }
 
-fn parse_with(b: &[u8], dyn_base: u64) -> Result<Elf<'_>, &'static str> {
+fn parse_with(b: &[u8], file_size: u64, dyn_base: u64) -> Result<Elf, &'static str> {
     if !is_elf(b) {
         return Err("not an ELF file");
     }
@@ -169,16 +178,14 @@ fn parse_with(b: &[u8], dyn_base: u64) -> Result<Elf<'_>, &'static str> {
         if total > MAX_IMAGE_SIZE {
             return Err("program too large");
         }
-        let start = offset as usize;
-        let data = start
-            .checked_add(filesz as usize)
-            .and_then(|stop| b.get(start..stop))
-            .ok_or("segment data outside file")?;
+        if offset.checked_add(filesz).is_none_or(|stop| stop > file_size) {
+            return Err("segment data outside file");
+        }
 
         if (offset..offset + filesz).contains(&(phoff as u64)) && phoff as u64 + (phnum * PHDR_SIZE) as u64 <= offset + filesz {
             phdr = vaddr + (phoff as u64 - offset);
         }
-        segments.push(Segment { vaddr, memsz, data, flags });
+        segments.push(Segment { vaddr, memsz, offset, filesz, flags });
     }
 
     if segments.is_empty() {

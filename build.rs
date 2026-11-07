@@ -162,6 +162,11 @@ fn make_disk_images(root: &std::path::Path, out_dir: &std::path::Path) {
     let test_disk = target.join("test-disk.img");
     let _ = fs::remove_file(&test_disk);
     mke2fs(&test_disk, "4M", None, &[]);
+    // And a bigger one (sparse), for files larger than memory filesystems
+    // allow: the usermode tests mount it at /alpine.
+    let scratch = target.join("test-scratch.img");
+    let _ = fs::remove_file(&scratch);
+    mke2fs(&scratch, "64M", None, &[]);
 
     // A small prefilled image the ext2 tests load into a RAM disk.
     let content = out_dir.join("ext2-test-content");

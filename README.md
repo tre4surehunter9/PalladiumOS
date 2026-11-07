@@ -28,11 +28,11 @@
 
 ## Features
 * **Linux-compatible system calls** (the x86_64 ABI): ordinary Linux programs run unchanged, static or dynamically linked (with musl's or glibc's own dynamic linker), including C programs built with an unmodified [musl](https://musl.libc.org) libc
-* **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control
+* **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control, `epoll` and `eventfd` event loops, and memory on demand (programs can reserve gigabytes and only use what they touch; programs bigger than the kernel's heap load piece by piece)
 * **Users and permissions**: login, passwords, POSIX file permissions, setuid programs, `su`
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
 * **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink, and an **SSH server** (Dropbear): log in from your own terminal with `ssh -p 2222 root@localhost`
-* **Alpine Linux**: `alpine` sets up a real Alpine root filesystem on its own disk, where `apk add` installs Alpine's packages (Python, nano, ...) and they run on PalladiumOS
+* **Alpine Linux**: `alpine` sets up a real Alpine root filesystem on its own disk, where `apk add` installs Alpine's packages (Python, Node.js, git, curl, vim, ...) and they run on PalladiumOS
 * **Terminals**: pseudo-terminals (`/dev/ptmx`, `/dev/pts/N`), sessions and controlling terminals, job control
 * **A userland**: a POSIX-style shell, about 50 of PalladiumOS's own tools, and ported software: BusyBox, Lua, dash, MicroPython, fastfetch and TinyCC (a C compiler that runs inside PalladiumOS)
 * **A Linux-style boot log** with `[  OK  ]` lines, and `dmesg`
@@ -112,7 +112,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 6 | lstat | yes |
 | 7 / 271 | poll, ppoll | yes (pipes, sockets, terminals; files are always ready) |
 | 8 | lseek | yes |
-| 9 / 10 / 11 | mmap, mprotect, munmap | anonymous and private file mappings (no writable shared file mappings) |
+| 9 / 10 / 11 | mmap, mprotect, munmap | anonymous (memory comes when a page is first used, so reserving gigabytes is free) and private file mappings (no writable shared file mappings) |
 | 12 | brk | yes (the heap behind `userlib`'s allocator) |
 | 13 | rt_sigaction | yes (handlers, `SA_RESTART`, `SA_NODEFER`, `SA_RESETHAND`, `SA_NOCLDSTOP`, `sa_mask`) |
 | 14 | rt_sigprocmask | yes |
@@ -124,6 +124,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 22 | pipe | yes |
 | 23 / 270 | select, pselect6 | yes (on top of poll) |
 | 24 | sched_yield | yes |
+| 25 | mremap | answers like Linux (`ENOMEM`, or `EFAULT` outside memory); libc then allocates and copies |
 | 32 | dup | yes |
 | 33 | dup2 | yes |
 | 34 | pause | yes |
@@ -158,6 +159,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 92/93/94/260 | chown, fchown, lchown, fchownat | yes |
 | 95 | umask | yes |
 | 97 / 302 | getrlimit, prlimit64 | reports the limits (setting is ignored) |
+| 99 | sysinfo | uptime, memory, number of processes |
 | 102/104/107/108 | getuid, getgid, geteuid, getegid | yes |
 | 105/106/113/114/117/119 | setuid, setgid, setreuid, setregid, setresuid, setresgid | yes (POSIX rules) |
 | 109 | setpgid | yes |
@@ -167,9 +169,12 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 115/116 | getgroups, setgroups | yes |
 | 118/120 | getresuid, getresgid | yes |
 | 121 | getpgid | yes |
+| 125 | capget | no capabilities (root is uid 0) |
 | 127 | rt_sigpending | yes |
 | 130 | rt_sigsuspend | yes |
+| 131 | sigaltstack | remembered (handlers run on the normal stack) |
 | 137 | statfs | yes (also fstatfs) |
+| 157 | prctl | `PR_SET_NAME`/`PR_GET_NAME`; the precautionary options are accepted |
 | 158 | arch_prctl | FS/GS base (thread-local storage) |
 | 161 | chroot | yes (root only; paths, symlinks, `..` and the program interpreter stay inside) |
 | 162 | sync | yes |
@@ -178,14 +183,18 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 186 | gettid | yes (`getpid` is the process, `gettid` the thread) |
 | 200/234 | tkill, tgkill | yes |
 | 202 | futex | `WAIT`, `WAKE` (and `_BITSET`), `REQUEUE`, `CMP_REQUEUE`, timeouts |
+| 213 / 291 | epoll_create, epoll_create1 | yes |
 | 217 | getdents64 | yes |
 | 218 | set_tid_address | yes |
 | 228 | clock_gettime | yes (time since boot) |
 | 230 | clock_nanosleep | yes (`TIMER_ABSTIME` too) |
 | 231 | exit_group | yes |
+| 232 / 281 / 441 | epoll_wait, epoll_pwait, epoll_pwait2 | level-triggered (edge-triggered requests too), `EPOLLONESHOT`, timeouts |
+| 233 | epoll_ctl | `ADD`, `MOD`, `DEL` (regular files refused, as on Linux) |
 | 257 | openat | yes |
 | 258-263 | mkdirat, newfstatat, unlinkat | yes |
 | 280 | utimensat | modification time |
+| 284 / 290 | eventfd, eventfd2 | yes (`EFD_SEMAPHORE`, `EFD_NONBLOCK`) |
 | 292 | dup3 | yes (`O_CLOEXEC`) |
 | 293 | pipe2 | yes (`O_CLOEXEC`, `O_NONBLOCK`) |
 | 318 | getrandom | yes (RDRAND when available) |

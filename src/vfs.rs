@@ -100,6 +100,23 @@ enum Kind {
     /// A pseudo-terminal end: /dev/ptmx (master) or /dev/pts/N (slave).
     /// `loc` is its /dev entry (for fstat).
     Pty { end: Arc<crate::pty::End>, loc: Loc },
+    /// eventfd: a counter that wakes readers when it's not zero.
+    EventFd(Arc<Mutex<EventFd>>),
+    /// epoll: a list of fds to watch.
+    Epoll(Arc<Mutex<Vec<EpollEntry>>>),
+}
+
+struct EventFd {
+    count: u64,
+    /// EFD_SEMAPHORE: each read takes 1 instead of everything.
+    semaphore: bool,
+}
+
+#[derive(Clone, Copy)]
+struct EpollEntry {
+    fd: i32,
+    events: u32,
+    data: u64,
 }
 
 /// An open file description.
@@ -150,6 +167,8 @@ fn handle(kind: Kind) -> Handle {
         Kind::File { path, .. } | Kind::Dir { path, .. } => path.clone(),
         Kind::PipeRead(r) => alloc::format!("pipe:[{}]", pipe::id(&r.pipe())),
         Kind::PipeWrite(w) => alloc::format!("pipe:[{}]", pipe::id(&w.pipe())),
+        Kind::EventFd(_) => "anon_inode:[eventfd]".to_string(),
+        Kind::Epoll(_) => "anon_inode:[eventpoll]".to_string(),
     };
     Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0, nonblocking: false }) })
 }
@@ -707,6 +726,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                     Kind::PipeWrite(_) => (O_WRONLY | nb) as i64,
                     Kind::PipeRead(_) => (O_RDONLY | nb) as i64,
                     Kind::Dir { .. } => O_RDONLY as i64,
+                    Kind::EventFd(_) | Kind::Epoll(_) => (O_RDWR | nb) as i64,
                 }
             }
             // Record locks: granted (see sys_flock). F_GETLK reports
@@ -794,6 +814,13 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
         }
         Kind::Dir { .. } => -EISDIR,
         Kind::PipeWrite(_) => -EBADF,
+        Kind::EventFd(e) => {
+            let e = e.clone();
+            let nonblocking = desc.nonblocking;
+            drop(desc);
+            eventfd_read(&e, nonblocking, buf)
+        }
+        Kind::Epoll(_) => -EINVAL,
     }
 }
 
@@ -909,6 +936,13 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
         }
         Kind::Dir { .. } => -EISDIR,
         Kind::PipeRead(_) => -EBADF,
+        Kind::EventFd(e) => {
+            let e = e.clone();
+            let nonblocking = desc.nonblocking;
+            drop(desc);
+            eventfd_write(&e, nonblocking, bytes)
+        }
+        Kind::Epoll(_) => -EINVAL,
     }
 }
 
@@ -948,7 +982,7 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
         }
         Kind::Dir { .. } => -EINVAL,
         Kind::Null | Kind::Zero | Kind::Random => 0,
-        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } => -ESPIPE,
+        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } | Kind::EventFd(_) | Kind::Epoll(_) => -ESPIPE,
     }
 }
 
@@ -1026,6 +1060,10 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
         }
         Kind::PipeRead(_) | Kind::PipeWrite(_) => {
             fill_stat(out, 0, 0, S_IFIFO | 0o600, 1, 0, 0);
+            0
+        }
+        Kind::EventFd(_) | Kind::Epoll(_) => {
+            fill_stat(out, 0, 0, 0o600, 1, 0, 0); // an anonymous inode
             0
         }
         Kind::File { loc, .. } | Kind::Dir { loc, .. } => stat_loc(*loc, out),
@@ -1616,6 +1654,17 @@ pub fn poll_ready(fd: i32, events: i16) -> i16 {
             let (r, w, hup) = crate::pty::readiness(end);
             (if r { POLLIN } else { 0 }) | (if w { POLLOUT } else { 0 }) | (if hup { POLLHUP } else { 0 })
         }
+        Kind::EventFd(e) => (if e.lock().count > 0 { POLLIN } else { 0 }) | POLLOUT,
+        Kind::Epoll(list) => {
+            // Readable when something it watches is ready (epolls inside
+            // epolls aren't looked into).
+            let list = list.lock().clone();
+            let any = list.iter().any(|e| {
+                e.events & EPOLL_EVENTS != 0 && get(e.fd as u64).is_ok_and(|h| !matches!(h.lock().kind, Kind::Epoll(_)))
+                    && poll_ready(e.fd, (e.events & EPOLL_EVENTS) as i16) != 0
+            });
+            if any { POLLIN } else { 0 }
+        }
         // Files and devices never block.
         _ => POLLIN | POLLOUT,
     };
@@ -2167,4 +2216,206 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
         }
         Ok(n as i64)
     })())
+}
+
+// ---------------------------------------------------------------- eventfd
+
+const EFD_SEMAPHORE: u64 = 1;
+
+/// eventfd2(initial value, flags: EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE)
+pub fn sys_eventfd2(initval: u64, flags: u64) -> i64 {
+    if flags & !(O_CLOEXEC | O_NONBLOCK | EFD_SEMAPHORE) != 0 {
+        return -EINVAL;
+    }
+    let h = handle(Kind::EventFd(Arc::new(Mutex::new(EventFd { count: initval & 0xFFFF_FFFF, semaphore: flags & EFD_SEMAPHORE != 0 }))));
+    h.lock().nonblocking = flags & O_NONBLOCK != 0;
+    match with_process(|p| alloc_fd(p, h, flags & O_CLOEXEC != 0)) {
+        Ok(fd) => fd as i64,
+        Err(e) => -e,
+    }
+}
+
+/// The eventfd's key for sleeping on (its address).
+fn eventfd_key(e: &Arc<Mutex<EventFd>>) -> u64 {
+    0x7E7E_0000_0000_0000 ^ (Arc::as_ptr(e) as u64)
+}
+
+fn eventfd_read(e: &Arc<Mutex<EventFd>>, nonblocking: bool, buf: &mut [u8]) -> i64 {
+    if buf.len() < 8 {
+        return -EINVAL;
+    }
+    loop {
+        {
+            let mut ev = e.lock();
+            if ev.count > 0 {
+                let value = if ev.semaphore { 1 } else { ev.count };
+                ev.count -= value;
+                drop(ev);
+                buf[..8].copy_from_slice(&value.to_le_bytes());
+                crate::process::wake(eventfd_key(e)); // writers waiting for room
+                return 8;
+            }
+        }
+        if nonblocking {
+            return -EAGAIN;
+        }
+        if crate::process::signal_pending() {
+            return -EINTR;
+        }
+        crate::process::block_on(eventfd_key(e));
+    }
+}
+
+fn eventfd_write(e: &Arc<Mutex<EventFd>>, nonblocking: bool, data: &[u8]) -> i64 {
+    if data.len() < 8 {
+        return -EINVAL;
+    }
+    let value = u64::from_le_bytes(data[..8].try_into().unwrap());
+    if value == u64::MAX {
+        return -EINVAL;
+    }
+    loop {
+        {
+            let mut ev = e.lock();
+            if ev.count.checked_add(value).is_some_and(|c| c < u64::MAX) {
+                ev.count += value;
+                drop(ev);
+                crate::process::wake(eventfd_key(e));
+                return 8;
+            }
+        }
+        if nonblocking {
+            return -EAGAIN;
+        }
+        if crate::process::signal_pending() {
+            return -EINTR;
+        }
+        crate::process::block_on(eventfd_key(e));
+    }
+}
+
+// ---------------------------------------------------------------- epoll
+
+const EPOLL_CTL_ADD: u64 = 1;
+const EPOLL_CTL_DEL: u64 = 2;
+const EPOLL_CTL_MOD: u64 = 3;
+/// The events poll() also knows (EPOLLIN, PRI, OUT, ERR, HUP, ...).
+const EPOLL_EVENTS: u32 = 0x3F;
+const EPOLLONESHOT: u32 = 1 << 30;
+
+/// epoll_create1(flags: EPOLL_CLOEXEC), and epoll_create(size)
+pub fn sys_epoll_create(flags: u64) -> i64 {
+    if flags & !O_CLOEXEC != 0 {
+        return -EINVAL;
+    }
+    let h = handle(Kind::Epoll(Arc::new(Mutex::new(Vec::new()))));
+    match with_process(|p| alloc_fd(p, h, flags & O_CLOEXEC != 0)) {
+        Ok(fd) => fd as i64,
+        Err(e) => -e,
+    }
+}
+
+fn epoll_list(epfd: u64) -> Result<Arc<Mutex<Vec<EpollEntry>>>, i64> {
+    match &get(epfd)?.lock().kind {
+        Kind::Epoll(list) => Ok(list.clone()),
+        _ => Err(EINVAL),
+    }
+}
+
+/// epoll_ctl(epfd, op, fd, event)
+pub fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, event: u64) -> i64 {
+    let list = match epoll_list(epfd) {
+        Ok(l) => l,
+        Err(e) => return -e,
+    };
+    let target = match get(fd) {
+        Ok(h) => h,
+        Err(e) => return -e,
+    };
+    if fd == epfd {
+        return -EINVAL;
+    }
+    if matches!(target.lock().kind, Kind::File { .. } | Kind::Dir { .. }) {
+        return -EPERM; // regular files are always ready: Linux refuses them
+    }
+    let ev = if op == EPOLL_CTL_DEL {
+        None
+    } else {
+        let Some(b) = (unsafe { user_slice(event, 12) }) else { return -EFAULT };
+        Some((u32::from_le_bytes(b[0..4].try_into().unwrap()), u64::from_le_bytes(b[4..12].try_into().unwrap())))
+    };
+    let mut list = list.lock();
+    let pos = list.iter().position(|e| e.fd == fd as i32);
+    match (op, pos, ev) {
+        (EPOLL_CTL_ADD, Some(_), _) => -EEXIST,
+        (EPOLL_CTL_ADD, None, Some((events, data))) => {
+            list.push(EpollEntry { fd: fd as i32, events, data });
+            0
+        }
+        (EPOLL_CTL_MOD, Some(i), Some((events, data))) => {
+            list[i] = EpollEntry { fd: fd as i32, events, data };
+            0
+        }
+        (EPOLL_CTL_DEL, Some(i), _) => {
+            list.remove(i);
+            0
+        }
+        (EPOLL_CTL_MOD | EPOLL_CTL_DEL, None, _) => -ENOENT,
+        _ => -EINVAL,
+    }
+}
+
+/// epoll_wait / epoll_pwait / epoll_pwait2: up to `max` ready entries,
+/// waiting until `deadline` (in ticks; None: forever, Some(0): not at all).
+pub fn sys_epoll_wait(epfd: u64, out: u64, max: u64, deadline: Option<u64>) -> i64 {
+    if max == 0 || max > 4096 {
+        return -EINVAL;
+    }
+    let list = match epoll_list(epfd) {
+        Ok(l) => l,
+        Err(e) => return -e,
+    };
+    let Some(out) = (unsafe { user_slice_mut(out, max * 12) }) else { return -EFAULT };
+    loop {
+        crate::net::poll_if_due();
+        let mut ready = 0usize;
+        {
+            let mut entries = list.lock();
+            // Fds closed since they were added are gone from the list.
+            entries.retain(|e| get(e.fd as u64).is_ok());
+            for e in entries.iter_mut() {
+                if ready as u64 == max {
+                    break;
+                }
+                let wanted = (e.events & EPOLL_EVENTS) as i16 | POLLERR | POLLHUP;
+                if e.events & EPOLL_EVENTS == 0 && e.events & EPOLLONESHOT != 0 {
+                    continue; // a one-shot entry that already fired
+                }
+                let revents = poll_ready(e.fd, wanted);
+                if revents == 0 {
+                    continue;
+                }
+                let slot = &mut out[ready * 12..ready * 12 + 12];
+                slot[0..4].copy_from_slice(&(revents as u16 as u32).to_le_bytes());
+                slot[4..12].copy_from_slice(&e.data.to_le_bytes());
+                ready += 1;
+                if e.events & EPOLLONESHOT != 0 {
+                    e.events &= !EPOLL_EVENTS;
+                }
+            }
+        }
+        if ready > 0 || deadline == Some(0) {
+            return ready as i64;
+        }
+        if deadline.is_some_and(|d| crate::process::ticks() >= d) {
+            return 0;
+        }
+        if crate::process::signal_pending() {
+            return -EINTR;
+        }
+        match deadline {
+            Some(d) => crate::process::block_on_until(crate::process::POLL_KEY, d),
+            None => crate::process::block_on(crate::process::POLL_KEY),
+        }
+    }
 }

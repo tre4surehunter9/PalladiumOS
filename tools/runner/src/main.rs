@@ -48,6 +48,7 @@ const TEST_ARGS: &[&str] = &[
     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio", "-display", "none",
     "-drive", "format=raw,file=target/test-disk.img,index=1,media=disk",
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
+    "-drive", "format=raw,file=target/test-scratch.img,index=3,media=disk",
     "-netdev", "user,id=net0", "-device", "rtl8139,netdev=net0",
 ];
 const TEST_SUCCESS: i32 = 33; // (0x10 << 1) | 1

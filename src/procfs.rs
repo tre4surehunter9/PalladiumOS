@@ -24,11 +24,11 @@ const ROOT: Ino = 1;
 const SELF: Ino = 2;
 /// System files: (name, inode).
 const SYSTEM: &[(&str, Ino)] =
-    &[("cpuinfo", 3), ("kmsg", 9), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("uptime", 7), ("version", 8)];
+    &[("cpuinfo", 3), ("kmsg", 9), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("stat", 10), ("uptime", 7), ("version", 8)];
 
 // Files in /proc/PID: (name, number).
 const P_DIR: u64 = 0;
-const P_FILES: &[(&str, u64)] = &[("cmdline", 1), ("cwd", 2), ("exe", 3), ("fd", 4), ("stat", 5), ("status", 6)];
+const P_FILES: &[(&str, u64)] = &[("cmdline", 1), ("cwd", 2), ("exe", 3), ("fd", 4), ("stat", 5), ("statm", 7), ("status", 6)];
 const P_FD_DIR: u64 = 4;
 const P_FD_BASE: u64 = 0x100;
 
@@ -64,6 +64,8 @@ impl ProcFs {
                 }
                 5 => stat_line(&p),
                 6 => status(&p),
+                // statm: size, resident, shared, text, lib, data, dt (pages)
+                7 => format!("{} {} 0 0 0 {} 0\n", p.pages, p.pages, p.heap / 4096),
                 _ => return Err(EINVAL),
             });
         }
@@ -89,9 +91,29 @@ impl ProcFs {
                 format!("{}.{:02} 0.00\n", ns / 1_000_000_000, ns / 10_000_000 % 100)
             }
             8 => format!("PalladiumOS version {} (rustc nightly) #1 x86_64\n", crate::VERSION),
+            10 => system_stat(),
             _ => return Err(EINVAL),
         })
     }
+}
+
+/// /proc/stat: CPU time (in 1/100 s: busy is what processes used, the rest
+/// idle), boot time and process counts, as top and htop read them.
+fn system_stat() -> String {
+    let hundredths = |ticks: u64| ticks * process::TICK_NS / 10_000_000;
+    let busy: u64 = process::snapshot(None).iter().filter(|p| !p.kernel).map(|p| p.cpu_ticks).sum();
+    let up = process::ticks();
+    let (user, idle) = (hundredths(busy.min(up)), hundredths(up.saturating_sub(busy)));
+    let cpu = format!("{} 0 0 {} 0 0 0 0 0 0", user, idle);
+    let uptime_s = up * process::TICK_NS / 1_000_000_000;
+    let (total, ready) = process::counts();
+    format!(
+        "cpu  {cpu}\ncpu0 {cpu}\nintr 0\nctxt 0\nbtime {}\nprocesses {}\nprocs_running {}\nprocs_blocked {}\n",
+        crate::rtc::now().saturating_sub(uptime_s),
+        process::last_pid(),
+        ready,
+        total.saturating_sub(ready)
+    )
 }
 
 fn kib(pages: u64) -> u64 {
@@ -139,7 +161,8 @@ fn status(p: &ProcInfo) -> String {
 fn stat_line(p: &ProcInfo) -> String {
     let to_hz = |ticks: u64| ticks * process::TICK_NS / 10_000_000;
     format!(
-        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} 0 0 0 20 0 1 0 {} {} {} 0\n",
+        // All 52 fields, as on Linux (exit_signal: SIGCHLD).
+        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} 0 0 0 20 0 1 0 {} {} {} 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
         p.pid,
         p.name,
         p.state,
@@ -165,7 +188,8 @@ fn meminfo() -> String {
     let heap = crate::allocator::HEAP_SIZE as u64 / 1024;
     format!(
         "MemTotal:       {:8} kB\nMemFree:        {:8} kB\nMemAvailable:   {:8} kB\n\
-         Buffers:        {:8} kB\nCached:         {:8} kB\nKernelHeap:     {:8} kB\n",
+         Buffers:        {:8} kB\nCached:         {:8} kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n\
+         Shmem:                 0 kB\nSReclaimable:          0 kB\nKernelHeap:     {:8} kB\n",
         kib(total),
         kib(free),
         kib(free),

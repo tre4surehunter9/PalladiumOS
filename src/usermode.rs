@@ -64,23 +64,92 @@ struct AuxInfo {
     ids: Ids,
 }
 
+/// A program to load: in memory (the kernel's own programs), or a file,
+/// read a piece at a time (a program can be bigger than the kernel heap).
+pub enum Program<'a> {
+    Bytes(&'a [u8]),
+    File { loc: crate::mounts::Loc, size: u64 },
+}
+
+impl Program<'_> {
+    /// The file at `abs` (an absolute path), if it is a regular file.
+    pub fn open(abs: &str) -> Result<Program<'static>, i64> {
+        let (loc, meta) = crate::mounts::stat(abs)?;
+        if meta.kind != crate::mounts::FileType::File {
+            return Err(crate::syscall::EACCES);
+        }
+        Ok(Program::File { loc, size: meta.size })
+    }
+
+    pub fn size(&self) -> u64 {
+        match self {
+            Program::Bytes(b) => b.len() as u64,
+            Program::File { size, .. } => *size,
+        }
+    }
+
+    /// Read from `offset`; returns how much was read (less at the end).
+    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, &'static str> {
+        match self {
+            Program::Bytes(b) => {
+                let start = (offset as usize).min(b.len());
+                let n = buf.len().min(b.len() - start);
+                buf[..n].copy_from_slice(&b[start..start + n]);
+                Ok(n)
+            }
+            Program::File { loc, .. } => {
+                let (mount, ino) = (loc.mount, loc.ino);
+                crate::mounts::with_fs(mount, |fs| fs.read(ino, offset, buf)).map_err(|_| "can't read the program file")
+            }
+        }
+    }
+
+    /// The first `max` bytes (or the whole file, if smaller).
+    pub fn head(&self, max: usize) -> Result<Vec<u8>, &'static str> {
+        let mut buf = alloc::vec![0u8; (self.size() as usize).min(max)];
+        let n = self.read_at(0, &mut buf)?;
+        buf.truncate(n);
+        Ok(buf)
+    }
+}
+
 /// Build a new address space holding the program and its stack.
-pub fn build_image(bytes: &[u8], argv: &[&str], envp: &[&str], ids: Ids) -> Result<Image, &'static str> {
-    // A dynamically linked program: read its interpreter first (not while
-    // holding the frame allocator).
-    let interp = match elf::is_elf(bytes).then(|| elf::parse(bytes)).transpose()?.and_then(|e| e.interp) {
-        Some(path) => Some(crate::filesystem::read_bytes(&crate::vfs::absolute(&path)).map_err(|_| ERR_NO_INTERP)?),
+pub fn build_image(program: &Program, argv: &[&str], envp: &[&str], ids: Ids) -> Result<Image, &'static str> {
+    let head = program.head(elf::HEAD_SIZE)?;
+    let image = if elf::is_elf(&head) { Some(elf::parse(&head, program.size())?) } else { None };
+    // A dynamically linked program: its interpreter too.
+    let interp = match image.as_ref().and_then(|e| e.interp.as_deref()) {
+        Some(path) => {
+            let file = Program::open(&crate::vfs::absolute(path)).map_err(|_| ERR_NO_INTERP)?;
+            let ld = elf::parse_interp(&file.head(elf::HEAD_SIZE)?, file.size())?;
+            Some((file, ld))
+        }
         None => None,
     };
-    let mut alloc_guard = FRAME_ALLOCATOR.lock();
-    let frames = alloc_guard.as_mut().expect("FRAME_ALLOCATOR not initialized");
-    let p4 = memory::new_address_space(frames).ok_or(ERR_NO_MEMORY)?;
-    let mut mapper = memory::mapper_for(p4);
+    if image.is_none() && (head.is_empty() || head.len() > MAX_FLAT_SIZE || program.size() > MAX_FLAT_SIZE as u64) {
+        return Err("flat binary is empty or larger than 64 KiB");
+    }
 
-    match load(&mut mapper, frames, bytes, interp.as_deref(), argv, envp, ids) {
+    // Map the memory (with the frame allocator), then fill it from the
+    // files (without it: reading a file mustn't wait for it).
+    let p4 = {
+        let mut alloc_guard = FRAME_ALLOCATOR.lock();
+        let frames = alloc_guard.as_mut().expect("FRAME_ALLOCATOR not initialized");
+        let p4 = memory::new_address_space(frames).ok_or(ERR_NO_MEMORY)?;
+        let mut mapper = memory::mapper_for(p4);
+        if let Err(e) = map_image(&mut mapper, frames, image.as_ref(), interp.as_ref().map(|(_, ld)| ld), head.len(), argv, envp) {
+            memory::free_address_space(p4, frames);
+            return Err(e);
+        }
+        p4
+    };
+    let mapper = memory::mapper_for(p4);
+    let filled = fill_image(&mapper, program, &head, image.as_ref(), interp.as_ref(), argv, envp, ids);
+    match filled {
         Ok((entry, stack_pointer)) => Ok(Image { p4, entry, stack_pointer }),
         Err(e) => {
-            memory::free_address_space(p4, frames);
+            let mut alloc_guard = FRAME_ALLOCATOR.lock();
+            memory::free_address_space(p4, alloc_guard.as_mut().unwrap());
             Err(e)
         }
     }
@@ -109,62 +178,96 @@ pub fn from_user(code_segment: u64) -> bool {
     code_segment & 3 == 3
 }
 
-/// Map the program and its stack. Returns (entry point, initial stack pointer).
-fn load(
+/// Map (zeroed) memory for the program's segments, its interpreter's, and
+/// the stack.
+fn map_image(
     mapper: &mut OffsetPageTable<'static>,
     frames: &mut BootInfoFrameAllocator,
-    bytes: &[u8],
-    interp: Option<&[u8]>,
+    image: Option<&elf::Elf>,
+    ld: Option<&elf::Elf>,
+    flat_len: usize,
+    argv: &[&str],
+    envp: &[&str],
+) -> Result<(), &'static str> {
+    use PageTableFlags as F;
+    let base = F::PRESENT | F::USER_ACCESSIBLE;
+    for elf in image.into_iter().chain(ld) {
+        for seg in &elf.segments {
+            let flags = if seg.flags & elf::PF_W != 0 { base | F::WRITABLE } else { base };
+            map_range(mapper, frames, seg.vaddr, seg.memsz, flags)?;
+        }
+    }
+    if image.is_none() {
+        map_range(mapper, frames, FLAT_BASE, flat_len as u64, base | F::WRITABLE)?;
+    }
+    // Enough stack for the arguments and environment (strings, pointers,
+    // aux vector), plus the usual STACK_PAGES for the program itself.
+    let pages = stack_pages(argv, envp);
+    map_range(mapper, frames, STACK_TOP - pages * 4096, pages * 4096, base | F::WRITABLE)
+}
+
+fn stack_pages(argv: &[&str], envp: &[&str]) -> u64 {
+    let arg_bytes: usize = argv.iter().chain(envp).map(|a| a.len() + 1).sum::<usize>() + (argv.len() + envp.len() + 64) * 8;
+    (STACK_PAGES + (arg_bytes as u64).div_ceil(4096)).min(STACK_MAX / 4096)
+}
+
+/// Copy the segments' data from the files into the mapped memory, and lay
+/// out the stack. Returns (entry point, initial stack pointer).
+#[allow(clippy::too_many_arguments)]
+fn fill_image(
+    mapper: &OffsetPageTable<'static>,
+    program: &Program,
+    head: &[u8],
+    image: Option<&elf::Elf>,
+    interp: Option<&(Program, elf::Elf)>,
     argv: &[&str],
     envp: &[&str],
     ids: Ids,
 ) -> Result<(u64, u64), &'static str> {
-    use PageTableFlags as F;
-    let base = F::PRESENT | F::USER_ACCESSIBLE;
     let mut aux = AuxInfo { entry: 0, phdr: 0, phnum: 0, phent: 0, base: 0, ids };
-    let mut map_elf = |mapper: &mut OffsetPageTable<'static>, image: &elf::Elf| -> Result<(), &'static str> {
-        for seg in &image.segments {
-            let flags = if seg.flags & elf::PF_W != 0 { base | F::WRITABLE } else { base };
-            map_range(mapper, frames, seg.vaddr, seg.memsz, flags)?;
-            copy_to_user(mapper, seg.vaddr, seg.data);
-        }
-        Ok(())
-    };
-
-    let entry = if elf::is_elf(bytes) {
-        let image = elf::parse(bytes)?;
-        map_elf(mapper, &image)?;
-        aux = AuxInfo { entry: image.entry, phdr: image.phdr, phnum: image.phnum, phent: image.phent, base: 0, ids };
-        match interp {
-            // Dynamically linked: the dynamic linker starts first, finds the
-            // program through the aux vector, loads its libraries, and
-            // jumps to its entry point.
-            Some(ld) => {
-                let ld = elf::parse_interp(ld)?;
-                map_elf(mapper, &ld)?;
-                aux.base = elf::INTERP_BASE;
-                ld.entry
+    let entry = match image {
+        Some(image) => {
+            copy_segments(mapper, program, image)?;
+            aux = AuxInfo { entry: image.entry, phdr: image.phdr, phnum: image.phnum, phent: image.phent, base: 0, ids };
+            match interp {
+                // Dynamically linked: the dynamic linker starts first, finds the
+                // program through the aux vector, loads its libraries, and
+                // jumps to its entry point.
+                Some((file, ld)) => {
+                    copy_segments(mapper, file, ld)?;
+                    aux.base = elf::INTERP_BASE;
+                    ld.entry
+                }
+                None => image.entry,
             }
-            None => image.entry,
         }
-    } else {
-        if bytes.is_empty() || bytes.len() > MAX_FLAT_SIZE {
-            return Err("flat binary is empty or larger than 64 KiB");
+        None => {
+            copy_to_user(mapper, FLAT_BASE, head);
+            FLAT_BASE
         }
-        map_range(mapper, frames, FLAT_BASE, bytes.len() as u64, base | F::WRITABLE)?;
-        copy_to_user(mapper, FLAT_BASE, bytes);
-        FLAT_BASE
     };
-
-    // Enough stack for the arguments and environment (strings, pointers,
-    // aux vector), plus the usual STACK_PAGES for the program itself.
-    let arg_bytes: usize = argv.iter().chain(envp).map(|a| a.len() + 1).sum::<usize>() + (argv.len() + envp.len() + 64) * 8;
-    let pages = (STACK_PAGES + (arg_bytes as u64).div_ceil(4096)).min(STACK_MAX / 4096);
-    let stack_bottom = STACK_TOP - pages * 4096;
-    map_range(mapper, frames, stack_bottom, pages * 4096, base | F::WRITABLE)?;
     let stack_pointer = build_initial_stack(mapper, argv, envp, &aux)?;
-
     Ok((entry, stack_pointer))
+}
+
+/// Each segment's file data into its memory, 64 KiB at a time.
+fn copy_segments(mapper: &OffsetPageTable<'static>, file: &Program, elf: &elf::Elf) -> Result<(), &'static str> {
+    const CHUNK: usize = 64 * 1024;
+    let mut buf = alloc::vec![0u8; CHUNK];
+    for seg in &elf.segments {
+        let mut done = 0u64;
+        while done < seg.filesz {
+            let want = ((seg.filesz - done) as usize).min(CHUNK);
+            let n = file.read_at(seg.offset + done, &mut buf[..want])?;
+            if n == 0 {
+                return Err("the program file is shorter than it says");
+            }
+            copy_to_user(mapper, seg.vaddr + done, &buf[..n]);
+            done += n as u64;
+            crate::interrupts::let_in();
+        }
+    }
+    Ok(())
 }
 
 /// Lay out the initial stack the way the System V x86_64 ABI (and libc's
