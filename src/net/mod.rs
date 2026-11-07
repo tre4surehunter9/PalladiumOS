@@ -15,6 +15,7 @@ pub mod pci;
 pub mod rtl8139;
 pub mod socket;
 pub mod unix;
+pub mod netlink;
 
 use alloc::vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};

@@ -182,6 +182,7 @@ PalladiumOS has TCP/IP: a driver for the RTL8139 network card (what `cargo run` 
 * Raw sockets (`SOCK_RAW`, root only, as Linux needs `CAP_NET_RAW`) give packets with their IPv4 header; sent data gets a header from the kernel unless `IP_HDRINCL` is set (or the protocol is `IPPROTO_RAW`). PalladiumOS answers pings itself.
 * So BusyBox's `wget`, `nslookup`, `nc`, `telnet`, `httpd` and `ping` (as root), MicroPython's `socket`, and C programs with musl's resolver work: `wget http://example.com/` downloads a page, `ping example.com` gets answers, and the host is reachable at 10.0.2.2.
 * Unix-domain sockets (`AF_UNIX`), for programs on the same machine: stream and datagram, `socketpair`, names that are paths (`bind` makes the file; `connect` needs write permission on it) or abstract (`sun_path` starting with a NUL), `SO_PEERCRED`, non-blocking mode and `poll`. Not yet: passing file descriptors (`SCM_RIGHTS`); socket files show up as plain files in `ls`.
+* Netlink (`AF_NETLINK`, read-only): programs can list the interfaces, their addresses and the routes the way Linux answers, so `getifaddrs()`, BusyBox's `ip addr` / `ip link` / `ip route` and fastfetch's Local IP work. The interface `ioctl`s (`SIOCGIFNAME`, `SIOCGIFINDEX`, `SIOCGIFADDR`, `SIOCGIFMTU`, `SIOCGIFHWADDR`...) work too. Changing settings this way isn't supported.
 * Not yet: IPv6, more than one card type.
 
 ## Threads

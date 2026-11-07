@@ -177,7 +177,7 @@ pub fn init_default_files() {
             "{\n  \"logo\": { \"type\": \"file\", \"source\": \"/etc/xdg/fastfetch/palladium.txt\",\n            \
              \"color\": { \"1\": \"cyan\", \"2\": \"white\" } },\n  \
              \"modules\": [\"title\", \"separator\", \"os\", \"host\", \"kernel\", \"uptime\", \"shell\", \
-             \"terminal\", \"cpu\", \"memory\", \"swap\", \"disk\", \"locale\", \"break\", \"colors\"]\n}\n",
+             \"terminal\", \"cpu\", \"memory\", \"swap\", \"disk\", \"localip\", \"locale\", \"break\", \"colors\"]\n}\n",
         ),
         ("/etc/xdg/fastfetch/palladium.txt", PALLADIUM_LOGO),
     ];

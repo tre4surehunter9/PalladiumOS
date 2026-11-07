@@ -21,6 +21,7 @@ use spin::Mutex;
 
 use crate::filesystem;
 use crate::net::socket::{self as sock, Socket};
+use crate::net::netlink::NetlinkSocket;
 use crate::net::unix::{self, UnixSocket};
 use crate::perm;
 use crate::mounts::{self, Device, FileType, Loc};
@@ -423,8 +424,22 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
     match get(fd) {
         Ok(h) if matches!(h.lock().kind, Kind::Console) => {}
         Ok(h) => {
-            // Sockets: non-blocking mode, and bytes waiting.
+            // Sockets: non-blocking mode, bytes waiting, and the
+            // interfaces (name, index, address, MTU, MAC...).
             let Kind::Socket(s) = &h.lock().kind else { return -ENOTTY };
+            if let Some(req) = unsafe { user_slice_mut(arg, 40) } {
+                let mut ifreq = [0u8; 40];
+                ifreq.copy_from_slice(req);
+                if let Some(r) = crate::net::netlink::interface_ioctl(request, &mut ifreq) {
+                    return match r {
+                        Ok(()) => {
+                            req.copy_from_slice(&ifreq);
+                            0
+                        }
+                        Err(e) => -e,
+                    };
+                }
+            }
             return match request {
                 FIONBIO => match unsafe { user_slice(arg, 4) } {
                     Some(b) => {
@@ -1444,6 +1459,8 @@ pub fn sys_statx(dirfd: u64, path: u64, flags: u64, _mask: u64, buf: u64) -> i64
 pub enum AnySock {
     Inet(Arc<Socket>),
     Unix(Arc<UnixSocket>),
+    /// Netlink (read-only: interface and address lists)
+    Netlink(Arc<NetlinkSocket>),
 }
 
 impl AnySock {
@@ -1451,30 +1468,35 @@ impl AnySock {
         match self {
             AnySock::Inet(s) => s.id,
             AnySock::Unix(s) => s.id,
+            AnySock::Netlink(s) => s.id,
         }
     }
     fn is_nonblocking(&self) -> bool {
         match self {
             AnySock::Inet(s) => s.is_nonblocking(),
             AnySock::Unix(s) => s.is_nonblocking(),
+            AnySock::Netlink(s) => s.is_nonblocking(),
         }
     }
     fn set_nonblocking(&self, on: bool) {
         match self {
             AnySock::Inet(s) => s.set_nonblocking(on),
             AnySock::Unix(s) => s.set_nonblocking(on),
+            AnySock::Netlink(s) => s.set_nonblocking(on),
         }
     }
     fn readiness(&self) -> (bool, bool, bool) {
         match self {
             AnySock::Inet(s) => s.readiness(),
             AnySock::Unix(s) => s.readiness(),
+            AnySock::Netlink(s) => s.readiness(),
         }
     }
     fn pending_bytes(&self) -> usize {
         match self {
             AnySock::Inet(s) => s.pending_bytes(),
             AnySock::Unix(s) => s.pending_bytes(),
+            AnySock::Netlink(s) => s.pending_bytes(),
         }
     }
     /// read()
@@ -1482,6 +1504,7 @@ impl AnySock {
         match self {
             AnySock::Inet(s) => s.recv(buf, flags).map(|(n, _)| n),
             AnySock::Unix(s) => s.recv(buf, flags).map(|(n, _)| n),
+            AnySock::Netlink(s) => s.recv(buf, flags),
         }
     }
     /// write()
@@ -1489,6 +1512,7 @@ impl AnySock {
         match self {
             AnySock::Inet(s) => s.send(data, flags, None),
             AnySock::Unix(s) => s.send(data, flags, None),
+            AnySock::Netlink(s) => s.send(data),
         }
     }
 }
@@ -1576,6 +1600,14 @@ fn write_sockaddr_un(ptr: u64, len_ptr: u64, name: Option<&unix::Name>) -> Resul
     write_addr(ptr, len_ptr, &sa)
 }
 
+/// struct sockaddr_nl: family, port id (0: the kernel), no groups.
+fn write_sockaddr_nl(ptr: u64, len_ptr: u64, port: u32) -> Result<(), i64> {
+    let mut sa = [0u8; 12];
+    sa[0..2].copy_from_slice(&(crate::net::netlink::AF_NETLINK as u16).to_le_bytes());
+    sa[4..8].copy_from_slice(&port.to_le_bytes());
+    write_addr(ptr, len_ptr, &sa)
+}
+
 fn result(r: Result<i64, i64>) -> i64 {
     r.unwrap_or_else(|e| -e)
 }
@@ -1598,6 +1630,13 @@ pub fn sys_socket(domain: u64, ty: u64, protocol: u64) -> i64 {
             }
             _ => Err(crate::syscall::EPROTONOSUPPORT),
         },
+        crate::net::netlink::AF_NETLINK => {
+            if protocol != crate::net::netlink::NETLINK_ROUTE {
+                Err(crate::syscall::EPROTONOSUPPORT)
+            } else {
+                new_socket_fd(AnySock::Netlink(Arc::new(NetlinkSocket::new(nonblocking))), cloexec)
+            }
+        }
         _ => Err(EAFNOSUPPORT), // no IPv6 yet
     })
 }
@@ -1637,6 +1676,7 @@ pub fn sys_bind(fd: u64, addr: u64, len: u64) -> i64 {
             s.bind(a, port).map(|_| 0)
         }
         AnySock::Unix(s) => s.bind(read_sockaddr_un(addr, len)?).map(|_| 0),
+        AnySock::Netlink(_) => Ok(0), // any address is fine: replies come to us
     })())
 }
 
@@ -1644,6 +1684,7 @@ pub fn sys_listen(fd: u64, backlog: u64) -> i64 {
     result((|| match any_socket(fd)? {
         AnySock::Inet(s) => s.listen(backlog as usize).map(|_| 0),
         AnySock::Unix(s) => s.listen().map(|_| 0),
+        AnySock::Netlink(_) => Err(crate::syscall::EOPNOTSUPP),
     })())
 }
 
@@ -1654,6 +1695,7 @@ pub fn sys_connect(fd: u64, addr: u64, len: u64) -> i64 {
             s.connect(a, port).map(|_| 0)
         }
         AnySock::Unix(s) => s.connect(read_sockaddr_un(addr, len)?).map(|_| 0),
+        AnySock::Netlink(_) => Ok(0), // to the kernel: the only peer there is
     })())
 }
 
@@ -1675,6 +1717,7 @@ pub fn sys_accept(fd: u64, addr: u64, len_ptr: u64, flags: u64) -> i64 {
                 write_sockaddr_un(addr, len_ptr, peer.as_ref())?;
                 new_socket_fd(AnySock::Unix(conn), cloexec)
             }
+            AnySock::Netlink(_) => Err(crate::syscall::EOPNOTSUPP),
         }
     })())
 }
@@ -1698,6 +1741,7 @@ pub fn sys_sendto(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, alen: u64)
                 let to = if addr != 0 && !s.is_stream() { Some(read_sockaddr_un(addr, alen)?) } else { None };
                 s.send(data, flags, to).map(|n| n as i64)
             }
+            AnySock::Netlink(s) => s.send(data).map(|n| n as i64),
         }
     })())
 }
@@ -1723,6 +1767,11 @@ pub fn sys_recvfrom(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, len_ptr:
                 }
                 Ok(n as i64)
             }
+            AnySock::Netlink(s) => {
+                let n = s.recv(out, flags)?;
+                write_sockaddr_nl(addr, len_ptr, 0)?; // from the kernel
+                Ok(n as i64)
+            }
         }
     })())
 }
@@ -1731,6 +1780,7 @@ pub fn sys_shutdown(fd: u64, how: u64) -> i64 {
     result((|| match any_socket(fd)? {
         AnySock::Inet(s) => s.shutdown(how).map(|_| 0),
         AnySock::Unix(s) => s.shutdown(how).map(|_| 0),
+        AnySock::Netlink(_) => Ok(0),
     })())
 }
 
@@ -1738,6 +1788,7 @@ pub fn sys_getsockname(fd: u64, addr: u64, len_ptr: u64) -> i64 {
     result((|| match any_socket(fd)? {
         AnySock::Inet(s) => write_sockaddr(addr, len_ptr, s.local()).map(|_| 0),
         AnySock::Unix(s) => write_sockaddr_un(addr, len_ptr, s.local().as_ref()).map(|_| 0),
+        AnySock::Netlink(s) => write_sockaddr_nl(addr, len_ptr, s.port).map(|_| 0),
     })())
 }
 
@@ -1745,6 +1796,7 @@ pub fn sys_getpeername(fd: u64, addr: u64, len_ptr: u64) -> i64 {
     result((|| match any_socket(fd)? {
         AnySock::Inet(s) => s.peer().and_then(|p| write_sockaddr(addr, len_ptr, p)).map(|_| 0),
         AnySock::Unix(s) => s.peer().and_then(|p| write_sockaddr_un(addr, len_ptr, p.as_ref())).map(|_| 0),
+        AnySock::Netlink(_) => write_sockaddr_nl(addr, len_ptr, 0).map(|_| 0),
     })())
 }
 
@@ -1783,6 +1835,7 @@ pub fn sys_getsockopt(fd: u64, level: u64, name: u64, val: u64, len_ptr: u64) ->
                 let stream = match &s {
                     AnySock::Inet(i) => i.is_stream(),
                     AnySock::Unix(u) => u.is_stream(),
+                    AnySock::Netlink(_) => false,
                 };
                 (if stream { 1u32 } else { 2 }).to_le_bytes().to_vec()
             }
@@ -1834,6 +1887,7 @@ pub fn sys_sendmsg(fd: u64, msg: u64, flags: u64) -> i64 {
                 let to = if name != 0 && !s.is_stream() { Some(read_sockaddr_un(name, namelen)?) } else { None };
                 s.send(&data, flags, to).map(|n| n as i64)
             }
+            AnySock::Netlink(s) => s.send(&data).map(|n| n as i64),
         }
     })())
 }
@@ -1849,10 +1903,12 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
         enum From {
             Inet(Option<smoltcp::wire::IpEndpoint>),
             Unix(Option<unix::Name>),
+            Netlink,
         }
         let (n, from) = match &s {
             AnySock::Inet(i) => i.recv(&mut buf, flags).map(|(n, f)| (n, From::Inet(f)))?,
             AnySock::Unix(u) => u.recv(&mut buf, flags).map(|(n, f)| (n, From::Unix(f)))?,
+            AnySock::Netlink(l) => (l.recv(&mut buf, flags)?, From::Netlink),
         };
         let mut done = 0usize;
         for (base, len) in iovs {
@@ -1871,6 +1927,7 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
             match from {
                 From::Inet(Some(ep)) => write_sockaddr(name, namelen_ptr, ep)?,
                 From::Unix(n) => write_sockaddr_un(name, namelen_ptr, n.as_ref())?,
+                From::Netlink => write_sockaddr_nl(name, namelen_ptr, 0)?,
                 From::Inet(None) => {}
             }
         }
