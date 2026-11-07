@@ -32,6 +32,9 @@ use std::time::{Duration, Instant};
 /// the Alpine disk, and a network card (port 2222 on this machine, localhost
 /// only, reaches PalladiumOS's SSH server).
 const RUN_ARGS: &[&str] = &[
+    // 1 GiB of memory: Node.js and other big programs don't fit in
+    // QEMU's default 128 MiB.
+    "-m", "1G",
     // The screen tells the firmware it prefers 1280x720 (EDID), and UEFI
     // booting keeps the firmware's mode: 720p, as with BIOS.
     "-vga", "none", "-device", "VGA,edid=on,xres=1280,yres=720",
