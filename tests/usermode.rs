@@ -35,6 +35,7 @@ fn main(boot_info: &'static BootInfo) -> ! {
     *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
     palladiumos::process::init();
     palladiumos::rtc::init(); // the real date, as at boot (CLOCK_REALTIME)
+    palladiumos::net::init(); // loopback, and eth0 if QEMU has a card
     palladiumos::block::mount_system_disk(); // /usr: tcc's headers and libraries, if built
     palladiumos::programs::install();
     for dir in ["/proc", "/dev"] {
@@ -1893,4 +1894,30 @@ fn linux_binaries_run_unchanged() {
     let _ = filesystem::make_dir("/tmp");
     assert_eq!(sh("/usr/share/linux-test/hello one two > /tmp/linux.out 2>&1"), 0, "{}", file("/tmp/linux.out"));
     assert_eq!(file("/tmp/linux.out"), "glibc on PalladiumOS: 2 args, heap 7, child 9\n");
+}
+
+// ---- networking ----
+
+#[test_case]
+fn sockets_over_loopback() {
+    let Some(_) = c_program("test_net") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    filesystem::init_default_files(); // /etc/hosts (localhost)
+    let status = sh("test_net > /tmp/net.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/net.out"));
+    assert!(file("/tmp/net.out").contains("all checks passed"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn eth0_is_configured_by_dhcp() {
+    // QEMU's user network answers DHCP (no internet needed).
+    if !palladiumos::net::has_card() {
+        palladiumos::serial_print!("(skipped: no network card) ");
+        return;
+    }
+    let config = palladiumos::net::config().or_else(|| palladiumos::net::wait_for_dhcp(5 * 18)).expect("no DHCP answer");
+    assert_eq!(alloc::format!("{}", config.address), "10.0.2.15/24");
+    assert_eq!(config.gateway.map(|g| alloc::format!("{}", g)).as_deref(), Some("10.0.2.2"));
+    assert_eq!(config.dns.map(|d| alloc::format!("{}", d)).as_deref(), Some("10.0.2.3"));
 }

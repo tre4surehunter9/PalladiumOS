@@ -150,6 +150,24 @@ impl BootInfoFrameAllocator {
         self.next - self.free_count
     }
 
+    /// `n` physically contiguous frames (for devices that DMA into a
+    /// buffer, like the network card), taken straight from the memory map.
+    /// They are never freed.
+    pub fn allocate_contiguous(&mut self, n: usize) -> Option<PhysFrame> {
+        let bytes = n as u64 * 4096;
+        while let Some(r) = self.memory_map.get(self.region) {
+            if r.region_type == MemoryRegionType::Usable && self.next_addr + bytes <= r.range.end_addr() {
+                let frame = PhysFrame::containing_address(PhysAddr::new(self.next_addr));
+                self.next_addr += bytes;
+                self.next += n;
+                return Some(frame);
+            }
+            self.region += 1;
+            self.next_addr = self.memory_map.get(self.region).map_or(0, |r| r.range.start_addr());
+        }
+        None
+    }
+
     fn index(frame: PhysFrame) -> usize {
         (frame.start_address().as_u64() / 4096) as usize
     }

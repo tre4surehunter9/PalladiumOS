@@ -74,9 +74,25 @@ pub const SYS_CLONE: u64 = 56;
 pub const SYS_RSEQ: u64 = 334;
 pub const SYS_FUTEX: u64 = 202;
 pub const SYS_SOCKET: u64 = 41;
+pub const SYS_CONNECT: u64 = 42;
+pub const SYS_ACCEPT: u64 = 43;
+pub const SYS_SENDTO: u64 = 44;
+pub const SYS_RECVFROM: u64 = 45;
+pub const SYS_SHUTDOWN: u64 = 48;
+pub const SYS_SENDMSG: u64 = 46;
+pub const SYS_RECVMSG: u64 = 47;
+pub const SYS_BIND: u64 = 49;
+pub const SYS_LISTEN: u64 = 50;
+pub const SYS_GETSOCKNAME: u64 = 51;
+pub const SYS_GETPEERNAME: u64 = 52;
+pub const SYS_SETSOCKOPT: u64 = 54;
+pub const SYS_GETSOCKOPT: u64 = 55;
+pub const SYS_ACCEPT4: u64 = 288;
 pub const SYS_SENDFILE: u64 = 40;
 pub const SYS_STATX: u64 = 332;
 pub const EAFNOSUPPORT: i64 = 97;
+pub const ENOTSOCK: i64 = 88;
+pub const EPROTONOSUPPORT: i64 = 93;
 pub const SYS_CLOCK_GETRES: u64 = 229;
 pub const SYS_PAUSE: u64 = 34;
 pub const SYS_GETITIMER: u64 = 36;
@@ -530,8 +546,21 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_CLONE => process::sys_clone(frame, a1, a2, a3, a4, a5),
         SYS_STATX => vfs::sys_statx(a1, a2, a3, a4, a5),
         SYS_SENDFILE => sys_sendfile(a1, a2, a3, a4),
-        // No networking yet: the honest answer for any address family.
-        SYS_SOCKET => -EAFNOSUPPORT,
+        SYS_SOCKET => vfs::sys_socket(a1, a2, a3),
+        SYS_BIND => vfs::sys_bind(a1, a2, a3),
+        SYS_LISTEN => vfs::sys_listen(a1, a2),
+        SYS_CONNECT => vfs::sys_connect(a1, a2, a3),
+        SYS_ACCEPT => vfs::sys_accept(a1, a2, a3, 0),
+        SYS_ACCEPT4 => vfs::sys_accept(a1, a2, a3, a4),
+        SYS_SENDTO => vfs::sys_sendto(a1, a2, a3, a4, a5, frame.r9),
+        SYS_RECVFROM => vfs::sys_recvfrom(a1, a2, a3, a4, a5, frame.r9),
+        SYS_SHUTDOWN => vfs::sys_shutdown(a1, a2),
+        SYS_SENDMSG => vfs::sys_sendmsg(a1, a2, a3),
+        SYS_RECVMSG => vfs::sys_recvmsg(a1, a2, a3),
+        SYS_GETSOCKNAME => vfs::sys_getsockname(a1, a2, a3),
+        SYS_GETPEERNAME => vfs::sys_getpeername(a1, a2, a3),
+        SYS_SETSOCKOPT => vfs::sys_setsockopt(a1),
+        SYS_GETSOCKOPT => vfs::sys_getsockopt(a1, a2, a3, a4, a5),
         SYS_GETRANDOM => match unsafe { user_slice_mut(a1, a2.min(1 << 20)) } {
             Some(buf) => {
                 crate::random::fill(buf);
@@ -677,6 +706,8 @@ fn poll_until(fds: u64, nfds: u64, no_wait: bool, deadline: Option<u64>) -> i64 
         return -EINVAL;
     }
     loop {
+        // Waiting on sockets: the network stack must run to make them ready.
+        crate::net::poll_if_due();
         let Some(list) = (unsafe { user_slice_mut(fds, nfds * 8) }) else { return -EFAULT };
         let mut ready = 0;
         for entry in list.chunks_mut(8) {

@@ -162,6 +162,8 @@ pub fn init_default_files() {
             "/welcome.txt",
             "Welcome to PalladiumOS! This is my personal OS project!\nYou can find it at https://github.com/tre4surehunter9/PalladiumOS/\n",
         ),
+        // Names for addresses (libc reads this before asking DNS).
+        ("/etc/hosts", "127.0.0.1\tlocalhost\n10.0.2.2\tgateway\n"),
         // Which OS this is, for programs like fastfetch (freedesktop format).
         (
             "/etc/os-release",

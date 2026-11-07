@@ -117,6 +117,7 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         palladiumos::task::keyboard::init_queue();
         boot_ok!("Started the keyboard");
         mount_filesystems();
+        start_network();
         let (count, bytes) = palladiumos::programs::install();
         boot_ok!("Installed {} programs in /bin ({} KiB)", count, bytes / 1024);
         if palladiumos::programs::find("busybox").is_some() {
@@ -141,6 +142,36 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         executor.spawn(Task::new(run_shell()));
         executor.run();
     }
+
+/// The network card and TCP/IP: DHCP on eth0 (QEMU's user network),
+/// loopback on lo.
+fn start_network() {
+    use palladiumos::{boot_info, boot_ok, boot_warn, net};
+    match net::init() {
+        Some((mac, irq)) => {
+            boot_info!(
+                "eth0: RTL8139, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, IRQ {}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], irq
+            );
+            // DHCP usually answers at once in QEMU; don't hold up the boot.
+            match net::wait_for_dhcp(40) {
+                Some(c) => boot_ok!(
+                    "Configured eth0 by DHCP: {} (gateway {}, DNS {})",
+                    c.address,
+                    c.gateway.map_or("none".into(), |g| alloc::format!("{}", g)),
+                    c.dns.map_or("none".into(), |d| alloc::format!("{}", d))
+                ),
+                None => {
+                    net::use_static_config();
+                    boot_warn!("No DHCP answer: eth0 is 10.0.2.15/24 (QEMU's default)");
+                }
+            }
+            net::write_resolv_conf();
+        }
+        None => boot_warn!("No network card (QEMU: -device rtl8139): only loopback"),
+    }
+    boot_ok!("Started networking (TCP/IP: lo 127.0.0.1{})", if net::has_card() { ", eth0" } else { "" });
+}
 
 /// `/` is the ext2 disk if there is one (so files survive a reboot),
 /// otherwise memory. /bin (the bundled programs, fresh every boot) and /tmp

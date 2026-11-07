@@ -19,6 +19,10 @@ lazy_static! {
     }
     idt[InterruptIndex::Keyboard.as_usize()]
         .set_handler_fn(keyboard_interrupt_handler);
+    // PCI cards (the network card) on the lines QEMU routes them to.
+    idt[(PIC_1_OFFSET + 9) as usize].set_handler_fn(pci_irq9);
+    idt[(PIC_1_OFFSET + 10) as usize].set_handler_fn(pci_irq10);
+    idt[(PIC_1_OFFSET + 11) as usize].set_handler_fn(pci_irq11);
     idt.page_fault.set_handler_fn(page_fault_handler);
     idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
     idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
@@ -64,6 +68,7 @@ extern "C" fn timer_dispatch(frame: &mut crate::syscall::SyscallFrame) {
     // in the middle of kernel code (which may hold locks). Signals (Ctrl-C,
     // alarms) reach busy programs here too.
     if crate::usermode::from_user(frame.cs) {
+        crate::net::poll_if_due();
         crate::process::preempt();
         crate::process::handle_signals(frame, None);
     }
@@ -90,6 +95,37 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
 
 pub fn init_idt() {
     IDT.load();
+}
+
+/// A PCI interrupt: if it's the network card's line, tell the network
+/// stack (which acknowledges the card); then end the interrupt.
+fn pci_irq(line: u8) {
+    if crate::net::card_irq() == line {
+        crate::net::interrupt();
+    }
+    unsafe { PICS.lock().notify_end_of_interrupt(PIC_1_OFFSET + line) };
+}
+
+extern "x86-interrupt" fn pci_irq9(_f: InterruptStackFrame) {
+    pci_irq(9);
+}
+extern "x86-interrupt" fn pci_irq10(_f: InterruptStackFrame) {
+    pci_irq(10);
+}
+extern "x86-interrupt" fn pci_irq11(_f: InterruptStackFrame) {
+    pci_irq(11);
+}
+
+/// Let interrupt line `irq` through the PICs (and the cascade, for 8-15).
+pub fn unmask_irq(irq: u8) {
+    if !(9..=11).contains(&irq) {
+        return; // no handler for other lines
+    }
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        let mut pics = PICS.lock();
+        let [m1, m2] = pics.read_masks();
+        pics.write_masks(m1 & !(1 << 2), m2 & !(1 << (irq - 8)));
+    });
 }
 
 pub extern "x86-interrupt" fn breakpoint_handler(

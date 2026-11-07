@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::filesystem;
+use crate::net::socket::{self as sock, Socket};
 use crate::perm;
 use crate::mounts::{self, Device, FileType, Loc};
 use crate::pipe::{self, PipeReader, PipeWriter};
@@ -40,6 +41,7 @@ pub const O_CREAT: u64 = 0o100;
 pub const O_EXCL: u64 = 0o200;
 pub const O_TRUNC: u64 = 0o1000;
 pub const O_APPEND: u64 = 0o2000;
+pub const O_NONBLOCK: u64 = 0o4000;
 pub const O_DIRECTORY: u64 = 0o200000;
 pub const O_CLOEXEC: u64 = 0o2000000;
 pub const O_NOFOLLOW: u64 = 0o400000;
@@ -90,6 +92,8 @@ enum Kind {
     Random,
     PipeRead(PipeReader),
     PipeWrite(PipeWriter),
+    /// A network socket (see net::socket).
+    Socket(Arc<Socket>),
 }
 
 /// An open file description.
@@ -132,6 +136,7 @@ fn handle(kind: Kind) -> Handle {
         Kind::Null => "/dev/null".to_string(),
         Kind::Zero => "/dev/zero".to_string(),
         Kind::Random => "/dev/urandom".to_string(),
+        Kind::Socket(s) => alloc::format!("socket:[{}]", s.id),
         Kind::File { path, .. } | Kind::Dir { path, .. } => path.clone(),
         Kind::PipeRead(r) => alloc::format!("pipe:[{}]", pipe::id(&r.pipe())),
         Kind::PipeWrite(w) => alloc::format!("pipe:[{}]", pipe::id(&w.pipe())),
@@ -412,9 +417,31 @@ const TERMIOS_SIZE: u64 = 36;
 /// Anything that isn't the console is ENOTTY (how isatty() works).
 pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
     use crate::syscall::{user_slice, user_slice_mut};
+    const FIONREAD: u64 = 0x541B;
+    const FIONBIO: u64 = 0x5421;
     match get(fd) {
         Ok(h) if matches!(h.lock().kind, Kind::Console) => {}
-        Ok(_) => return -ENOTTY,
+        Ok(h) => {
+            // Sockets: non-blocking mode, and bytes waiting.
+            let Kind::Socket(s) = &h.lock().kind else { return -ENOTTY };
+            return match request {
+                FIONBIO => match unsafe { user_slice(arg, 4) } {
+                    Some(b) => {
+                        s.set_nonblocking(u32::from_le_bytes(b.try_into().unwrap()) != 0);
+                        0
+                    }
+                    None => -EFAULT,
+                },
+                FIONREAD => match unsafe { user_slice_mut(arg, 4) } {
+                    Some(out) => {
+                        out.copy_from_slice(&(s.pending_bytes() as u32).to_le_bytes());
+                        0
+                    }
+                    None => -EFAULT,
+                },
+                _ => -ENOTTY,
+            };
+        }
         Err(e) => return -e,
     }
     match request {
@@ -569,10 +596,17 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                     (mode | if *append { O_APPEND } else { 0 }) as i64
                 }
                 Kind::Console | Kind::Null | Kind::Zero | Kind::Random => O_RDWR as i64,
+                Kind::Socket(s) => (O_RDWR | if s.is_nonblocking() { O_NONBLOCK } else { 0 }) as i64,
                 Kind::PipeWrite(_) => O_WRONLY as i64,
                 Kind::Dir { .. } | Kind::PipeRead(_) => O_RDONLY as i64,
             },
-            F_SETFL => 0, // O_APPEND/O_NONBLOCK changes aren't supported; accepted
+            F_SETFL => {
+                // O_NONBLOCK works on sockets; other changes are accepted.
+                if let Kind::Socket(s) = &slot.handle.lock().kind {
+                    s.set_nonblocking(arg & O_NONBLOCK != 0);
+                }
+                0
+            }
             _ => -EINVAL,
         }
     })
@@ -617,6 +651,14 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
         Kind::Random => {
             crate::random::fill(buf);
             buf.len() as i64
+        }
+        Kind::Socket(s) => {
+            let s = s.clone();
+            drop(desc); // don't hold it while waiting for data
+            match s.recv(buf, 0) {
+                Ok((n, _)) => n as i64,
+                Err(e) => -e,
+            }
         }
         Kind::Dir { .. } => -EISDIR,
         Kind::PipeWrite(_) => -EBADF,
@@ -719,6 +761,14 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
             }
         }
         Kind::Null | Kind::Zero | Kind::Random => bytes.len() as i64,
+        Kind::Socket(s) => {
+            let s = s.clone();
+            drop(desc);
+            match s.send(bytes, 0, None) {
+                Ok(n) => n as i64,
+                Err(e) => -e,
+            }
+        }
         Kind::Dir { .. } => -EISDIR,
         Kind::PipeRead(_) => -EBADF,
     }
@@ -760,7 +810,7 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
         }
         Kind::Dir { .. } => -EINVAL,
         Kind::Null | Kind::Zero | Kind::Random => 0,
-        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) => -ESPIPE,
+        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) => -ESPIPE,
     }
 }
 
@@ -824,6 +874,10 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
     match &desc.kind {
         Kind::Console | Kind::Null | Kind::Zero | Kind::Random => {
             fill_stat(out, 0, 0, S_IFCHR | 0o666, 1, 0, 0);
+            0
+        }
+        Kind::Socket(s) => {
+            fill_stat(out, 0, s.id, 0o140000 | 0o777, 1, 0, 0); // S_IFSOCK
             0
         }
         Kind::PipeRead(_) | Kind::PipeWrite(_) => {
@@ -1308,6 +1362,10 @@ pub fn poll_ready(fd: i32, events: i16) -> i16 {
             (_, true) => POLLERR,
             (room, false) => if room { POLLOUT } else { 0 },
         },
+        Kind::Socket(s) => {
+            let (r, w, hup) = s.readiness();
+            (if r { POLLIN } else { 0 }) | (if w { POLLOUT } else { 0 }) | (if hup { POLLHUP } else { 0 })
+        }
         // Files and devices never block.
         _ => POLLIN | POLLOUT,
     };
@@ -1376,4 +1434,236 @@ pub fn sys_statx(dirfd: u64, path: u64, flags: u64, _mask: u64, buf: u64) -> i64
     put32(out, 136, (dev >> 8) as u32); // dev major
     put32(out, 140, (dev & 0xff) as u32); // dev minor
     0
+}
+
+// ---- sockets ----
+
+/// The socket behind `fd`.
+fn socket_of(fd: u64) -> Result<Arc<Socket>, i64> {
+    match &get(fd)?.lock().kind {
+        Kind::Socket(s) => Ok(s.clone()),
+        _ => Err(ENOTSOCK),
+    }
+}
+
+/// struct sockaddr_in -> (address, port).
+fn read_sockaddr(ptr: u64, len: u64) -> Result<(smoltcp::wire::Ipv4Address, u16), i64> {
+    if len < 8 {
+        return Err(EINVAL);
+    }
+    let b = unsafe { crate::syscall::user_slice(ptr, 8) }.ok_or(EFAULT)?;
+    let family = u16::from_le_bytes([b[0], b[1]]) as u64;
+    if family != sock::AF_INET {
+        return Err(EAFNOSUPPORT);
+    }
+    let port = u16::from_be_bytes([b[2], b[3]]);
+    Ok((smoltcp::wire::Ipv4Address::new(b[4], b[5], b[6], b[7]), port))
+}
+
+/// Write a sockaddr_in to (ptr, *len_ptr) and set *len_ptr (NULL: skip).
+fn write_sockaddr(ptr: u64, len_ptr: u64, ep: smoltcp::wire::IpEndpoint) -> Result<(), i64> {
+    if ptr == 0 || len_ptr == 0 {
+        return Ok(());
+    }
+    let len_b = unsafe { crate::syscall::user_slice_mut(len_ptr, 4) }.ok_or(EFAULT)?;
+    let room = u32::from_le_bytes(len_b[..4].try_into().unwrap()) as usize;
+    len_b.copy_from_slice(&16u32.to_le_bytes());
+    let smoltcp::wire::IpAddress::Ipv4(a) = ep.addr;
+    let mut sa = [0u8; 16];
+    sa[0..2].copy_from_slice(&(sock::AF_INET as u16).to_le_bytes());
+    sa[2..4].copy_from_slice(&ep.port.to_be_bytes());
+    sa[4..8].copy_from_slice(&a.octets());
+    let n = room.min(16);
+    let out = unsafe { crate::syscall::user_slice_mut(ptr, n as u64) }.ok_or(EFAULT)?;
+    out.copy_from_slice(&sa[..n]);
+    Ok(())
+}
+
+fn result(r: Result<i64, i64>) -> i64 {
+    r.unwrap_or_else(|e| -e)
+}
+
+/// socket(domain, type, protocol): AF_INET, SOCK_STREAM (TCP) or
+/// SOCK_DGRAM (UDP), with SOCK_NONBLOCK / SOCK_CLOEXEC.
+pub fn sys_socket(domain: u64, ty: u64, _protocol: u64) -> i64 {
+    if domain != sock::AF_INET {
+        return -EAFNOSUPPORT; // no IPv6 or Unix-domain sockets yet
+    }
+    let s = match Socket::new(ty) {
+        Ok(s) => s,
+        Err(e) => return -e,
+    };
+    let cloexec = ty & sock::SOCK_CLOEXEC != 0;
+    match with_process(|p| alloc_fd(p, handle(Kind::Socket(Arc::new(s))), cloexec)) {
+        Ok(fd) => fd as i64,
+        Err(e) => -e,
+    }
+}
+
+pub fn sys_bind(fd: u64, addr: u64, len: u64) -> i64 {
+    result((|| {
+        let (a, port) = read_sockaddr(addr, len)?;
+        socket_of(fd)?.bind(a, port).map(|_| 0)
+    })())
+}
+
+pub fn sys_listen(fd: u64, backlog: u64) -> i64 {
+    result(socket_of(fd).and_then(|s| s.listen(backlog as usize)).map(|_| 0))
+}
+
+pub fn sys_connect(fd: u64, addr: u64, len: u64) -> i64 {
+    result((|| {
+        let (a, port) = read_sockaddr(addr, len)?;
+        socket_of(fd)?.connect(a, port).map(|_| 0)
+    })())
+}
+
+/// accept4(fd, addr, addrlen, flags) (and accept)
+pub fn sys_accept(fd: u64, addr: u64, len_ptr: u64, flags: u64) -> i64 {
+    result((|| {
+        let listener = socket_of(fd)?;
+        let (conn, peer) = listener.accept(flags & sock::SOCK_NONBLOCK != 0)?;
+        if let Some(peer) = peer {
+            write_sockaddr(addr, len_ptr, peer)?;
+        }
+        let cloexec = flags & sock::SOCK_CLOEXEC != 0;
+        with_process(|p| alloc_fd(p, handle(Kind::Socket(Arc::new(conn))), cloexec)).map(|fd| fd as i64)
+    })())
+}
+
+/// sendto(fd, buf, len, flags, addr, addrlen) (and send)
+pub fn sys_sendto(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, alen: u64) -> i64 {
+    result((|| {
+        let s = socket_of(fd)?;
+        let to = if addr != 0 && !s.is_stream() {
+            let (a, port) = read_sockaddr(addr, alen)?;
+            Some(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(a), port))
+        } else {
+            None
+        };
+        let data = unsafe { crate::syscall::user_slice(buf, len) }.ok_or(EFAULT)?;
+        s.send(data, flags, to).map(|n| n as i64)
+    })())
+}
+
+/// recvfrom(fd, buf, len, flags, addr, addrlen) (and recv)
+pub fn sys_recvfrom(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, len_ptr: u64) -> i64 {
+    result((|| {
+        let s = socket_of(fd)?;
+        let out = unsafe { crate::syscall::user_slice_mut(buf, len) }.ok_or(EFAULT)?;
+        let (n, from) = s.recv(out, flags)?;
+        if let Some(from) = from {
+            write_sockaddr(addr, len_ptr, from)?;
+        } else if !s.is_stream() {
+        } else if addr != 0 {
+            write_sockaddr(addr, len_ptr, s.peer().unwrap_or(s.local()))?;
+        }
+        Ok(n as i64)
+    })())
+}
+
+pub fn sys_shutdown(fd: u64, how: u64) -> i64 {
+    result(socket_of(fd).and_then(|s| s.shutdown(how)).map(|_| 0))
+}
+
+pub fn sys_getsockname(fd: u64, addr: u64, len_ptr: u64) -> i64 {
+    result(socket_of(fd).and_then(|s| write_sockaddr(addr, len_ptr, s.local())).map(|_| 0))
+}
+
+pub fn sys_getpeername(fd: u64, addr: u64, len_ptr: u64) -> i64 {
+    result(socket_of(fd).and_then(|s| s.peer()).and_then(|p| write_sockaddr(addr, len_ptr, p)).map(|_| 0))
+}
+
+/// setsockopt: accepted (SO_REUSEADDR, TCP_NODELAY, timeouts...), and
+/// ignored: the stack's defaults apply.
+pub fn sys_setsockopt(fd: u64) -> i64 {
+    result(socket_of(fd).map(|_| 0))
+}
+
+/// getsockopt: SO_ERROR (a failed non-blocking connect) and SO_TYPE;
+/// anything else reads as 0.
+pub fn sys_getsockopt(fd: u64, level: u64, name: u64, val: u64, len_ptr: u64) -> i64 {
+    const SOL_SOCKET: u64 = 1;
+    const SO_TYPE: u64 = 3;
+    const SO_ERROR: u64 = 4;
+    result((|| {
+        let s = socket_of(fd)?;
+        let v: u32 = match (level, name) {
+            (SOL_SOCKET, SO_ERROR) => s.take_error() as u32,
+            (SOL_SOCKET, SO_TYPE) => if s.is_stream() { 1 } else { 2 },
+            _ => 0,
+        };
+        if val != 0 && len_ptr != 0 {
+            let out = unsafe { crate::syscall::user_slice_mut(val, 4) }.ok_or(EFAULT)?;
+            out.copy_from_slice(&v.to_le_bytes());
+            let l = unsafe { crate::syscall::user_slice_mut(len_ptr, 4) }.ok_or(EFAULT)?;
+            l.copy_from_slice(&4u32.to_le_bytes());
+        }
+        Ok(0)
+    })())
+}
+
+/// struct msghdr: (name, namelen, iov, iovlen) of sendmsg/recvmsg.
+fn read_msghdr(msg: u64) -> Result<(u64, u64, Vec<(u64, u64)>), i64> {
+    let m = unsafe { crate::syscall::user_slice(msg, 56) }.ok_or(EFAULT)?;
+    let word = |o: usize| u64::from_le_bytes(m[o..o + 8].try_into().unwrap());
+    let (name, namelen) = (word(0), word(8) & 0xffff_ffff);
+    let (iov, iovlen) = (word(16), word(24));
+    if iovlen > 64 {
+        return Err(EINVAL);
+    }
+    let list = unsafe { crate::syscall::user_slice(iov, iovlen * 16) }.ok_or(EFAULT)?;
+    let iovs = list
+        .chunks(16)
+        .map(|c| (u64::from_le_bytes(c[0..8].try_into().unwrap()), u64::from_le_bytes(c[8..16].try_into().unwrap())))
+        .collect();
+    Ok((name, namelen, iovs))
+}
+
+/// sendmsg(fd, msg, flags): the buffers, sent as one message (no control data).
+pub fn sys_sendmsg(fd: u64, msg: u64, flags: u64) -> i64 {
+    result((|| {
+        let s = socket_of(fd)?;
+        let (name, namelen, iovs) = read_msghdr(msg)?;
+        let mut data = Vec::new();
+        for (base, len) in iovs {
+            data.extend_from_slice(unsafe { crate::syscall::user_slice(base, len) }.ok_or(EFAULT)?);
+        }
+        let to = if name != 0 && !s.is_stream() {
+            let (a, port) = read_sockaddr(name, namelen)?;
+            Some(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(a), port))
+        } else {
+            None
+        };
+        s.send(&data, flags, to).map(|n| n as i64)
+    })())
+}
+
+/// recvmsg(fd, msg, flags): one message, spread over the buffers; the
+/// sender's address in msg_name (no control data).
+pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
+    result((|| {
+        let s = socket_of(fd)?;
+        let (name, _, iovs) = read_msghdr(msg)?;
+        let total: u64 = iovs.iter().map(|(_, l)| *l).sum();
+        let mut buf = alloc::vec![0u8; total.min(1 << 20) as usize];
+        let (n, from) = s.recv(&mut buf, flags)?;
+        let mut done = 0usize;
+        for (base, len) in iovs {
+            if done >= n {
+                break;
+            }
+            let k = (len as usize).min(n - done);
+            unsafe { crate::syscall::user_slice_mut(base, k as u64) }.ok_or(EFAULT)?.copy_from_slice(&buf[done..done + k]);
+            done += k;
+        }
+        let m = unsafe { crate::syscall::user_slice_mut(msg, 56) }.ok_or(EFAULT)?;
+        m[40..48].copy_from_slice(&0u64.to_le_bytes()); // msg_controllen: no control data
+        m[48..52].copy_from_slice(&0u32.to_le_bytes()); // msg_flags
+        if let (Some(from), true) = (from, name != 0) {
+            let namelen_ptr = msg + 8;
+            write_sockaddr(name, namelen_ptr, from)?;
+        }
+        Ok(n as i64)
+    })())
 }

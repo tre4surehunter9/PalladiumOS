@@ -18,12 +18,15 @@ test-timeout = 300 # (seconds)
 run-args = [
     "-drive", "format=raw,file=target/disk.img,index=1,media=disk",
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
+    # A network card on QEMU's user network (NAT; DHCP and DNS built in).
+    "-netdev", "user,id=net0", "-device", "rtl8139,netdev=net0",
 ]
 test-args = [
     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio",
     "-display", "none",
     "-drive", "format=raw,file=target/test-disk.img,index=1,media=disk",
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
+    "-netdev", "user,id=net0", "-device", "rtl8139,netdev=net0",
 ]
 test-success-exit-code = 33     # (0x10 << 1 | 1
 
@@ -33,6 +36,11 @@ features = ["spin_no_std"]
 
 [dependencies]
 bootloader = { version = "0.9", features = ["map_physical_memory"]}
+# TCP/IP (no_std): Ethernet, IPv4, ARP, DHCP, TCP, UDP, ICMP.
+smoltcp = { version = "0.14", default-features = false, features = [
+    "alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "proto-dhcpv4",
+    "socket-tcp", "socket-udp", "socket-icmp", "socket-dhcpv4",
+] }
 volatile = "0.2.6"
 spin = "0.5.2"
 # step_trait is left out: it no longer compiles on current nightly (Step trait changed)

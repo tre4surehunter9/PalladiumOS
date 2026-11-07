@@ -103,6 +103,18 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "network",
+        "the network (BusyBox tools)",
+        &[
+            ("wget", "download a URL (wget -O file http://...)"),
+            ("nslookup", "look up a name in DNS"),
+            ("nc", "connect to (or listen on) a TCP/UDP port"),
+            ("telnet", "talk to a TCP server"),
+            ("httpd", "a web server (httpd -f -p 8080 -h DIR)"),
+            ("ftpget", "download a file over FTP"),
+        ],
+    ),
+    (
         "programming",
         "compilers, languages and other shells",
         &[
@@ -191,7 +203,7 @@ fn index() {
     println!("PalladiumOS shell help. Type 'help TOPIC' (or 'help COMMAND'):");
     for (topic, about, progs) in CATEGORIES {
         let present: Vec<&str> =
-            progs.iter().map(|(n, _)| *n).filter(|n| exists(&alloc::format!("/bin/{}", n))).collect();
+            progs.iter().map(|(n, _)| *n).filter(|n| installed(n)).collect();
         if present.is_empty() {
             continue;
         }
@@ -226,9 +238,14 @@ fn index() {
     println!("Run a program by typing its name, e.g. ls -l /bin.");
 }
 
+/// In /bin, or /usr/bin (BusyBox's tools).
+fn installed(name: &str) -> bool {
+    exists(&alloc::format!("/bin/{}", name)) || exists(&alloc::format!("/usr/bin/{}", name))
+}
+
 fn category(progs: &[(&str, &str)]) {
     for (name, desc) in progs {
-        if exists(&alloc::format!("/bin/{}", name)) {
+        if installed(name) {
             println!("  {:<12} {}", name, desc);
         }
     }

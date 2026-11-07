@@ -443,9 +443,11 @@ pub fn schedule() {
                 return;
             }
             None => {
-                // Nothing to run: wait for an interrupt, then look again.
+                // Nothing to run: wait for an interrupt, then look again
+                // (letting the network stack handle packets that arrived).
                 interrupts::enable_and_hlt();
                 interrupts::disable();
+                crate::net::poll_if_due();
             }
         }
     })
@@ -2099,6 +2101,26 @@ pub fn block_on(key: u64) {
     schedule();
 }
 
+/// Like block_on, but also wake up at tick `deadline` (network waits: TCP
+/// timers need the stack polled even when no packet arrives).
+pub fn block_on_until(key: u64, deadline: u64) {
+    if signal_pending() {
+        return;
+    }
+    {
+        let mut table = TABLE.lock();
+        let cur = current_pid();
+        if loud_pending_locked(&table, cur) {
+            return;
+        }
+        let p = table.get_mut(&cur).unwrap();
+        p.state = State::Blocked(key);
+        p.deadline = deadline;
+    }
+    schedule();
+    with_current(|p| p.deadline = 0);
+}
+
 /// Send a signal to the current process (e.g. SIGPIPE).
 pub fn raise(sig: i32) {
     let mut table = TABLE.lock();
@@ -2462,10 +2484,12 @@ pub fn sys_set_tid_address(addr: u64) -> i64 {
     })
 }
 
-/// A futex is identified by its address space and address. (Bit 63 keeps
-/// these apart from other wait keys, which are kernel heap addresses.)
+/// A futex is identified by its address space and address: bit 63 set,
+/// bit 62 clear (kernel heap addresses, which other wait keys are, have
+/// both set), the address space folded into bits 47-61. (Two address
+/// spaces folding to the same bits only cause harmless extra wake-ups.)
 fn futex_key(p4: PhysFrame, addr: u64) -> u64 {
-    (1 << 63) | (((p4.start_address().as_u64() >> 12) & 0x7FFF) << 47) | (addr & ((1 << 47) - 1))
+    (1 << 63) | (((p4.start_address().as_u64() >> 12) % 0x7FFF) << 47) | (addr & ((1 << 47) - 1))
 }
 
 /// Wake up to `max` threads waiting on `key`. Returns how many.

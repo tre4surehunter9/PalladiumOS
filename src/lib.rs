@@ -139,6 +139,7 @@ pub mod fpu;
 pub mod mmap;
 pub mod random;
 pub mod boot;
+pub mod net;
 pub mod rtc;
 
 
