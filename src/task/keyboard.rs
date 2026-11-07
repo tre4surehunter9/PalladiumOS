@@ -50,6 +50,15 @@ pub fn init_queue() {
     }
 }
 
+/// How many scancodes have arrived so far. The scheduler compares it with
+/// what it saw last, to wake processes waiting for the keyboard once per
+/// new key (lock-free: the interrupt handler counts).
+static ARRIVED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn arrivals() -> u64 {
+    ARRIVED.load(core::sync::atomic::Ordering::SeqCst)
+}
+
 /// Take the next scancode without waiting (used by the TTY while a
 /// user program is running and the async executor isn't).
 pub fn pop_scancode() -> Option<u8> {
@@ -90,6 +99,7 @@ pub fn add_scancode(scancode: u8) {
         if let Err(_) = queue.push(scancode) {
             println!("WARNING: scancode queue full; dropping keyboard input");
         } else {
+            ARRIVED.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
             WAKER.wake();
         }
     } else {

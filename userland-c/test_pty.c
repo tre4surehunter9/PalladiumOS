@@ -14,6 +14,8 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
+#include <poll.h>
 #include <unistd.h>
 #include <utmp.h>
 
@@ -207,6 +209,32 @@ int main(void)
     FD_SET(p[1], &w);
     tv.tv_sec = 1;
     CHECK(select(p[1] + 1, &r, &w, NULL, &tv) == 2 && FD_ISSET(p[0], &r) && FD_ISSET(p[1], &w));
+    /* waiting sleeps: a process in select or poll is asleep (S in
+     * /proc/PID/stat), not running, and the timeouts work */
+    CHECK(read(p[0], buf, 1) == 1); /* (empty the pipe again) */
+    for (int use_poll = 0; use_poll < 2; use_poll++) {
+        pid_t w = fork();
+        if (w == 0) {
+            if (use_poll) {
+                struct pollfd pfd = {p[0], POLLIN, 0};
+                _exit(poll(&pfd, 1, 1000) == 0 ? 0 : 1);
+            }
+            fd_set rr;
+            FD_ZERO(&rr);
+            FD_SET(p[0], &rr);
+            struct timeval t = {1, 0};
+            _exit(select(p[0] + 1, &rr, NULL, NULL, &t) == 0 ? 0 : 1);
+        }
+        usleep(400000);
+        char path[64], stat_line[256] = "";
+        snprintf(path, sizeof path, "/proc/%d/stat", (int)w);
+        FILE *f = fopen(path, "r");
+        CHECK(f && fgets(stat_line, sizeof stat_line, f));
+        fclose(f);
+        char *end = strrchr(stat_line, ')'); /* "pid (name) S ..." */
+        CHECK(end && end[1] == ' ' && end[2] == 'S');
+        CHECK(waitpid(w, &st, 0) == w && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
     close(p[0]);
     close(p[1]);
 

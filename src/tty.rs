@@ -182,15 +182,12 @@ pub fn read(buf: &mut [u8]) -> i64 {
             return -crate::syscall::EINTR;
         }
 
-        if crate::process::others_ready() {
-            // Let background processes run while we wait for a key.
-            erase_cursor();
-            crate::process::yield_now();
-        } else {
-            draw_cursor();
-            // sti; hlt is atomic with respect to interrupts, so a key pressed
-            // between the check above and the hlt still wakes us up.
-            crate::process::idle_halt();
+        // Sleep until a key arrives (the scheduler wakes CONSOLE_KEY when
+        // the keyboard queue isn't empty), a signal, or the VTIME timeout.
+        draw_cursor();
+        match timeout {
+            Some(deadline) => crate::process::block_on_until(crate::process::CONSOLE_KEY, deadline),
+            None => crate::process::block_on(crate::process::CONSOLE_KEY),
         }
     }
 }

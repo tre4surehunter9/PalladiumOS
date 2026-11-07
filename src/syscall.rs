@@ -743,11 +743,17 @@ fn poll_until(fds: u64, nfds: u64, no_wait: bool, deadline: Option<u64>) -> i64 
         if process::signal_pending() {
             return -EINTR;
         }
-        if process::others_ready() {
-            process::yield_now();
-        } else {
-            process::idle_halt();
-        }
+        sleep_until_something_happens(deadline);
+    }
+}
+
+/// poll/select: sleep until anything is woken (data, a key, a closed pipe,
+/// a packet...), a signal arrives, or the deadline passes. The caller then
+/// checks its fds again.
+fn sleep_until_something_happens(deadline: Option<u64>) {
+    match deadline {
+        Some(d) => process::block_on_until(process::POLL_KEY, d),
+        None => process::block_on(process::POLL_KEY),
     }
 }
 
@@ -825,11 +831,7 @@ fn sys_select(nfds: u64, rset: u64, wset: u64, eset: u64, timeout: u64, pselect:
         if process::signal_pending() {
             return -EINTR;
         }
-        if process::others_ready() {
-            process::yield_now();
-        } else {
-            process::idle_halt();
-        }
+        sleep_until_something_happens(deadline);
     }
 }
 

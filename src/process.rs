@@ -324,8 +324,10 @@ pub fn others_ready() -> bool {
         return true;
     }
     let now = ticks();
+    let keys = new_keys();
     TABLE.lock().values().any(|p| {
         (p.alarm_at != 0 && now >= p.alarm_at)
+            || (p.pid != cur && keys && matches!(p.state, State::Blocked(CONSOLE_KEY | POLL_KEY)))
             || (p.pid != cur
                 && (p.state == State::Ready
                     || (p.state == State::Sleeping && now >= p.wake_at)
@@ -400,7 +402,11 @@ pub fn schedule() {
             deliver_tty_signals(&mut table);
             fire_alarms_locked(&mut table);
             let now = ticks();
-            let woken = core::mem::take(&mut *WAKE_QUEUE.lock());
+            let mut woken = core::mem::take(&mut *WAKE_QUEUE.lock());
+            let arrived = crate::task::keyboard::arrivals();
+            if KEYS_SEEN.swap(arrived, Ordering::SeqCst) != arrived {
+                woken.extend([CONSOLE_KEY, POLL_KEY]);
+            }
             for p in table.values_mut() {
                 match p.state {
                     State::Sleeping if now >= p.wake_at => p.state = State::Ready,
@@ -481,31 +487,11 @@ pub fn schedule() {
     })
 }
 
-/// Halt until the next interrupt (waiting for a key), without counting the
-/// wait as the current process's CPU time.
-pub fn idle_halt() {
-    {
-        let mut table = TABLE.lock();
-        if let Some(p) = table.get_mut(&current_pid()) {
-            p.cpu_ticks += ticks().saturating_sub(p.running_since);
-        }
-    }
-    interrupts::enable_and_hlt();
-    interrupts::disable();
-    let mut table = TABLE.lock();
-    if let Some(p) = table.get_mut(&current_pid()) {
-        p.running_since = ticks();
-    }
-}
-
 /// Let other ready processes run (sched_yield).
 pub fn yield_now() {
     schedule();
-    // Let pending interrupts in (keys, the timer, the network card). Two
-    // processes waiting in the kernel by yielding to each other (a shell
-    // reading the keyboard, a server in select) would otherwise never take
-    // them, and wait forever. Callers are at points where idle_halt would
-    // enable interrupts too.
+    // Let pending interrupts in (keys, the timer, the network card): two
+    // processes spinning on sched_yield would otherwise never take them.
     interrupts::enable();
     core::hint::spin_loop(); // (sti takes effect after one more instruction)
     interrupts::disable();
@@ -2224,12 +2210,30 @@ pub fn sys_clock_gettime(clock: u64, tp: u64) -> i64 {
 /// closed as a process exits).
 static WAKE_QUEUE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
-/// Wake every process blocked on `key`.
+/// What processes in poll() and select() block on: they wait for anything
+/// at all to happen (every wake() also wakes them), then check their fds
+/// again.
+pub const POLL_KEY: u64 = 0x7E7E_0000_504F_4C4C;
+/// What processes reading the console block on: the scheduler wakes them
+/// when keys arrive (the keyboard interrupt itself can't take locks).
+pub const CONSOLE_KEY: u64 = 0x7E7E_0000_434F_4E53;
+
+/// Wake every process blocked on `key` (and everyone in poll or select).
 pub fn wake(key: u64) {
     let mut queue = WAKE_QUEUE.lock();
-    if !queue.contains(&key) {
-        queue.push(key);
+    for k in [key, POLL_KEY] {
+        if !queue.contains(&k) {
+            queue.push(k);
+        }
     }
+}
+
+/// Scancode arrivals the scheduler has woken keyboard readers for.
+static KEYS_SEEN: AtomicU64 = AtomicU64::new(0);
+
+/// Have keys arrived since the scheduler last woke keyboard readers?
+fn new_keys() -> bool {
+    crate::task::keyboard::arrivals() != KEYS_SEEN.load(Ordering::SeqCst)
 }
 
 /// Sleep until someone calls `wake(key)` (or a signal arrives). Callers
