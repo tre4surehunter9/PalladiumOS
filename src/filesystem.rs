@@ -180,15 +180,7 @@ pub fn is_dir(path: &str) -> bool {
 /// The files a fresh system starts with (only created if missing, so a
 /// disk keeps whatever the user changed).
 pub fn init_default_files() {
-    let _ = make_dir("/features");
-    let _ = make_dir("/scripts");
     let defaults = [
-        ("/scripts/test.psh", "# PalladiumOS Test Script\necho This is a test of the PalladiumOS Scripting.\n"),
-        ("/features/features.txt", "Features:\n Text Editor\n Filesystem\n Scripting\n Shell\n"),
-        (
-            "/welcome.txt",
-            "Welcome to PalladiumOS! This is my personal OS project!\nYou can find it at https://github.com/tre4surehunter9/PalladiumOS/\n",
-        ),
         // Names for addresses (libc reads this before asking DNS).
         ("/etc/hosts", "127.0.0.1\tlocalhost\n10.0.2.2\tgateway\n"),
         // fastfetch's system-wide config: PalladiumOS's logo, a periodic

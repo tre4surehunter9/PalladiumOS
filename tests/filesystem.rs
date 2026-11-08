@@ -190,9 +190,11 @@ fn cwd() -> String {
 #[test_case]
 fn default_files_exist() {
     filesystem::init_default_files();
-    assert!(filesystem::is_dir("/scripts"));
-    assert!(filesystem::read_file("/welcome.txt").is_ok());
-    assert!(filesystem::read_file("/scripts/test.psh").is_ok());
+    assert!(filesystem::read_file("/etc/hosts").is_ok());
+    assert!(filesystem::read_file("/etc/shells").is_ok());
+    // The 0.4 demo files are gone.
+    assert!(!filesystem::is_dir("/scripts"));
+    assert!(filesystem::read_file("/welcome.txt").is_err());
 }
 
 #[test_case]
