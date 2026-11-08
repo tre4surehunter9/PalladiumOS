@@ -107,7 +107,7 @@ fn main(_args: Args) -> i32 {
     let saved_tty = tcgetattr(STDIN).ok();
     let no_root_password = shadow_hash("root").is_none_or(|h| h.is_empty());
     println!();
-    println!("PalladiumOS 0.6.1 (palladium)");
+    println!("PalladiumOS 0.6.2 (palladium)");
     if no_root_password {
         println!("Log in as 'user' or 'root' (no passwords yet: set them with passwd).");
         println!("Ctrl-D here opens the kernel shell.");
