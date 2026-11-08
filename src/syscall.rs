@@ -107,6 +107,18 @@ pub const SYS_UTIME: u64 = 132;
 pub const SYS_SETHOSTNAME: u64 = 170;
 pub const SYS_UTIMES: u64 = 235;
 pub const SYS_MEMFD_CREATE: u64 = 319;
+pub const SYS_PERSONALITY: u64 = 135;
+pub const SYS_SCHED_GETPARAM: u64 = 143;
+pub const SYS_SCHED_SETSCHEDULER: u64 = 144;
+pub const SYS_SCHED_GETSCHEDULER: u64 = 145;
+pub const SYS_SCHED_GET_PRIORITY_MAX: u64 = 146;
+pub const SYS_SCHED_GET_PRIORITY_MIN: u64 = 147;
+pub const SYS_SCHED_RR_GET_INTERVAL: u64 = 148;
+pub const SYS_READAHEAD: u64 = 187;
+pub const SYS_IOPRIO_SET: u64 = 251;
+pub const SYS_IOPRIO_GET: u64 = 252;
+pub const SYS_SYNC_FILE_RANGE: u64 = 277;
+pub const SYS_SYNCFS: u64 = 306;
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_CONNECT: u64 = 42;
 pub const SYS_ACCEPT: u64 = 43;
@@ -628,6 +640,23 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_UTIMES => vfs::sys_utimes(a1, a2, false),
         SYS_UTIME => vfs::sys_utimes(a1, a2, true),
         SYS_MEMFD_CREATE => vfs::sys_memfd_create(a1, a2),
+        // One personality: Linux (PER_LINUX, 0); 0xffffffff only asks.
+        SYS_PERSONALITY => 0,
+        SYS_SCHED_GETPARAM | SYS_SCHED_GETSCHEDULER | SYS_SCHED_SETSCHEDULER => sys_sched(num, a1, a2, a3),
+        // Priority ranges: real-time policies (FIFO 1, RR 2) 1-99; others 0.
+        SYS_SCHED_GET_PRIORITY_MAX => match a1 { 1 | 2 => 99, 0 | 3 | 5 => 0, _ => -EINVAL },
+        SYS_SCHED_GET_PRIORITY_MIN => match a1 { 1 | 2 => 1, 0 | 3 | 5 => 0, _ => -EINVAL },
+        SYS_SCHED_RR_GET_INTERVAL => match unsafe { user_slice_mut(a2, 16) } {
+            Some(b) => {
+                b[0..8].copy_from_slice(&0u64.to_le_bytes());
+                b[8..16].copy_from_slice(&100_000_000u64.to_le_bytes()); // 100 ms
+                0
+            }
+            None => -EFAULT,
+        },
+        // I/O priorities, read-ahead and partial syncs: accepted, no effect.
+        SYS_IOPRIO_SET | SYS_IOPRIO_GET | SYS_READAHEAD | SYS_SYNC_FILE_RANGE => 0,
+        SYS_SYNCFS => vfs::sys_sync(),
         SYS_CAPGET => sys_capget(a1, a2),
         SYS_SIGALTSTACK => sys_sigaltstack(a1, a2),
         SYS_SYSINFO => sys_sysinfo(a1),
@@ -825,6 +854,36 @@ fn timespec_deadline(ts: u64) -> Result<Option<u64>, i64> {
     let nsec = u64::from_le_bytes(t[8..16].try_into().unwrap());
     let ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
     Ok(Some(if ns == 0 { 0 } else { process::ticks() + ns.div_ceil(process::TICK_NS) }))
+}
+
+/// sched_getscheduler, sched_getparam, sched_setscheduler: everything runs
+/// with the normal policy (SCHED_OTHER, priority 0). Real-time policies
+/// are accepted from root as a no-op, refused (EPERM) for others.
+fn sys_sched(num: u64, pid: u64, a2: u64, a3: u64) -> i64 {
+    if (pid as i64) < 0 {
+        return -EINVAL;
+    }
+    match num {
+        SYS_SCHED_GETSCHEDULER => 0,
+        SYS_SCHED_GETPARAM => match unsafe { user_slice_mut(a2, 4) } {
+            Some(b) => {
+                b.fill(0);
+                0
+            }
+            None => -EFAULT,
+        },
+        _ => {
+            const SCHED_RESET_ON_FORK: u64 = 0x4000_0000;
+            let Some(b) = (unsafe { user_slice(a3, 4) }) else { return -EFAULT };
+            let prio = i32::from_le_bytes(b.try_into().unwrap());
+            match (a2 & !SCHED_RESET_ON_FORK, prio) {
+                (0 | 3 | 5, 0) => 0, // OTHER, BATCH, IDLE
+                (1 | 2, 1..=99) if process::current_cred().euid == 0 => 0,
+                (1 | 2, 1..=99) => -EPERM,
+                _ => -EINVAL,
+            }
+        }
+    }
 }
 
 /// gettimeofday(tv, tz): the time of day (tz: zeros, UTC).

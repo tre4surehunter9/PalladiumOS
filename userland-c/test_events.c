@@ -19,6 +19,7 @@
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/utsname.h>
+#include <sys/personality.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
@@ -267,6 +268,32 @@ static int misc(void)
     CHECK(pread(m, mb, 7, 0) == 7 && memcmp(mb, "memory!", 7) == 0);
     CHECK(syscall(SYS_memfd_create, "a/b", 0) == -1 && errno == EINVAL);
     close(m);
+
+    /* Scheduling policies (musl's wrappers for some of these don't call
+     * the kernel, so ask it directly). */
+    int prio = 7;
+    CHECK(syscall(SYS_sched_getscheduler, 0) == SCHED_OTHER);
+    CHECK(syscall(SYS_sched_getparam, 0, &prio) == 0 && prio == 0);
+    prio = 0;
+    CHECK(syscall(SYS_sched_setscheduler, 0, SCHED_OTHER, &prio) == 0);
+    prio = 50;
+    CHECK(syscall(SYS_sched_setscheduler, 0, SCHED_OTHER, &prio) == -1 && errno == EINVAL);
+    CHECK(sched_get_priority_max(SCHED_FIFO) == 99 && sched_get_priority_min(SCHED_RR) == 1);
+    CHECK(sched_get_priority_max(SCHED_OTHER) == 0);
+    struct timespec rr;
+    CHECK(sched_rr_get_interval(0, &rr) == 0 && rr.tv_sec == 0 && rr.tv_nsec == 100000000);
+
+    /* personality, I/O priority, syncs, /proc/cmdline. */
+    CHECK(personality(0xffffffff) == 0);
+    CHECK(syscall(SYS_ioprio_get, 1, 0) == 0);
+    int sf = open("/tmp/test_events.sync", O_CREAT | O_RDWR, 0644);
+    CHECK(sf >= 0 && syncfs(sf) == 0 && sync_file_range(sf, 0, 0, 0) == 0 && readahead(sf, 0, 4096) == 0);
+    close(sf);
+    unlink("/tmp/test_events.sync");
+    char cmdline[64] = {0};
+    int cf = open("/proc/cmdline", O_RDONLY);
+    CHECK(cf >= 0 && read(cf, cmdline, sizeof cmdline - 1) > 0 && strstr(cmdline, "palladiumos"));
+    close(cf);
     return 0;
 }
 

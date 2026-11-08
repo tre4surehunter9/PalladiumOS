@@ -24,7 +24,7 @@ const ROOT: Ino = 1;
 const SELF: Ino = 2;
 /// System files: (name, inode).
 const SYSTEM: &[(&str, Ino)] =
-    &[("cpuinfo", 3), ("kmsg", 9), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("stat", 10), ("uptime", 7), ("version", 8)];
+    &[("cmdline", 11), ("cpuinfo", 3), ("kmsg", 9), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("stat", 10), ("uptime", 7), ("version", 8)];
 
 // Files in /proc/PID: (name, number).
 const P_DIR: u64 = 0;
@@ -99,6 +99,7 @@ impl ProcFs {
             }
             8 => format!("PalladiumOS version {} (rustc nightly) #1 x86_64\n", crate::VERSION),
             10 => system_stat(),
+            11 => String::from("BOOT_IMAGE=palladiumos\n"), // the kernel's command line
             _ => return Err(EINVAL),
         })
     }
