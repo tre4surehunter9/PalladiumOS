@@ -654,6 +654,128 @@ pub fn sys_close(fd: u64) -> i64 {
     if slot.is_some() { 0 } else { -EBADF }
 }
 
+/// close_range(first, last, flags): close fds first..=last, or with
+/// CLOSE_RANGE_CLOEXEC mark them close-on-exec. (CLOSE_RANGE_UNSHARE: the
+/// fd table is already this process's own.)
+pub fn sys_close_range(first: u64, last: u64, flags: u64) -> i64 {
+    const CLOSE_RANGE_UNSHARE: u64 = 2;
+    const CLOSE_RANGE_CLOEXEC: u64 = 4;
+    if flags & !(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC) != 0 || first > last {
+        return -EINVAL;
+    }
+    let end = last.min(MAX_FDS as u64 - 1);
+    if first > end {
+        return 0;
+    }
+    // Dropped after the process table is unlocked (see sys_close).
+    let closed: Vec<Slot> = with_process(|p| {
+        let mut out = Vec::new();
+        for fd in first as usize..=end as usize {
+            if flags & CLOSE_RANGE_CLOEXEC != 0 {
+                if let Some(s) = p.fds[fd].as_mut() {
+                    s.cloexec = true;
+                }
+            } else if let Some(s) = p.fds[fd].take() {
+                out.push(s);
+            }
+        }
+        out
+    });
+    drop(closed);
+    0
+}
+
+/// fallocate(fd, mode, offset, len): make room for [offset, offset + len)
+/// in a file (mode 0 grows it; FALLOC_FL_KEEP_SIZE only reserves, which
+/// ext2 here doesn't need).
+pub fn sys_fallocate(fd: u64, mode: u64, offset: u64, len: u64) -> i64 {
+    const FALLOC_FL_KEEP_SIZE: u64 = 1;
+    if mode & !FALLOC_FL_KEEP_SIZE != 0 {
+        return -EOPNOTSUPP; // punching holes, zeroing ranges...
+    }
+    if len == 0 {
+        return -EINVAL;
+    }
+    let loc = match fd_loc(fd) {
+        Ok(Some(loc)) => loc,
+        Ok(None) => return -ENODEV,
+        Err(e) => return -e,
+    };
+    let size = match mounts::with_fs(loc.mount, |fs| fs.meta(loc.ino)) {
+        Ok(m) => m.size,
+        Err(e) => return -e,
+    };
+    let Some(end) = offset.checked_add(len) else { return -EFBIG };
+    if mode & FALLOC_FL_KEEP_SIZE == 0 && end > size {
+        return sys_ftruncate(fd, end);
+    }
+    0
+}
+
+/// copy_file_range(in, off_in, out, off_out, len, flags): copy between
+/// files in the kernel, 64 KiB at a time. A NULL offset means the fd's
+/// own position (which moves); otherwise the offset is read and updated.
+pub fn sys_copy_file_range(fd_in: u64, off_in: u64, fd_out: u64, off_out: u64, len: u64, flags: u64) -> i64 {
+    if flags != 0 {
+        return -EINVAL;
+    }
+    let read_off = |p: u64| -> Result<Option<u64>, i64> {
+        if p == 0 {
+            return Ok(None);
+        }
+        let b = unsafe { user_slice(p, 8) }.ok_or(EFAULT)?;
+        Ok(Some(u64::from_le_bytes(b.try_into().unwrap())))
+    };
+    let (mut pos_in, mut pos_out) = match (read_off(off_in), read_off(off_out)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return -e,
+    };
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total: u64 = 0;
+    while total < len {
+        let want = ((len - total) as usize).min(buf.len());
+        let n = match pos_in {
+            Some(p) => sys_pread(fd_in, &mut buf[..want], p),
+            None => sys_read(fd_in, &mut buf[..want]),
+        };
+        if n < 0 {
+            if total > 0 { break } else { return n }
+        }
+        if n == 0 {
+            break; // end of the input
+        }
+        let mut written = 0usize;
+        while written < n as usize {
+            let w = match pos_out {
+                Some(p) => sys_pwrite(fd_out, &buf[written..n as usize], p + written as u64),
+                None => sys_write(fd_out, &buf[written..n as usize]),
+            };
+            if w <= 0 {
+                if total + (written as u64) > 0 { break } else { return if w < 0 { w } else { -EIO } }
+            }
+            written += w as usize;
+        }
+        total += written as u64;
+        if let Some(p) = pos_in.as_mut() {
+            *p += written as u64;
+        }
+        if let Some(p) = pos_out.as_mut() {
+            *p += written as u64;
+        }
+        if written < n as usize {
+            break;
+        }
+    }
+    for (ptr, pos) in [(off_in, pos_in), (off_out, pos_out)] {
+        if let (true, Some(p)) = (ptr != 0, pos) {
+            if let Some(b) = unsafe { user_slice_mut(ptr, 8) } {
+                b.copy_from_slice(&p.to_le_bytes());
+            }
+        }
+    }
+    total as i64
+}
+
 /// pipe2(fds, flags): fds[0] is the read end, fds[1] the write end.
 pub fn sys_pipe2(fds_out: u64, flags: u64) -> i64 {
     if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {

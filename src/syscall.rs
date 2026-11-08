@@ -89,6 +89,20 @@ pub const SYS_SIGALTSTACK: u64 = 131;
 pub const SYS_IO_URING_SETUP: u64 = 425;
 pub const SYS_TIMES: u64 = 100;
 pub const SYS_FCHMODAT2: u64 = 452;
+pub const SYS_GETTIMEOFDAY: u64 = 96;
+pub const SYS_GETPRIORITY: u64 = 140;
+pub const SYS_SETPRIORITY: u64 = 141;
+pub const SYS_MLOCK: u64 = 149;
+pub const SYS_MUNLOCK: u64 = 150;
+pub const SYS_MLOCKALL: u64 = 151;
+pub const SYS_MUNLOCKALL: u64 = 152;
+pub const SYS_TIME: u64 = 201;
+pub const SYS_SCHED_SETAFFINITY: u64 = 203;
+pub const SYS_FALLOCATE: u64 = 285;
+pub const SYS_GETCPU: u64 = 309;
+pub const SYS_MLOCK2: u64 = 325;
+pub const SYS_COPY_FILE_RANGE: u64 = 326;
+pub const SYS_CLOSE_RANGE: u64 = 436;
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_CONNECT: u64 = 42;
 pub const SYS_ACCEPT: u64 = 43;
@@ -565,6 +579,47 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_IO_URING_SETUP => -ENOSYS, // (callers fall back to epoll)
         SYS_TIMES => process::sys_times(a1),
         SYS_FCHMODAT2 => vfs::sys_fchmodat2(a1, a2, a3, a4),
+        SYS_TIME => {
+            let now = crate::rtc::now();
+            match a1 {
+                0 => now as i64,
+                p => match unsafe { user_slice_mut(p, 8) } {
+                    Some(b) => {
+                        b.copy_from_slice(&now.to_le_bytes());
+                        now as i64
+                    }
+                    None => -EFAULT,
+                },
+            }
+        }
+        SYS_GETTIMEOFDAY => sys_gettimeofday(a1, a2),
+        // Every process has nice 0 (the kernel's value is 20 - nice).
+        SYS_GETPRIORITY => if a1 <= 2 { 20 } else { -EINVAL },
+        SYS_SETPRIORITY => if a1 <= 2 { 0 } else { -EINVAL },
+        // No swap: memory never leaves RAM, so locking it is a no-op.
+        SYS_MLOCK | SYS_MUNLOCK | SYS_MLOCKALL | SYS_MUNLOCKALL | SYS_MLOCK2 => 0,
+        // One CPU: a mask must include CPU 0.
+        SYS_SCHED_SETAFFINITY => match unsafe { user_slice(a3, 1) } {
+            Some(b) if a2 >= 1 && b[0] & 1 != 0 => 0,
+            Some(_) => -EINVAL,
+            None => -EFAULT,
+        },
+        // CPU 0, NUMA node 0.
+        SYS_GETCPU => {
+            let mut r = 0;
+            for p in [a1, a2] {
+                if p != 0 {
+                    match unsafe { user_slice_mut(p, 4) } {
+                        Some(b) => b.fill(0),
+                        None => r = -EFAULT,
+                    }
+                }
+            }
+            r
+        }
+        SYS_FALLOCATE => vfs::sys_fallocate(a1, a2, a3, a4),
+        SYS_COPY_FILE_RANGE => vfs::sys_copy_file_range(a1, a2, a3, a4, a5, frame.r9),
+        SYS_CLOSE_RANGE => vfs::sys_close_range(a1, a2, a3),
         SYS_CAPGET => sys_capget(a1, a2),
         SYS_SIGALTSTACK => sys_sigaltstack(a1, a2),
         SYS_SYSINFO => sys_sysinfo(a1),
@@ -762,6 +817,21 @@ fn timespec_deadline(ts: u64) -> Result<Option<u64>, i64> {
     let nsec = u64::from_le_bytes(t[8..16].try_into().unwrap());
     let ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
     Ok(Some(if ns == 0 { 0 } else { process::ticks() + ns.div_ceil(process::TICK_NS) }))
+}
+
+/// gettimeofday(tv, tz): the time of day (tz: zeros, UTC).
+fn sys_gettimeofday(tv: u64, tz: u64) -> i64 {
+    if tv != 0 {
+        let ns = crate::rtc::now_ns();
+        let Some(b) = (unsafe { user_slice_mut(tv, 16) }) else { return -EFAULT };
+        b[0..8].copy_from_slice(&(ns / 1_000_000_000).to_le_bytes());
+        b[8..16].copy_from_slice(&(ns / 1000 % 1_000_000).to_le_bytes());
+    }
+    if tz != 0 {
+        let Some(b) = (unsafe { user_slice_mut(tz, 8) }) else { return -EFAULT };
+        b.fill(0);
+    }
+    0
 }
 
 /// capget(header, data): no capabilities (root's power comes from uid 0).

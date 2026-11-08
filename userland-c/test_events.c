@@ -13,7 +13,11 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sched.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
@@ -188,6 +192,54 @@ static int misc(void)
     CHECK(syscall(452, AT_FDCWD, l, 0644, AT_SYMLINK_NOFOLLOW) == -1 && errno == EOPNOTSUPP);
     unlink(l);
     unlink(f);
+
+    /* Clocks: time(), gettimeofday() and clock_gettime() agree. */
+    struct timeval tv;
+    struct timespec rt;
+    time_t t1 = time(NULL);
+    CHECK(syscall(SYS_gettimeofday, &tv, NULL) == 0);
+    CHECK(clock_gettime(CLOCK_REALTIME, &rt) == 0);
+    CHECK(t1 > 1577836800 && tv.tv_sec - t1 <= 1 && rt.tv_sec - tv.tv_sec <= 1 && tv.tv_usec < 1000000);
+    time_t t2;
+    CHECK(syscall(SYS_time, &t2) == t2 && t2 - t1 <= 1);
+
+    /* Priorities, memory locking, the one CPU. */
+    errno = 0;
+    CHECK(getpriority(PRIO_PROCESS, 0) == 0 && errno == 0);
+    CHECK(setpriority(PRIO_PROCESS, 0, 0) == 0);
+    static char locked[8192];
+    CHECK(mlock(locked, sizeof locked) == 0 && munlock(locked, sizeof locked) == 0);
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(0, &set);
+    CHECK(sched_setaffinity(0, sizeof set, &set) == 0);
+    unsigned cpu = 99, node = 99;
+    CHECK(syscall(SYS_getcpu, &cpu, &node, NULL) == 0 && cpu == 0 && node == 0);
+
+    /* close_range: close, or mark close-on-exec. */
+    int a = dup(0), b = dup(0), c = dup(0);
+    CHECK(a >= 0 && b == a + 1 && c == a + 2);
+    CHECK(syscall(SYS_close_range, b, c, 4 /* CLOSE_RANGE_CLOEXEC */) == 0);
+    CHECK(fcntl(b, F_GETFD) & FD_CLOEXEC);
+    CHECK(syscall(SYS_close_range, a, c, 0) == 0);
+    CHECK(fcntl(a, F_GETFD) == -1 && errno == EBADF && fcntl(c, F_GETFD) == -1);
+
+    /* fallocate grows a file; copy_file_range copies between files. */
+    const char *src = "/tmp/test_events.src", *dst = "/tmp/test_events.dst";
+    int s1 = open(src, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    CHECK(s1 >= 0 && fallocate(s1, 0, 0, 10000) == 0);
+    CHECK(fstat(s1, &st) == 0 && st.st_size == 10000);
+    CHECK(ftruncate(s1, 0) == 0 && write(s1, "hello, world", 12) == 12);
+    int d1 = open(dst, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    CHECK(d1 >= 0);
+    loff_t in_off = 7, out_off = 0;
+    CHECK(copy_file_range(s1, &in_off, d1, &out_off, 100, 0) == 5 && in_off == 12 && out_off == 5);
+    char got[16] = {0};
+    CHECK(pread(d1, got, sizeof got, 0) == 5 && memcmp(got, "world", 5) == 0);
+    close(s1);
+    close(d1);
+    unlink(src);
+    unlink(dst);
     return 0;
 }
 
