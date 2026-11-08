@@ -372,14 +372,18 @@ impl FileSystem for ProcFs {
         }
         let (pid, file) = split(ino).ok_or(EINVAL)?;
         let p = proc_info(pid)?;
-        match file {
-            2 => Ok(p.cwd),
-            3 => Ok(p.exe),
+        let target = match file {
+            2 => p.cwd,
+            3 => p.exe,
             f if f >= P_FD_BASE => {
-                p.fds.into_iter().find(|(n, _)| *n as u64 == f - P_FD_BASE).map(|(_, what)| what).ok_or(ENOENT)
+                p.fds.into_iter().find(|(n, _)| *n as u64 == f - P_FD_BASE).map(|(_, what)| what).ok_or(ENOENT)?
             }
-            _ => Err(EINVAL),
-        }
+            _ => return Err(EINVAL),
+        };
+        // Paths as the reader sees them: inside a chroot (Alpine), without
+        // the root's own path (/usr/bin/node, not /alpine/usr/bin/node).
+        let root = process::current_root();
+        Ok(if root == "/" { target } else { crate::filesystem::strip_root(&root, &target).unwrap_or(target) })
     }
 
     fn create(&mut self, _dir: Ino, _name: &str, _kind: FileType, _perm: u32) -> FsResult<Ino> {
