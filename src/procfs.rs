@@ -28,8 +28,12 @@ const SYSTEM: &[(&str, Ino)] =
 
 // Files in /proc/PID: (name, number).
 const P_DIR: u64 = 0;
-const P_FILES: &[(&str, u64)] = &[("cmdline", 1), ("cwd", 2), ("exe", 3), ("fd", 4), ("stat", 5), ("statm", 7), ("status", 6)];
+const P_FILES: &[(&str, u64)] =
+    &[("cmdline", 1), ("cwd", 2), ("exe", 3), ("fd", 4), ("stat", 5), ("statm", 7), ("status", 6), ("task", 8)];
 const P_FD_DIR: u64 = 4;
+/// /proc/PID/task: the process's threads, each entry the same as /proc/TID
+/// (htop reads processes through it).
+const P_TASK_DIR: u64 = 8;
 const P_FD_BASE: u64 = 0x100;
 
 fn pid_ino(pid: u64, file: u64) -> Ino {
@@ -255,6 +259,14 @@ impl FileSystem for ProcFs {
                 proc_info(pid)?;
                 P_FILES.iter().find(|(n, _)| *n == name).map(|&(_, f)| pid_ino(pid, f)).ok_or(ENOENT)
             }
+            Some((pid, P_TASK_DIR)) => {
+                let tid: u64 = name.parse().map_err(|_| ENOENT)?;
+                let group = proc_info(pid)?.tgid;
+                if proc_info(tid)?.tgid != group {
+                    return Err(ENOENT);
+                }
+                Ok(pid_ino(tid, P_DIR))
+            }
             Some((pid, P_FD_DIR)) => {
                 let fd: usize = name.parse().map_err(|_| ENOENT)?;
                 let p = proc_info(pid)?;
@@ -275,7 +287,7 @@ impl FileSystem for ProcFs {
             let (pid, file) = split(ino).ok_or(ENOENT)?;
             let p = proc_info(pid)?;
             match file {
-                P_DIR | P_FD_DIR => (FileType::Dir, 0o555),
+                P_DIR | P_FD_DIR | P_TASK_DIR => (FileType::Dir, 0o555),
                 2 | 3 => (FileType::Symlink, 0o777),
                 f if f >= P_FD_BASE => {
                     if !p.fds.iter().any(|(n, _)| *n as u64 == f - P_FD_BASE) {
@@ -330,12 +342,20 @@ impl FileSystem for ProcFs {
                     .iter()
                     .map(|&(n, f)| {
                         let kind = match f {
-                            P_FD_DIR => FileType::Dir,
+                            P_FD_DIR | P_TASK_DIR => FileType::Dir,
                             2 | 3 => FileType::Symlink,
                             _ => FileType::File,
                         };
                         (n.to_string(), pid_ino(pid, f), kind)
                     })
+                    .collect())
+            }
+            Some((pid, P_TASK_DIR)) => {
+                let group = proc_info(pid)?.tgid;
+                Ok(process::snapshot(None)
+                    .into_iter()
+                    .filter(|t| !t.kernel && t.tgid == group)
+                    .map(|t| (t.pid.to_string(), pid_ino(t.pid, P_DIR), FileType::Dir))
                     .collect())
             }
             Some((pid, P_FD_DIR)) => {
