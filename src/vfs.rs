@@ -776,6 +776,31 @@ pub fn sys_copy_file_range(fd_in: u64, off_in: u64, fd_out: u64, off_out: u64, l
     total as i64
 }
 
+/// memfd_create(name, flags): an anonymous file in memory. It's a file in
+/// the in-memory /tmp, removed at once, so it lives as long as its fds.
+/// (Limited to memory filesystems' 4 MiB per file.)
+pub fn sys_memfd_create(name: u64, flags: u64) -> i64 {
+    const MFD_CLOEXEC: u64 = 1;
+    const MFD_ALLOW_SEALING: u64 = 2;
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING) != 0 {
+        return -EINVAL;
+    }
+    let name = match user_path(name) {
+        Ok(n) if n.len() <= 249 && !n.contains('/') => n,
+        Ok(_) => return -EINVAL,
+        Err(e) => return -e,
+    };
+    let path = alloc::format!("/tmp/memfd:{}.{}", name, NEXT.fetch_add(1, Ordering::Relaxed));
+    let cloexec = if flags & MFD_CLOEXEC != 0 { O_CLOEXEC } else { 0 };
+    let fd = open_path(&path, O_RDWR | O_CREAT | O_EXCL | cloexec, 0o600);
+    if fd >= 0 {
+        let _ = filesystem::remove(&path);
+    }
+    fd
+}
+
 /// pipe2(fds, flags): fds[0] is the read end, fds[1] the write end.
 pub fn sys_pipe2(fds_out: u64, flags: u64) -> i64 {
     if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
@@ -1676,7 +1701,32 @@ pub fn sys_utimensat(dirfd: u64, path: u64, times: u64, flags: u64) -> i64 {
             _ => Some(sec as u64),
         }
     };
-    let explicit = times != 0;
+    set_mtime_at(dirfd, path, mtime, times != 0, flags)
+}
+
+/// utimes(path, times) and utime(path, times): the older interfaces
+/// (timevals; a utimbuf). Only the modification time is kept.
+pub fn sys_utimes(path: u64, times: u64, utimbuf: bool) -> i64 {
+    let mtime = if times == 0 {
+        Some(crate::rtc::now())
+    } else {
+        // utimbuf: { actime, modtime }; timeval[2]: { sec, usec } x 2.
+        let (off, len) = if utimbuf { (8, 16) } else { (16, 32) };
+        let Some(t) = (unsafe { crate::syscall::user_slice(times, len) }) else { return -EFAULT };
+        let sec = i64::from_le_bytes(t[off..off + 8].try_into().unwrap());
+        if sec < 0 {
+            return -EINVAL;
+        }
+        Some(sec as u64)
+    };
+    set_mtime_at(FDCWD_VALUE, path, mtime, times != 0, 0)
+}
+
+const FDCWD_VALUE: u64 = -100i64 as u64;
+
+/// Set a file's modification time (None: leave it), with utimensat's
+/// permission rules (`explicit`: a given time, not "now").
+fn set_mtime_at(dirfd: u64, path: u64, mtime: Option<u64>, explicit: bool, flags: u64) -> i64 {
     let loc = if path == 0 {
         match fd_loc(dirfd) {
             Ok(Some(l)) => l,

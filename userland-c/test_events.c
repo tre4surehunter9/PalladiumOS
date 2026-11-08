@@ -18,6 +18,7 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/time.h>
+#include <sys/utsname.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
@@ -240,6 +241,32 @@ static int misc(void)
     close(d1);
     unlink(src);
     unlink(dst);
+
+    /* sethostname changes uname's nodename. */
+    struct utsname u;
+    char old[65];
+    CHECK(gethostname(old, sizeof old) == 0);
+    CHECK(sethostname("testhost", 8) == 0);
+    CHECK(uname(&u) == 0 && strcmp(u.nodename, "testhost") == 0);
+    CHECK(sethostname(old, strlen(old)) == 0);
+
+    /* utimes and utime set the modification time. */
+    const char *tf = "/tmp/test_events.times";
+    close(open(tf, O_CREAT | O_WRONLY, 0644));
+    struct timeval tvs[2] = { { 1000000000, 0 }, { 1234567890, 0 } };
+    CHECK(syscall(SYS_utimes, tf, tvs) == 0 && stat(tf, &st) == 0 && st.st_mtime == 1234567890);
+    long ub[2] = { 0, 1111111111 };
+    CHECK(syscall(SYS_utime, tf, ub) == 0 && stat(tf, &st) == 0 && st.st_mtime == 1111111111);
+    unlink(tf);
+
+    /* memfd: an anonymous file, gone when closed. */
+    int m = syscall(SYS_memfd_create, "buf", 1 /* MFD_CLOEXEC */);
+    CHECK(m >= 0 && (fcntl(m, F_GETFD) & FD_CLOEXEC));
+    CHECK(write(m, "memory!", 7) == 7 && fstat(m, &st) == 0 && st.st_size == 7);
+    char mb[8] = {0};
+    CHECK(pread(m, mb, 7, 0) == 7 && memcmp(mb, "memory!", 7) == 0);
+    CHECK(syscall(SYS_memfd_create, "a/b", 0) == -1 && errno == EINVAL);
+    close(m);
     return 0;
 }
 

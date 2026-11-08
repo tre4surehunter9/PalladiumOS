@@ -103,6 +103,10 @@ pub const SYS_GETCPU: u64 = 309;
 pub const SYS_MLOCK2: u64 = 325;
 pub const SYS_COPY_FILE_RANGE: u64 = 326;
 pub const SYS_CLOSE_RANGE: u64 = 436;
+pub const SYS_UTIME: u64 = 132;
+pub const SYS_SETHOSTNAME: u64 = 170;
+pub const SYS_UTIMES: u64 = 235;
+pub const SYS_MEMFD_CREATE: u64 = 319;
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_CONNECT: u64 = 42;
 pub const SYS_ACCEPT: u64 = 43;
@@ -620,6 +624,10 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_FALLOCATE => vfs::sys_fallocate(a1, a2, a3, a4),
         SYS_COPY_FILE_RANGE => vfs::sys_copy_file_range(a1, a2, a3, a4, a5, frame.r9),
         SYS_CLOSE_RANGE => vfs::sys_close_range(a1, a2, a3),
+        SYS_SETHOSTNAME => sys_sethostname(a1, a2),
+        SYS_UTIMES => vfs::sys_utimes(a1, a2, false),
+        SYS_UTIME => vfs::sys_utimes(a1, a2, true),
+        SYS_MEMFD_CREATE => vfs::sys_memfd_create(a1, a2),
         SYS_CAPGET => sys_capget(a1, a2),
         SYS_SIGALTSTACK => sys_sigaltstack(a1, a2),
         SYS_SYSINFO => sys_sysinfo(a1),
@@ -1116,11 +1124,30 @@ fn sys_reboot(magic1: u64, magic2: u64, cmd: u64) -> i64 {
 }
 
 /// uname(struct utsname *buf)
+/// The machine's name (uname's nodename), changed by sethostname.
+static HOSTNAME: spin::Mutex<alloc::string::String> = spin::Mutex::new(alloc::string::String::new());
+
+/// sethostname(name, len): root only, at most 64 bytes.
+fn sys_sethostname(name: u64, len: u64) -> i64 {
+    if process::current_cred().euid != 0 {
+        return -EPERM;
+    }
+    if len > 64 {
+        return -EINVAL;
+    }
+    let Some(b) = (unsafe { user_slice(name, len) }) else { return -EFAULT };
+    *HOSTNAME.lock() = alloc::string::String::from_utf8_lossy(b).into_owned();
+    0
+}
+
 fn sys_uname(buf: u64) -> i64 {
+    if HOSTNAME.lock().is_empty() {
+        *HOSTNAME.lock() = alloc::string::String::from("palladium");
+    }
     const FIELD: usize = 65; // Linux's __NEW_UTS_LEN + 1
     const FIELDS: [&str; 6] = [
         "PalladiumOS", // sysname
-        "palladium",   // nodename
+        "",            // nodename (HOSTNAME)
         crate::VERSION, // release
         "#1",          // version
         "x86_64",      // machine
@@ -1131,7 +1158,9 @@ fn sys_uname(buf: u64) -> i64 {
         return -EFAULT;
     };
     out.fill(0);
+    let host = HOSTNAME.lock().clone();
     for (i, s) in FIELDS.iter().enumerate() {
+        let s = if i == 1 { host.as_str() } else { s };
         let n = s.len().min(FIELD - 1);
         out[i * FIELD..i * FIELD + n].copy_from_slice(&s.as_bytes()[..n]);
     }
