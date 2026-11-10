@@ -104,6 +104,8 @@ enum Kind {
     EventFd(Arc<Mutex<EventFd>>),
     /// epoll: a list of fds to watch.
     Epoll(Arc<Mutex<Vec<EpollEntry>>>),
+    /// timerfd: readable when its timer has expired.
+    TimerFd(Arc<Mutex<TimerFd>>),
 }
 
 struct EventFd {
@@ -169,6 +171,7 @@ fn handle(kind: Kind) -> Handle {
         Kind::PipeWrite(w) => alloc::format!("pipe:[{}]", pipe::id(&w.pipe())),
         Kind::EventFd(_) => "anon_inode:[eventfd]".to_string(),
         Kind::Epoll(_) => "anon_inode:[eventpoll]".to_string(),
+        Kind::TimerFd(_) => "anon_inode:[timerfd]".to_string(),
     };
     Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0, nonblocking: false }) })
 }
@@ -873,7 +876,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                     Kind::PipeWrite(_) => (O_WRONLY | nb) as i64,
                     Kind::PipeRead(_) => (O_RDONLY | nb) as i64,
                     Kind::Dir { .. } => O_RDONLY as i64,
-                    Kind::EventFd(_) | Kind::Epoll(_) => (O_RDWR | nb) as i64,
+                    Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) => (O_RDWR | nb) as i64,
                 }
             }
             // Record locks: granted (see sys_flock). F_GETLK reports
@@ -968,6 +971,12 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
             eventfd_read(&e, nonblocking, buf)
         }
         Kind::Epoll(_) => -EINVAL,
+        Kind::TimerFd(t) => {
+            let t = t.clone();
+            let nonblocking = desc.nonblocking;
+            drop(desc);
+            timerfd_read(&t, nonblocking, buf)
+        }
     }
 }
 
@@ -1089,7 +1098,7 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
             drop(desc);
             eventfd_write(&e, nonblocking, bytes)
         }
-        Kind::Epoll(_) => -EINVAL,
+        Kind::Epoll(_) | Kind::TimerFd(_) => -EINVAL,
     }
 }
 
@@ -1129,7 +1138,7 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
         }
         Kind::Dir { .. } => -EINVAL,
         Kind::Null | Kind::Zero | Kind::Random => 0,
-        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } | Kind::EventFd(_) | Kind::Epoll(_) => -ESPIPE,
+        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } | Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) => -ESPIPE,
     }
 }
 
@@ -1209,7 +1218,7 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
             fill_stat(out, 0, 0, S_IFIFO | 0o600, 1, 0, 0);
             0
         }
-        Kind::EventFd(_) | Kind::Epoll(_) => {
+        Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) => {
             fill_stat(out, 0, 0, 0o600, 1, 0, 0); // an anonymous inode
             0
         }
@@ -1853,6 +1862,11 @@ pub fn poll_ready(fd: i32, events: i16) -> i16 {
             (if r { POLLIN } else { 0 }) | (if w { POLLOUT } else { 0 }) | (if hup { POLLHUP } else { 0 })
         }
         Kind::EventFd(e) => (if e.lock().count > 0 { POLLIN } else { 0 }) | POLLOUT,
+        Kind::TimerFd(t) => {
+            let mut t = t.lock();
+            t.update(crate::process::ticks());
+            if t.expired > 0 { POLLIN } else { 0 }
+        }
         Kind::Epoll(list) => {
             // Readable when something it watches is ready (epolls inside
             // epolls aren't looked into).
@@ -2611,9 +2625,201 @@ pub fn sys_epoll_wait(epfd: u64, out: u64, max: u64, deadline: Option<u64>) -> i
         if crate::process::signal_pending() {
             return -EINTR;
         }
-        match deadline {
+        match timer_capped(deadline) {
             Some(d) => crate::process::block_on_until(crate::process::POLL_KEY, d),
             None => crate::process::block_on(crate::process::POLL_KEY),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- timerfd
+
+struct TimerFd {
+    realtime: bool,
+    /// When it next expires (ticks), if armed.
+    next: Option<u64>,
+    /// Repeat every this many ticks (0: once).
+    interval: u64,
+    /// Expirations not read yet.
+    expired: u64,
+}
+
+impl TimerFd {
+    /// Count the expirations up to `now`.
+    fn update(&mut self, now: u64) {
+        if let Some(next) = self.next.filter(|&n| now >= n) {
+            if self.interval > 0 {
+                let k = (now - next) / self.interval + 1;
+                self.expired += k;
+                self.next = Some(next + k * self.interval);
+            } else {
+                self.expired += 1;
+                self.next = None;
+            }
+        }
+    }
+}
+
+/// Every timerfd, so poll and epoll can sleep until the next expiry.
+static TIMERS: Mutex<Vec<alloc::sync::Weak<Mutex<TimerFd>>>> = Mutex::new(Vec::new());
+
+/// `deadline`, or sooner if a timerfd expires sooner (poll and epoll wake
+/// up then and check their fds again).
+pub fn timer_capped(deadline: Option<u64>) -> Option<u64> {
+    let now = crate::process::ticks();
+    let mut timers = TIMERS.lock();
+    timers.retain(|w| w.strong_count() > 0);
+    // Each timer brought up to date first: an expiry that has passed (on a
+    // timer nobody is polling) would otherwise be a deadline in the past,
+    // and the caller would never sleep. After update, `next` is later than
+    // now (or None).
+    let next = timers
+        .iter()
+        .filter_map(|w| w.upgrade())
+        .filter_map(|t| {
+            let mut t = t.lock();
+            t.update(now);
+            t.next
+        })
+        .min();
+    match (deadline, next) {
+        (Some(d), Some(n)) => Some(d.min(n)),
+        (d, n) => d.or(n),
+    }
+}
+
+const TFD_TIMER_ABSTIME: u64 = 1;
+const CLOCK_REALTIME: u64 = 0;
+const CLOCK_MONOTONIC: u64 = 1;
+const CLOCK_BOOTTIME: u64 = 7;
+
+/// timerfd_create(clock, flags: TFD_CLOEXEC, TFD_NONBLOCK)
+pub fn sys_timerfd_create(clock: u64, flags: u64) -> i64 {
+    if !matches!(clock, CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME) {
+        return -EINVAL;
+    }
+    if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
+        return -EINVAL;
+    }
+    let t = Arc::new(Mutex::new(TimerFd { realtime: clock == CLOCK_REALTIME, next: None, interval: 0, expired: 0 }));
+    TIMERS.lock().push(Arc::downgrade(&t));
+    let h = handle(Kind::TimerFd(t));
+    h.lock().nonblocking = flags & O_NONBLOCK != 0;
+    match with_process(|p| alloc_fd(p, h, flags & O_CLOEXEC != 0)) {
+        Ok(fd) => fd as i64,
+        Err(e) => -e,
+    }
+}
+
+fn timerfd_of(fd: u64) -> Result<Arc<Mutex<TimerFd>>, i64> {
+    match &get(fd)?.lock().kind {
+        Kind::TimerFd(t) => Ok(t.clone()),
+        _ => Err(EINVAL),
+    }
+}
+
+fn ns_to_ticks(ns: u64) -> u64 {
+    ns.div_ceil(crate::process::TICK_NS)
+}
+
+/// The itimerspec at `ptr`: (interval ns, value ns).
+fn read_itimerspec(ptr: u64) -> Result<(u64, u64), i64> {
+    let b = unsafe { user_slice(ptr, 32) }.ok_or(EFAULT)?;
+    let f = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    if f(8) >= 1_000_000_000 || f(24) >= 1_000_000_000 {
+        return Err(EINVAL);
+    }
+    Ok((f(0).saturating_mul(1_000_000_000).saturating_add(f(8)), f(16).saturating_mul(1_000_000_000).saturating_add(f(24))))
+}
+
+/// The current setting as an itimerspec: (interval, time left).
+fn write_itimerspec(ptr: u64, t: &TimerFd, now: u64) -> Result<(), i64> {
+    let b = unsafe { user_slice_mut(ptr, 32) }.ok_or(EFAULT)?;
+    let tick = crate::process::TICK_NS;
+    let interval = t.interval * tick;
+    let left = t.next.map_or(0, |n| n.saturating_sub(now).max(1) * tick);
+    for (o, ns) in [(0, interval), (16, left)] {
+        b[o..o + 8].copy_from_slice(&(ns / 1_000_000_000).to_le_bytes());
+        b[o + 8..o + 16].copy_from_slice(&(ns % 1_000_000_000).to_le_bytes());
+    }
+    Ok(())
+}
+
+/// timerfd_settime(fd, flags: TFD_TIMER_ABSTIME, new, old)
+pub fn sys_timerfd_settime(fd: u64, flags: u64, new: u64, old: u64) -> i64 {
+    if flags & !(TFD_TIMER_ABSTIME | 2 /* TFD_TIMER_CANCEL_ON_SET */) != 0 {
+        return -EINVAL;
+    }
+    let t = match timerfd_of(fd) {
+        Ok(t) => t,
+        Err(e) => return -e,
+    };
+    let (interval, value) = match read_itimerspec(new) {
+        Ok(v) => v,
+        Err(e) => return -e,
+    };
+    let now = crate::process::ticks();
+    let mut t = t.lock();
+    t.update(now);
+    if old != 0 {
+        if let Err(e) = write_itimerspec(old, &t, now) {
+            return -e;
+        }
+    }
+    t.expired = 0;
+    t.interval = ns_to_ticks(interval);
+    t.next = if value == 0 {
+        None // disarm
+    } else if flags & TFD_TIMER_ABSTIME != 0 {
+        // An absolute time on the timer's clock.
+        let now_ns = if t.realtime { crate::rtc::now_ns() } else { now * crate::process::TICK_NS };
+        Some(now + ns_to_ticks(value.saturating_sub(now_ns)))
+    } else {
+        Some(now + ns_to_ticks(value).max(1))
+    };
+    0
+}
+
+/// timerfd_gettime(fd, cur)
+pub fn sys_timerfd_gettime(fd: u64, cur: u64) -> i64 {
+    let t = match timerfd_of(fd) {
+        Ok(t) => t,
+        Err(e) => return -e,
+    };
+    let now = crate::process::ticks();
+    let mut t = t.lock();
+    t.update(now);
+    match write_itimerspec(cur, &t, now) {
+        Ok(()) => 0,
+        Err(e) => -e,
+    }
+}
+
+/// read: the number of expirations since the last read (waits for one).
+fn timerfd_read(t: &Arc<Mutex<TimerFd>>, nonblocking: bool, buf: &mut [u8]) -> i64 {
+    if buf.len() < 8 {
+        return -EINVAL;
+    }
+    loop {
+        let next = {
+            let mut tf = t.lock();
+            tf.update(crate::process::ticks());
+            if tf.expired > 0 {
+                buf[..8].copy_from_slice(&tf.expired.to_le_bytes());
+                tf.expired = 0;
+                return 8;
+            }
+            tf.next
+        };
+        if nonblocking {
+            return -EAGAIN;
+        }
+        if crate::process::signal_pending() {
+            return -EINTR;
+        }
+        match next {
+            Some(d) => crate::process::block_on_until(crate::process::POLL_KEY, d),
+            None => crate::process::block_on(crate::process::POLL_KEY), // disarmed: until settime
         }
     }
 }

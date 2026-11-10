@@ -119,6 +119,9 @@ pub const SYS_IOPRIO_SET: u64 = 251;
 pub const SYS_IOPRIO_GET: u64 = 252;
 pub const SYS_SYNC_FILE_RANGE: u64 = 277;
 pub const SYS_SYNCFS: u64 = 306;
+pub const SYS_TIMERFD_CREATE: u64 = 283;
+pub const SYS_TIMERFD_SETTIME: u64 = 286;
+pub const SYS_TIMERFD_GETTIME: u64 = 287;
 pub const SYS_SOCKET: u64 = 41;
 pub const SYS_CONNECT: u64 = 42;
 pub const SYS_ACCEPT: u64 = 43;
@@ -657,6 +660,9 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         // I/O priorities, read-ahead and partial syncs: accepted, no effect.
         SYS_IOPRIO_SET | SYS_IOPRIO_GET | SYS_READAHEAD | SYS_SYNC_FILE_RANGE => 0,
         SYS_SYNCFS => vfs::sys_sync(),
+        SYS_TIMERFD_CREATE => vfs::sys_timerfd_create(a1, a2),
+        SYS_TIMERFD_SETTIME => vfs::sys_timerfd_settime(a1, a2, a3, a4),
+        SYS_TIMERFD_GETTIME => vfs::sys_timerfd_gettime(a1, a2),
         SYS_CAPGET => sys_capget(a1, a2),
         SYS_SIGALTSTACK => sys_sigaltstack(a1, a2),
         SYS_SYSINFO => sys_sysinfo(a1),
@@ -1021,7 +1027,7 @@ fn poll_until(fds: u64, nfds: u64, no_wait: bool, deadline: Option<u64>) -> i64 
 /// a packet...), a signal arrives, or the deadline passes. The caller then
 /// checks its fds again.
 fn sleep_until_something_happens(deadline: Option<u64>) {
-    match deadline {
+    match vfs::timer_capped(deadline) {
         Some(d) => process::block_on_until(process::POLL_KEY, d),
         None => process::block_on(process::POLL_KEY),
     }

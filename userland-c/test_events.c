@@ -1,5 +1,5 @@
 /* Copyright (c) 2026 tre4surehunter9
- * test_events [DIR]: checks eventfd, epoll, sysinfo, prctl, and (with a
+ * test_events [DIR]: checks eventfd, epoll, timerfd, sysinfo, prctl, and (with a
  * directory on a disk) running a program bigger than the kernel's heap.
  * Exits 0, or the line number of the first failed check. */
 #define _GNU_SOURCE
@@ -22,6 +22,7 @@
 #include <sys/personality.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/timerfd.h>
 #include <sys/sysinfo.h>
 #include <sys/times.h>
 #include <sys/wait.h>
@@ -361,10 +362,66 @@ static int big_program(const char *dir)
     return 0;
 }
 
+static int timerfds(void)
+{
+    uint64_t n;
+    struct itimerspec its = {0}, cur;
+    struct timespec t0;
+
+    /* One-shot, 200 ms: not yet readable; then poll() with no timeout
+     * must wake up when it expires. */
+    int t = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    CHECK(t >= 0);
+    its.it_value.tv_nsec = 200 * 1000000;
+    CHECK(timerfd_settime(t, 0, &its, NULL) == 0);
+    CHECK(read(t, &n, 8) == -1 && errno == EAGAIN);
+    CHECK(timerfd_gettime(t, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec > 0);
+    struct pollfd pfd = { .fd = t, .events = POLLIN };
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK(poll(&pfd, 1, -1) == 1 && (pfd.revents & POLLIN));
+    long ms = ms_since(&t0);
+    CHECK(ms >= 100 && ms < 2000);
+    CHECK(read(t, &n, 8) == 8 && n == 1);
+    CHECK(read(t, &n, 8) == -1 && errno == EAGAIN);
+    CHECK(timerfd_gettime(t, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec == 0);
+
+    /* Repeating every 100 ms: expirations add up. */
+    its.it_value.tv_nsec = 100 * 1000000;
+    its.it_interval.tv_nsec = 100 * 1000000;
+    CHECK(timerfd_settime(t, 0, &its, NULL) == 0);
+    usleep(550 * 1000);
+    CHECK(read(t, &n, 8) == 8 && n >= 3 && n <= 8);
+
+    /* epoll_wait with no timeout on a timer (absolute: now + 150 ms). */
+    int ep = epoll_create1(0);
+    struct epoll_event ev = { .events = EPOLLIN, .data.u32 = 5 }, out;
+    int t2 = timerfd_create(CLOCK_MONOTONIC, 0);
+    CHECK(epoll_ctl(ep, EPOLL_CTL_ADD, t2, &ev) == 0);
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    struct itimerspec abs = {0};
+    abs.it_value.tv_sec = now.tv_sec + (now.tv_nsec + 150000000) / 1000000000;
+    abs.it_value.tv_nsec = (now.tv_nsec + 150000000) % 1000000000;
+    CHECK(timerfd_settime(t2, TFD_TIMER_ABSTIME, &abs, NULL) == 0);
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK(epoll_wait(ep, &out, 1, -1) == 1 && out.data.u32 == 5);
+    CHECK(ms_since(&t0) < 2000);
+    CHECK(read(t2, &n, 8) == 8 && n == 1); /* (blocking fd: data is there) */
+
+    /* Disarmed: nothing more. */
+    struct itimerspec off = {0};
+    CHECK(timerfd_settime(t, 0, &off, NULL) == 0);
+    CHECK(read(t, &n, 8) == -1 && errno == EAGAIN);
+    close(t);
+    close(t2);
+    close(ep);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int r;
-    if ((r = eventfds()) || (r = epolls()) || (r = misc()))
+    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()))
         return r;
     /* The big program needs a directory on a disk (argv[1]). */
     if (argc > 1 && (r = big_program(argv[1])))
