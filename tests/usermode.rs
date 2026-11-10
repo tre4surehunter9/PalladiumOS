@@ -45,6 +45,7 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     }
     palladiumos::mounts::mount("/proc", alloc::boxed::Box::new(palladiumos::procfs::ProcFs));
     palladiumos::mounts::mount("/dev", alloc::boxed::Box::new(palladiumos::devfs::DevFs));
+    palladiumos::block::mount_shm();
 
     test_main();
     palladiumos::hlt_loop();
@@ -1904,6 +1905,18 @@ fn epoll_eventfd_and_big_programs() {
     assert!(file("/tmp/ev.out").contains("all checks passed"));
     assert!(only_kernel_left(), "{:?}", process::list());
     assert_eq!(frames_in_use(), before, "the big program's memory was freed");
+}
+
+#[test_case]
+fn shared_memory_works() {
+    let Some(_) = c_program("test_shm") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let before = frames_in_use();
+    let status = sh("test_shm > /tmp/shm.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/shm.out"));
+    assert!(file("/tmp/shm.out").contains("all checks passed"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+    assert_eq!(frames_in_use(), before, "shared memory was freed");
 }
 
 #[test_case]

@@ -569,7 +569,8 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_MUNMAP => crate::mmap::sys_munmap(a1, a2),
         SYS_MPROTECT => crate::mmap::sys_mprotect(a1, a2, a3),
         SYS_MREMAP => crate::mmap::sys_mremap(a1, a2),
-        SYS_MADVISE | SYS_MSYNC => 0,
+        SYS_MADVISE => 0,
+        SYS_MSYNC => crate::mmap::sys_msync(a1, a2),
         // files
         SYS_PREAD64 => match unsafe { user_slice_mut(a2, a3) } {
             Some(buf) => vfs::sys_pread(a1, buf, a4),

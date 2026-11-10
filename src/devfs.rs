@@ -16,6 +16,9 @@ use crate::syscall::{EACCES, ENOENT, ENOTDIR, EPERM};
 const ROOT: Ino = 1;
 /// /dev/pts, and /dev/pts/N at PTS_BASE + N.
 const PTS_DIR: Ino = 50;
+/// /dev/shm: an empty directory, where the kernel (and `alpine`) mount an
+/// in-memory filesystem for shared memory (shm_open, named semaphores).
+const SHM_DIR: Ino = 51;
 const PTS_BASE: Ino = 100;
 const DEVICES: &[(&str, Device)] = &[
     ("console", Device::Console),
@@ -45,6 +48,7 @@ impl FileSystem for DevFs {
     fn lookup(&mut self, dir: Ino, name: &str) -> FsResult<Ino> {
         match dir {
             ROOT if name == "pts" => Ok(PTS_DIR),
+            ROOT if name == "shm" => Ok(SHM_DIR),
             ROOT => DEVICES.iter().position(|(n, _)| *n == name).map(|i| i as Ino + 2).ok_or(ENOENT),
             PTS_DIR => {
                 let n: u32 = name.parse().map_err(|_| ENOENT)?;
@@ -57,6 +61,8 @@ impl FileSystem for DevFs {
     fn meta(&mut self, ino: Ino) -> FsResult<Meta> {
         let (kind, perm, uid, gid) = if ino == ROOT || ino == PTS_DIR {
             (FileType::Dir, 0o755, 0, 0)
+        } else if ino == SHM_DIR {
+            (FileType::Dir, 0o1777, 0, 0)
         } else if let Some(n) = pts_number(ino) {
             let (uid, gid, mode) = crate::pty::owner(n).ok_or(ENOENT)?;
             (FileType::CharDevice(Device::Pts(n)), mode, uid, gid)
@@ -90,8 +96,10 @@ impl FileSystem for DevFs {
                     .map(|(i, (n, d))| (n.to_string(), i as Ino + 2, FileType::CharDevice(*d)))
                     .collect();
                 v.push(("pts".to_string(), PTS_DIR, FileType::Dir));
+                v.push(("shm".to_string(), SHM_DIR, FileType::Dir));
                 Ok(v)
             }
+            SHM_DIR => Ok(Vec::new()),
             PTS_DIR => Ok(crate::pty::list()
                 .into_iter()
                 .map(|n| (format!("{}", n), PTS_BASE + n as Ino, FileType::CharDevice(Device::Pts(n))))

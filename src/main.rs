@@ -231,6 +231,8 @@ fn mount_filesystems() {
     boot_ok!("Mounted /bin and /tmp (in memory)");
     mounts::mount("/dev", Box::new(DevFs));
     boot_ok!("Mounted /dev (console, tty, null, zero, random, urandom)");
+    palladiumos::block::mount_shm();
+    boot_ok!("Mounted /dev/shm (shared memory, in memory)");
     mounts::mount("/proc", Box::new(palladiumos::procfs::ProcFs));
     boot_ok!("Mounted /proc (processes and system information)");
     if block::mount_system_disk() {

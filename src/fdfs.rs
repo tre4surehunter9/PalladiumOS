@@ -47,6 +47,9 @@ pub struct Fdfs {
     symlinks: alloc::collections::BTreeSet<usize>,
     /// (uid, gid) of nodes not owned by root.
     owners: alloc::collections::BTreeMap<usize, (u32, u32)>,
+    /// Hard links: extra names (directory, name) for file nodes. A node's
+    /// own name is its first; these are the others.
+    links: Vec<(usize, String, usize)>,
 }
 
 impl Fdfs {
@@ -62,6 +65,7 @@ impl Fdfs {
             mtimes: Default::default(),
             symlinks: Default::default(),
             owners: Default::default(),
+            links: Vec::new(),
         }
     }
 
@@ -98,7 +102,7 @@ impl Fdfs {
                 }
             }
         }
-        None
+        self.links.iter().find(|(d, n, _)| *d == dir_idx && n == name).map(|&(_, _, node)| node)
     }
 
     /// List the contents of a directory. Returns (name, is_dir) pairs.
@@ -304,6 +308,7 @@ impl Fdfs {
             Node::Dir { children, .. } => Ok(children
                 .iter()
                 .map(|&c| (self.nodes[c].name().to_string(), c, self.nodes[c].is_dir()))
+                .chain(self.links.iter().filter(|(d, _, _)| *d == idx).map(|(_, n, node)| (n.clone(), *node, false)))
                 .collect()),
             Node::File { .. } => Err("Not a directory"),
         }
@@ -368,7 +373,27 @@ impl Fdfs {
     /// Remove `name` from directory `dir` (the node stays as a tombstone,
     /// so files that are still open keep working).
     pub fn remove_in(&mut self, dir: usize, name: &str) -> Result<(), i64> {
+        // An extra name (hard link): just that name goes.
+        if let Some(i) = self.links.iter().position(|(d, n, _)| *d == dir && n == name) {
+            self.links.remove(i);
+            return Ok(());
+        }
         let target = self.find_child(dir, name).ok_or(ENOENT)?;
+        // A file's first name, with other names left: the next one takes
+        // its place (the file lives on under it).
+        if let Some(i) = self.links.iter().position(|&(_, _, node)| node == target) {
+            let (new_dir, new_name, _) = self.links.remove(i);
+            if let Node::Dir { children, .. } = &mut self.nodes[dir] {
+                children.retain(|&c| c != target);
+            }
+            if let Node::File { name, .. } = &mut self.nodes[target] {
+                *name = new_name;
+            }
+            if let Node::Dir { children, .. } = &mut self.nodes[new_dir] {
+                children.push(target);
+            }
+            return Ok(());
+        }
         if let Node::Dir { children, .. } = &self.nodes[target] {
             if !children.is_empty() {
                 return Err(ENOTEMPTY);
@@ -402,7 +427,10 @@ impl FileSystem for Fdfs {
         let i = ino as usize;
         let (kind, size, perm, nlink) = match self.nodes.get(i).ok_or(ENOENT)? {
             Node::File { data, .. } if self.symlinks.contains(&i) => (FileType::Symlink, data.len() as u64, 0o777, 1),
-            Node::File { data, .. } => (FileType::File, data.len() as u64, 0o644, 1),
+            Node::File { data, .. } => {
+                let names = 1 + self.links.iter().filter(|&&(_, _, node)| node == i).count() as u32;
+                (FileType::File, data.len() as u64, 0o644, names)
+            }
             Node::Dir { .. } => (FileType::Dir, 0, 0o755, 2),
         };
         let perm = self.perms.get(&i).copied().unwrap_or(perm);
@@ -494,9 +522,14 @@ impl FileSystem for Fdfs {
         let src = self.find_child(old_dir, old_name).ok_or(ENOENT)?;
         if let Some(existing) = self.find_child(new_dir, new_name) {
             if existing == src {
-                return Ok(());
+                return Ok(()); // two names of one file: nothing to do (as on Linux)
             }
             self.remove_in(new_dir, new_name)?; // ENOTEMPTY for a non-empty directory
+        }
+        // An extra name (hard link) moves on its own.
+        if let Some(l) = self.links.iter_mut().find(|(d, n, _)| *d == old_dir && n == old_name) {
+            *l = (new_dir, new_name.to_string(), src);
+            return Ok(());
         }
         if let Node::Dir { children, .. } = &mut self.nodes[old_dir] {
             children.retain(|&c| c != src);
@@ -525,5 +558,24 @@ impl FileSystem for Fdfs {
 
     fn remove(&mut self, dir: Ino, name: &str, _is_dir: bool) -> FsResult<()> {
         self.remove_in(dir as usize, name)
+    }
+
+    /// A hard link: another name for a file (not a directory).
+    fn link(&mut self, dir: Ino, name: &str, target: Ino) -> FsResult<()> {
+        let (dir, target) = (dir as usize, target as usize);
+        match self.nodes.get(target) {
+            Some(Node::File { .. }) => {}
+            Some(Node::Dir { .. }) => return Err(crate::syscall::EPERM),
+            None => return Err(ENOENT),
+        }
+        if !self.nodes.get(dir).is_some_and(Node::is_dir) {
+            return Err(ENOTDIR);
+        }
+        if self.find_child(dir, name).is_some() {
+            return Err(EEXIST);
+        }
+        self.links.push((dir, name.to_string(), target));
+        self.mtimes.insert(target, crate::rtc::now());
+        Ok(())
     }
 }

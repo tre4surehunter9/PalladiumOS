@@ -86,7 +86,7 @@ pub struct Mm {
     pub brk: u64,
     /// mmap'd ranges, sorted: (start, end, protection). Anonymous memory
     /// gets its pages when first touched (see mmap::fault_in).
-    pub maps: Vec<(u64, u64, u64)>,
+    pub maps: Vec<crate::mmap::Map>,
 }
 
 impl Mm {
@@ -2751,6 +2751,24 @@ pub fn sys_set_tid_address(addr: u64) -> i64 {
 /// bit 62 clear (kernel heap addresses, which other wait keys are, have
 /// both set), the address space folded into bits 47-61. (Two address
 /// spaces folding to the same bits only cause harmless extra wake-ups.)
+/// The key for a futex operation `op` on `addr`. Without FUTEX_PRIVATE_FLAG,
+/// on shared memory (mmap MAP_SHARED: a semaphore or lock between
+/// processes), it's the physical address, the same for every process
+/// mapping it; otherwise the address in this address space.
+fn futex_key_op(op: u64, p4: PhysFrame, addr: u64) -> u64 {
+    const FUTEX_PRIVATE_FLAG: u64 = 128;
+    if op & FUTEX_PRIVATE_FLAG == 0 {
+        // (The page may not be there yet in this process: fill it in.)
+        let _ = crate::memory::is_user_range(addr, 4, false);
+        if let Some((phys, flags)) = crate::memory::translate_user(p4, addr) {
+            if flags.contains(crate::memory::SHARED) {
+                return (1 << 62) | phys;
+            }
+        }
+    }
+    futex_key(p4, addr)
+}
+
 fn futex_key(p4: PhysFrame, addr: u64) -> u64 {
     (1 << 63) | (((p4.start_address().as_u64() >> 12) % 0x7FFF) << 47) | (addr & ((1 << 47) - 1))
 }
@@ -2798,7 +2816,7 @@ pub fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3:
         return -EINVAL;
     }
     let p4 = current_p4();
-    let key = futex_key(p4, uaddr);
+    let key = futex_key_op(op, p4, uaddr);
     match op & 0x7f {
         WAIT | WAIT_BITSET => {
             match read_u32(uaddr) {
@@ -2856,7 +2874,7 @@ pub fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3:
             }
             let mut table = TABLE.lock();
             let woken = futex_wake_locked(&mut table, key, val as u32);
-            let (to, mut moved) = (futex_key(p4, uaddr2), 0u64);
+            let (to, mut moved) = (futex_key_op(op, p4, uaddr2), 0u64);
             for p in table.values_mut() {
                 if moved >= timeout {
                     break; // (the 4th argument is val2 here: how many to move)

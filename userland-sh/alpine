@@ -51,6 +51,7 @@ HOST=$(uname -n)
 grep -qw "$HOST" "$ROOT/etc/hosts" 2>/dev/null || echo "127.0.0.1 $HOST" >> "$ROOT/etc/hosts"
 grep -q " $ROOT/proc " /proc/mounts || mount -t proc proc "$ROOT/proc"
 grep -q " $ROOT/dev " /proc/mounts || mount -t devtmpfs dev "$ROOT/dev"
+grep -q " $ROOT/dev/shm " /proc/mounts || { mount -t tmpfs shm "$ROOT/dev/shm" && chmod 1777 "$ROOT/dev/shm"; }
 
 # Alpine's programs, with Alpine's usual PATH. PalladiumOS's console is
 # TERM=ansi (before 0.5.6 it called itself "vga", which Alpine doesn't

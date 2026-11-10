@@ -1576,6 +1576,15 @@ fn chmod_loc(loc: Loc, meta: &mounts::Meta, mode: u64) -> i64 {
 }
 
 /// The file an fd refers to (for fchmod, futimens, fstatfs).
+/// The regular file an fd refers to, and whether it's open for writing
+/// (for shared file mappings).
+pub fn fd_file(fd: u64) -> Result<(Loc, bool), i64> {
+    match &get(fd)?.lock().kind {
+        Kind::File { loc, writable, .. } => Ok((*loc, *writable)),
+        _ => Err(ENODEV),
+    }
+}
+
 fn fd_loc(fd: u64) -> Result<Option<Loc>, i64> {
     let h = get(fd)?;
     let desc = h.lock();

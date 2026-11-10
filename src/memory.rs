@@ -366,6 +366,16 @@ pub fn for_each_mapped(p4: PhysFrame, start: u64, end: u64, mut f: impl FnMut(u6
     }
 }
 
+/// The physical address of user address `addr` in `p4`'s address space,
+/// and the page's flags, if it's mapped.
+pub fn translate_user(p4: PhysFrame, addr: u64) -> Option<(u64, PageTableFlags)> {
+    use x86_64::structures::paging::mapper::{Translate, TranslateResult};
+    match mapper_for(p4).translate(VirtAddr::new(addr)) {
+        TranslateResult::Mapped { frame, offset, flags } => Some((frame.start_address().as_u64() + offset, flags)),
+        _ => None,
+    }
+}
+
 pub fn is_user_range(ptr: u64, len: u64, write: bool) -> bool {
     if len == 0 {
         return true;
@@ -559,6 +569,9 @@ fn for_each_user_page(p4: PhysFrame, mut f: impl FnMut(u64, PhysFrame, PageTable
 /// Page-table bit 9 (free for the OS): this page was writable, and is
 /// shared copy-on-write. It's mapped read-only; the first write copies it.
 pub const COW: PageTableFlags = PageTableFlags::BIT_9;
+/// A page of shared memory (MAP_SHARED, see mmap.rs): fork leaves it
+/// writable in both processes, pointing at the same frame.
+pub const SHARED: PageTableFlags = PageTableFlags::BIT_10;
 
 /// The address space for a fork: the same pages, shared. Writable pages
 /// become read-only + COW in both (the first write to one makes a private
@@ -589,7 +602,7 @@ pub fn copy_address_space(src: PhysFrame, frames: &mut BootInfoFrameAllocator) -
                 }
             } else {
                 let mut flags = entry.flags();
-                if flags.contains(PageTableFlags::WRITABLE) {
+                if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(SHARED) {
                     flags = (flags - PageTableFlags::WRITABLE) | COW;
                     entry.set_flags(flags); // the parent's copy is read-only now too
                 }

@@ -112,7 +112,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 6 | lstat | yes |
 | 7 / 271 | poll, ppoll | yes (pipes, sockets, terminals; files are always ready) |
 | 8 | lseek | yes |
-| 9 / 10 / 11 | mmap, mprotect, munmap | anonymous (memory comes when a page is first used, so reserving gigabytes is free) and private file mappings (no writable shared file mappings) |
+| 9 / 10 / 11 | mmap, mprotect, munmap | anonymous (memory comes when a page is first used, so reserving gigabytes is free), private file mappings, and shared mappings (`MAP_SHARED`: anonymous memory shared with forked children, and files such as `/dev/shm`, written back on `msync` and when unmapped) |
 | 12 | brk | yes (the heap behind `userlib`'s allocator) |
 | 13 | rt_sigaction | yes (handlers, `SA_RESTART`, `SA_NODEFER`, `SA_RESETHAND`, `SA_NOCLDSTOP`, `sa_mask`) |
 | 14 | rt_sigprocmask | yes |

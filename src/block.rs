@@ -422,3 +422,10 @@ pub fn mount_system_disk() -> bool {
     crate::mounts::mount("/usr", Box::new(fs));
     true
 }
+
+/// Mount an in-memory filesystem at /dev/shm, open to everyone (sticky,
+/// like /tmp): where shm_open and named semaphores keep their files.
+pub fn mount_shm() {
+    crate::mounts::mount("/dev/shm", Box::new(crate::fdfs::Fdfs::new()));
+    let _ = crate::filesystem::chmod("/dev/shm", 0o1777);
+}
