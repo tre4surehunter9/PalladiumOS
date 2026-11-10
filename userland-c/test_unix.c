@@ -34,6 +34,118 @@ static socklen_t abstract_addr(struct sockaddr_un *a, const char *name)
     return offsetof(struct sockaddr_un, sun_path) + 1 + strlen(name);
 }
 
+/* Send fds over a socket (SCM_RIGHTS) with one byte of data. */
+static int send_fds(int sock, const int *fds, int n)
+{
+    char byte = 'F';
+    struct iovec iov = { &byte, 1 };
+    union { char buf[CMSG_SPACE(8 * sizeof(int))]; struct cmsghdr align; } u;
+    struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = u.buf, .msg_controllen = CMSG_SPACE(n * sizeof(int)) };
+    struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(n * sizeof(int));
+    memcpy(CMSG_DATA(c), fds, n * sizeof(int));
+    return sendmsg(sock, &m, 0) == 1 ? 0 : -1;
+}
+
+/* Receive one byte and the fds sent with it (room for `room` fds);
+ * how many arrived, -1 on error; *flags gets msg_flags. */
+static int recv_fds(int sock, int *fds, int room, int *flags)
+{
+    char byte;
+    struct iovec iov = { &byte, 1 };
+    union { char buf[CMSG_SPACE(8 * sizeof(int))]; struct cmsghdr align; } u;
+    struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = u.buf, .msg_controllen = room ? CMSG_SPACE(room * sizeof(int)) : 0 };
+    if (recvmsg(sock, &m, 0) != 1 || byte != 'F')
+        return -1;
+    *flags = m.msg_flags;
+    struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+    if (!c)
+        return 0;
+    if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS)
+        return -1;
+    int n = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+    memcpy(fds, CMSG_DATA(c), n * sizeof(int));
+    return n;
+}
+
+static int passing_fds(void)
+{
+    char buf[64];
+    int sv[2], fds[4], flags, st;
+
+    /* A file passed over a stream pair: the new fd shares the open file
+     * (and its offset), and works after the sender closes its own. */
+    int f = open("/tmp/passed.txt", O_CREAT | O_TRUNC | O_RDWR, 0644);
+    CHECK(f >= 0 && write(f, "passed along", 12) == 12 && lseek(f, 0, SEEK_SET) == 0);
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    CHECK(send_fds(sv[0], &f, 1) == 0);
+    close(f);
+    CHECK(recv_fds(sv[1], fds, 4, &flags) == 1 && flags == 0); /* (it may reuse f's number) */
+    CHECK(read(fds[0], buf, sizeof buf) == 12 && memcmp(buf, "passed along", 12) == 0);
+    close(fds[0]);
+
+    /* Two at once (a pipe's ends): what's written to one comes out of the other. */
+    int p[2];
+    CHECK(pipe(p) == 0 && send_fds(sv[0], p, 2) == 0);
+    close(p[0]);
+    close(p[1]);
+    CHECK(recv_fds(sv[1], fds, 4, &flags) == 2);
+    CHECK(write(fds[1], "through", 7) == 7 && read(fds[0], buf, sizeof buf) == 7 && memcmp(buf, "through", 7) == 0);
+    close(fds[0]);
+    close(fds[1]);
+
+    /* Plain data, then fds right after: a big plain read stops before the
+     * fds' byte, and the fds come with it (not with the earlier data). */
+    f = open("/tmp/passed.txt", O_RDONLY);
+    CHECK(write(sv[0], "hello", 5) == 5 && send_fds(sv[0], &f, 1) == 0);
+    close(f);
+    CHECK(read(sv[1], buf, sizeof buf) == 5 && memcmp(buf, "hello", 5) == 0);
+    CHECK(recv_fds(sv[1], fds, 4, &flags) == 1);
+    close(fds[0]);
+
+    /* No room for them: MSG_CTRUNC, and they're closed. */
+    f = open("/tmp/passed.txt", O_RDONLY);
+    CHECK(send_fds(sv[0], &f, 1) == 0);
+    close(f);
+    CHECK(recv_fds(sv[1], fds, 0, &flags) == 0 && (flags & MSG_CTRUNC));
+    close(sv[0]);
+    close(sv[1]);
+
+    /* To another process: the child gets a pipe's write end and writes. */
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && pipe(p) == 0);
+    pid_t child = fork();
+    if (child == 0) {
+        close(sv[0]);
+        close(p[0]);
+        close(p[1]);
+        int got[4], fl;
+        if (recv_fds(sv[1], got, 4, &fl) != 1)
+            _exit(1);
+        _exit(write(got[0], "from the child", 14) == 14 ? 0 : 2);
+    }
+    close(sv[1]);
+    CHECK(send_fds(sv[0], &p[1], 1) == 0);
+    close(p[1]);
+    CHECK(waitpid(child, &st, 0) == child && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    CHECK(read(p[0], buf, sizeof buf) == 14 && memcmp(buf, "from the child", 14) == 0);
+    close(p[0]);
+    close(sv[0]);
+
+    /* Datagrams carry them too. */
+    CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0);
+    f = open("/tmp/passed.txt", O_RDONLY);
+    CHECK(send_fds(sv[0], &f, 1) == 0);
+    close(f);
+    CHECK(recv_fds(sv[1], fds, 4, &flags) == 1 && read(fds[0], buf, 6) == 6 && memcmp(buf, "passed", 6) == 0);
+    close(fds[0]);
+    close(sv[0]);
+    close(sv[1]);
+    unlink("/tmp/passed.txt");
+    return 0;
+}
+
 int main(void)
 {
     char buf[256];
@@ -183,6 +295,10 @@ int main(void)
         close(srv);
         unlink("/tmp/priv.sock");
     }
+
+    int r = passing_fds();
+    if (r)
+        return r;
 
     printf("test_unix: all checks passed\n");
     return 0;

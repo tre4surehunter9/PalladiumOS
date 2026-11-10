@@ -144,7 +144,7 @@ impl Drop for Description {
 /// An open file: its description, plus a label that never changes (what
 /// /proc/PID/fd shows). The label is outside the lock so /proc can read it
 /// even while a syscall on this very file holds the lock.
-struct OpenFile {
+pub struct OpenFile {
     label: String,
     desc: Mutex<Description>,
 }
@@ -155,7 +155,9 @@ impl OpenFile {
     }
 }
 
-type Handle = Arc<OpenFile>;
+/// An open file description (shared by dup'd fds, and by fds passed to
+/// another process with SCM_RIGHTS).
+pub type Handle = Arc<OpenFile>;
 
 fn handle(kind: Kind) -> Handle {
     let label = match &kind {
@@ -2369,10 +2371,56 @@ fn read_msghdr(msg: u64) -> Result<(u64, u64, Vec<(u64, u64)>), i64> {
     Ok((name, namelen, iovs))
 }
 
-/// sendmsg(fd, msg, flags): the buffers, sent as one message (no control data).
+const SOL_SOCKET: i32 = 1;
+const SCM_RIGHTS: i32 = 1;
+const MSG_CTRUNC: u32 = 0x8;
+const MSG_CMSG_CLOEXEC: u64 = 0x4000_0000;
+/// The most fds one message passes (Linux: SCM_MAX_FD).
+const SCM_MAX_FD: usize = 253;
+
+/// The fds in a msghdr's SCM_RIGHTS control messages (others are ignored).
+fn read_passed_fds(msg: u64) -> Result<Vec<Handle>, i64> {
+    let m = unsafe { crate::syscall::user_slice(msg, 56) }.ok_or(EFAULT)?;
+    let word = |o: usize| u64::from_le_bytes(m[o..o + 8].try_into().unwrap());
+    let (control, len) = (word(32), word(40));
+    let mut fds = Vec::new();
+    if control == 0 || len == 0 {
+        return Ok(fds);
+    }
+    let c = unsafe { crate::syscall::user_slice(control, len.min(64 * 1024)) }.ok_or(EFAULT)?;
+    let mut off = 0usize;
+    // cmsghdr: cmsg_len (8 bytes, header included), level, type, data;
+    // each one 8-byte aligned.
+    while off + 16 <= c.len() {
+        let clen = u64::from_le_bytes(c[off..off + 8].try_into().unwrap()) as usize;
+        let level = i32::from_le_bytes(c[off + 8..off + 12].try_into().unwrap());
+        let kind = i32::from_le_bytes(c[off + 12..off + 16].try_into().unwrap());
+        if clen < 16 || off + clen > c.len() {
+            return Err(EINVAL);
+        }
+        if level == SOL_SOCKET && kind == SCM_RIGHTS {
+            for f in c[off + 16..off + clen].chunks_exact(4) {
+                let fd = i32::from_le_bytes(f.try_into().unwrap());
+                if fd < 0 {
+                    return Err(EBADF);
+                }
+                fds.push(get(fd as u64)?);
+            }
+        }
+        off += clen.next_multiple_of(8);
+    }
+    if fds.len() > SCM_MAX_FD {
+        return Err(EINVAL);
+    }
+    Ok(fds)
+}
+
+/// sendmsg(fd, msg, flags): the buffers, sent as one message, and on Unix
+/// sockets the fds of SCM_RIGHTS control messages.
 pub fn sys_sendmsg(fd: u64, msg: u64, flags: u64) -> i64 {
     result((|| {
         let (name, namelen, iovs) = read_msghdr(msg)?;
+        let passed = read_passed_fds(msg)?;
         let mut data = Vec::new();
         for (base, len) in iovs {
             data.extend_from_slice(unsafe { crate::syscall::user_slice(base, len) }.ok_or(EFAULT)?);
@@ -2389,7 +2437,7 @@ pub fn sys_sendmsg(fd: u64, msg: u64, flags: u64) -> i64 {
             }
             AnySock::Unix(s) => {
                 let to = if name != 0 && !s.is_stream() { Some(read_sockaddr_un(name, namelen)?) } else { None };
-                s.send(&data, flags, to).map(|n| n as i64)
+                s.send_msg(&data, flags, to, passed).map(|n| n as i64)
             }
             AnySock::Netlink(s) => s.send(&data).map(|n| n as i64),
         }
@@ -2397,7 +2445,8 @@ pub fn sys_sendmsg(fd: u64, msg: u64, flags: u64) -> i64 {
 }
 
 /// recvmsg(fd, msg, flags): one message, spread over the buffers; the
-/// sender's address in msg_name (no control data).
+/// sender's address in msg_name; fds passed with it (Unix sockets) become
+/// fds here, reported in an SCM_RIGHTS control message.
 pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
     result((|| {
         let s = any_socket(fd)?;
@@ -2409,10 +2458,10 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
             Unix(Option<unix::Name>),
             Netlink,
         }
-        let (n, from) = match &s {
-            AnySock::Inet(i) => i.recv(&mut buf, flags).map(|(n, f)| (n, From::Inet(f)))?,
-            AnySock::Unix(u) => u.recv(&mut buf, flags).map(|(n, f)| (n, From::Unix(f)))?,
-            AnySock::Netlink(l) => (l.recv(&mut buf, flags)?, From::Netlink),
+        let (n, from, passed) = match &s {
+            AnySock::Inet(i) => i.recv(&mut buf, flags).map(|(n, f)| (n, From::Inet(f), Vec::new()))?,
+            AnySock::Unix(u) => u.recv_msg(&mut buf, flags).map(|(n, f, fds)| (n, From::Unix(f), fds))?,
+            AnySock::Netlink(l) => (l.recv(&mut buf, flags)?, From::Netlink, Vec::new()),
         };
         let mut done = 0usize;
         for (base, len) in iovs {
@@ -2423,9 +2472,46 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
             unsafe { crate::syscall::user_slice_mut(base, k as u64) }.ok_or(EFAULT)?.copy_from_slice(&buf[done..done + k]);
             done += k;
         }
+        // Passed fds: as many as fit in msg_control become fds here (the
+        // rest are closed, and MSG_CTRUNC says so).
+        let (control, room) = {
+            let m = unsafe { crate::syscall::user_slice(msg, 56) }.ok_or(EFAULT)?;
+            (u64::from_le_bytes(m[32..40].try_into().unwrap()), u64::from_le_bytes(m[40..48].try_into().unwrap()))
+        };
+        let mut msg_flags = 0u32;
+        let mut control_len = 0u64;
+        if !passed.is_empty() {
+            let fit = if control == 0 || room < 16 { 0 } else { ((room - 16) / 4) as usize };
+            let take = passed.len().min(fit);
+            if take < passed.len() {
+                msg_flags |= MSG_CTRUNC;
+            }
+            let cloexec = flags & MSG_CMSG_CLOEXEC != 0;
+            let mut new_fds = Vec::new();
+            for h in passed.into_iter().take(take) {
+                match with_process(|p| alloc_fd(p, h, cloexec)) {
+                    Ok(fd) => new_fds.push(fd as i32),
+                    Err(_) => {
+                        msg_flags |= MSG_CTRUNC; // out of fds: the rest are closed
+                        break;
+                    }
+                }
+            }
+            if !new_fds.is_empty() {
+                let clen = 16 + 4 * new_fds.len();
+                let c = unsafe { crate::syscall::user_slice_mut(control, clen as u64) }.ok_or(EFAULT)?;
+                c[0..8].copy_from_slice(&(clen as u64).to_le_bytes());
+                c[8..12].copy_from_slice(&SOL_SOCKET.to_le_bytes());
+                c[12..16].copy_from_slice(&SCM_RIGHTS.to_le_bytes());
+                for (i, fd) in new_fds.iter().enumerate() {
+                    c[16 + 4 * i..20 + 4 * i].copy_from_slice(&fd.to_le_bytes());
+                }
+                control_len = clen as u64;
+            }
+        }
         let m = unsafe { crate::syscall::user_slice_mut(msg, 56) }.ok_or(EFAULT)?;
-        m[40..48].copy_from_slice(&0u64.to_le_bytes()); // msg_controllen: no control data
-        m[48..52].copy_from_slice(&0u32.to_le_bytes()); // msg_flags
+        m[40..48].copy_from_slice(&control_len.to_le_bytes()); // msg_controllen
+        m[48..52].copy_from_slice(&msg_flags.to_le_bytes()); // msg_flags
         if name != 0 {
             let namelen_ptr = msg + 8;
             match from {
