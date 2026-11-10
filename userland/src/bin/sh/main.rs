@@ -181,9 +181,10 @@ fn main(args: Args) -> i32 {
     }
 }
 
-/// "user@palladium:/path $ " ("#" for root), with the home directory as ~.
+/// "user@host:/path $ " ("#" for root), with the home directory as ~.
 fn prompt_text() -> String {
     let user = userlib::users::user_name(geteuid());
+    let host = userlib::uname().map(|u| userlib::field_str(&u.nodename).to_string()).unwrap_or_else(|_| "palladium".to_string());
     let mut dir = cwd();
     if let Some(home) = userlib::getenv("HOME").filter(|h| *h != "/") {
         if dir == home {
@@ -192,7 +193,7 @@ fn prompt_text() -> String {
             dir = format!("~/{}", rest);
         }
     }
-    format!("{}@palladium:{} {} ", user, dir, if geteuid() == 0 { "#" } else { "$" })
+    format!("{}@{}:{} {} ", user, host, dir, if geteuid() == 0 { "#" } else { "$" })
 }
 
 fn interactive(name: String) -> i32 {

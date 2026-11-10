@@ -192,6 +192,13 @@ fn default_files_exist() {
     filesystem::init_default_files();
     assert!(filesystem::read_file("/etc/hosts").is_ok());
     assert!(filesystem::read_file("/etc/shells").is_ok());
+    assert!(filesystem::read_file("/etc/hostname").is_ok_and(|h| h == "palladium\n"));
+    // The hostname comes from /etc/hostname (its first line).
+    filesystem::write_file("/etc/hostname", "testbox\nignored\n").unwrap();
+    assert_eq!(palladiumos::syscall::load_hostname().as_deref(), Some("testbox"));
+    assert_eq!(palladiumos::syscall::hostname(), "testbox");
+    filesystem::write_file("/etc/hostname", "palladium\n").unwrap();
+    palladiumos::syscall::load_hostname();
     // The 0.4 demo files are gone.
     assert!(!filesystem::is_dir("/scripts"));
     assert!(filesystem::read_file("/welcome.txt").is_err());

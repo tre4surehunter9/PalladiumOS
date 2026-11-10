@@ -144,6 +144,9 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         }
         palladiumos::filesystem::init_default_files();
         boot_ok!("Checked the system files (/etc: accounts, os-release)");
+        if let Some(name) = palladiumos::syscall::load_hostname() {
+            boot_ok!("Set the hostname to {} (/etc/hostname)", name);
+        }
 
         #[cfg(test)]
         test_main();

@@ -193,6 +193,9 @@ pub fn init_default_files() {
              \"terminal\", \"cpu\", \"memory\", \"swap\", \"disk\", \"localip\", \"locale\", \"break\", \"colors\"]\n}\n",
         ),
         ("/etc/xdg/fastfetch/palladium.txt", PALLADIUM_LOGO),
+        // The machine's name, read at boot (`hostname NAME` changes it
+        // until the next boot; write it here to keep it).
+        ("/etc/hostname", "palladium\n"),
         // Login shells (SSH servers only let users with one of these in).
         ("/etc/shells", "/bin/sh\n/bin/dash\n/usr/bin/ash\n/bin/busybox\n"),
     ];

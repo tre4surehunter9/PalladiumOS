@@ -1192,6 +1192,24 @@ fn sys_reboot(magic1: u64, magic2: u64, cmd: u64) -> i64 {
 /// The machine's name (uname's nodename), changed by sethostname.
 static HOSTNAME: spin::Mutex<alloc::string::String> = spin::Mutex::new(alloc::string::String::new());
 
+/// The machine's name, as uname reports it.
+pub fn hostname() -> alloc::string::String {
+    let h = HOSTNAME.lock();
+    if h.is_empty() { alloc::string::String::from("palladium") } else { h.clone() }
+}
+
+/// Set the machine's name from /etc/hostname (at boot), if it has one:
+/// its first line, at most 64 bytes. Returns the name used.
+pub fn load_hostname() -> Option<alloc::string::String> {
+    let text = crate::filesystem::read_file("/etc/hostname").ok()?;
+    let name = text.lines().next()?.trim();
+    if name.is_empty() || name.len() > 64 {
+        return None;
+    }
+    *HOSTNAME.lock() = alloc::string::String::from(name);
+    Some(alloc::string::String::from(name))
+}
+
 /// sethostname(name, len): root only, at most 64 bytes.
 fn sys_sethostname(name: u64, len: u64) -> i64 {
     if process::current_cred().euid != 0 {
@@ -1206,9 +1224,6 @@ fn sys_sethostname(name: u64, len: u64) -> i64 {
 }
 
 fn sys_uname(buf: u64) -> i64 {
-    if HOSTNAME.lock().is_empty() {
-        *HOSTNAME.lock() = alloc::string::String::from("palladium");
-    }
     const FIELD: usize = 65; // Linux's __NEW_UTS_LEN + 1
     const FIELDS: [&str; 6] = [
         "PalladiumOS", // sysname
@@ -1223,7 +1238,7 @@ fn sys_uname(buf: u64) -> i64 {
         return -EFAULT;
     };
     out.fill(0);
-    let host = HOSTNAME.lock().clone();
+    let host = hostname();
     for (i, s) in FIELDS.iter().enumerate() {
         let s = if i == 1 { host.as_str() } else { s };
         let n = s.len().min(FIELD - 1);
