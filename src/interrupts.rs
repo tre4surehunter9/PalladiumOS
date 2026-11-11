@@ -27,6 +27,7 @@ lazy_static! {
     idt.page_fault.set_handler_fn(page_fault_handler);
     idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
     idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+    idt[crate::smp::SPURIOUS_VECTOR as usize].set_handler_fn(spurious_interrupt);
 
     crate::syscall::init_syscalls(&mut idt);
 
@@ -98,6 +99,14 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
 pub fn init_idt() {
     IDT.load();
 }
+
+/// The same IDT on another CPU core.
+pub fn load_idt() {
+    IDT.load();
+}
+
+/// A local APIC's spurious interrupt: nothing to do (and no EOI).
+extern "x86-interrupt" fn spurious_interrupt(_f: InterruptStackFrame) {}
 
 /// Let pending interrupts in for a moment. System calls run with interrupts
 /// off, so long work inside one (reading many disk sectors, filling many

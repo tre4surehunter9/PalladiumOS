@@ -209,6 +209,20 @@ impl BootInfoFrameAllocator {
         unsafe { self.deallocate_frame(frame) };
     }
 
+    /// A free page of RAM below 1 MiB (frames are only handed out above
+    /// it), for code that must run there: the real-mode trampoline other
+    /// CPU cores start in. Page 0 and the BIOS's areas are avoided.
+    pub fn low_page(&self) -> Option<u64> {
+        self.memory_map
+            .iter()
+            .filter(|r| r.kind == MemoryRegionKind::Usable)
+            .filter_map(|r| {
+                let start = r.start.max(0x1000).next_multiple_of(4096);
+                (start + 4096 <= r.end.min(0x9_F000)).then_some(start)
+            })
+            .next()
+    }
+
     /// Number of usable frames in the machine (counted once, then cached).
     pub fn total_frames(&mut self) -> usize {
         if self.total == 0 {
@@ -319,6 +333,29 @@ pub fn map_mmio(phys: u64, len: usize) -> *mut u8 {
         }
     }
     phys_to_virt(phys) as *mut u8
+}
+
+/// Map the page at physical address `phys` at the same virtual address in
+/// the kernel's address space (an identity mapping), for code that runs
+/// before paging is on, as a starting CPU core does. Or remove it again.
+pub fn identity_map(phys: u64, on: bool) {
+    let mut alloc = FRAME_ALLOCATOR.lock();
+    let frames = alloc.as_mut().expect("no frame allocator");
+    let mut mapper = mapper_for(kernel_p4());
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(phys));
+    unsafe {
+        if on {
+            let frame = PhysFrame::containing_address(PhysAddr::new(phys));
+            // Executable and writable: the trampoline runs here and its data
+            // (the stack and entry for each core) is patched in place.
+            let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+            if let Ok(f) = mapper.map_to_with_table_flags(page, frame, flags, PageTableFlags::PRESENT | PageTableFlags::WRITABLE, frames) {
+                f.flush();
+            }
+        } else if let Ok((_, f)) = mapper.unmap(page) {
+            f.flush();
+        }
+    }
 }
 
 /// Kernel-virtual pointer to a physical address, for writing into user

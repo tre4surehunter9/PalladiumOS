@@ -103,6 +103,37 @@ struct Selectors {
     tss_selector: SegmentSelector,
 }
 
+/// Another CPU core's GDT and TSS: the same layout as the first core's (so
+/// the selectors are the same everywhere), with a TSS of its own (a TSS
+/// can't be loaded by two cores) and its own double-fault stack.
+pub fn init_ap() {
+    use alloc::boxed::Box;
+    use x86_64::instructions::segmentation::{CS, DS, ES, SS, Segment};
+    use x86_64::instructions::tables::load_tss;
+    let df_stack: &'static mut [u8] = Box::leak(alloc::vec![0u8; STACK_SIZE].into_boxed_slice());
+    let ring0_stack: &'static mut [u8] = Box::leak(alloc::vec![0u8; STACK_SIZE].into_boxed_slice());
+    let tss: &'static mut TaskStateSegment = Box::leak(Box::new(TaskStateSegment::new()));
+    tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::from_ptr(df_stack.as_ptr()) + STACK_SIZE as u64;
+    tss.privilege_stack_table[0] = VirtAddr::from_ptr(ring0_stack.as_ptr()) + STACK_SIZE as u64;
+    let tss: &'static TaskStateSegment = tss;
+    let gdt: &'static mut GlobalDescriptorTable = Box::leak(Box::new(GlobalDescriptorTable::new()));
+    let code = gdt.add_entry(Descriptor::kernel_code_segment());
+    let data = gdt.add_entry(Descriptor::kernel_data_segment());
+    gdt.add_entry(Descriptor::user_code_segment());
+    gdt.add_entry(Descriptor::user_data_segment());
+    let tss_sel = gdt.add_entry(Descriptor::tss_segment(tss));
+    debug_assert!(code == GDT.1.code_selector && tss_sel == GDT.1.tss_selector);
+    let gdt: &'static GlobalDescriptorTable = gdt;
+    gdt.load();
+    unsafe {
+        CS::set_reg(code);
+        SS::set_reg(data);
+        DS::set_reg(data);
+        ES::set_reg(data);
+        load_tss(tss_sel);
+    }
+}
+
 pub fn user_selectors() -> (SegmentSelector, SegmentSelector) {
     (GDT.1.user_code_selector, GDT.1.user_data_selector)
 }

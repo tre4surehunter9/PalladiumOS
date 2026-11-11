@@ -265,6 +265,8 @@ fn test_extra_args(kernel: &Path, test: bool) -> &'static [&'static str] {
         &[]
     } else if name.starts_with("ahci-") {
         &["-machine", "q35"] // q35 has its disks on AHCI
+    } else if name.starts_with("smp-") {
+        &["-smp", "4"] // four CPU cores
     } else if name.starts_with("usb-") {
         &["-device", "qemu-xhci", "-device", "usb-kbd"]
     } else {
