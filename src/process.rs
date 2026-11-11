@@ -430,6 +430,9 @@ pub fn schedule() {
             let arrived = crate::task::keyboard::arrivals();
             if KEYS_SEEN.swap(arrived, Ordering::SeqCst) != arrived {
                 woken.extend([CONSOLE_KEY, POLL_KEY]);
+                if let Some(mut owners) = SIGIO_INPUT.try_lock() {
+                    owners.retain(|&pid| signal_locked(&mut table, pid, SIGIO));
+                }
             }
             for p in table.values_mut() {
                 match p.state {
@@ -1489,6 +1492,11 @@ pub const SIGTSTP: i32 = 20;
 pub const SIGTTIN: i32 = 21;
 pub const SIGTTOU: i32 = 22;
 pub const SIGWINCH: i32 = 28;
+pub const SIGIO: i32 = 29;
+
+/// Processes that asked for SIGIO when keyboard or mouse input arrives
+/// (O_ASYNC with F_SETOWN on the console or the mouse: an X server).
+pub static SIGIO_INPUT: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 const MAX_SIGNAL: i32 = 64;
 
 pub const SIG_DFL: u64 = 0;

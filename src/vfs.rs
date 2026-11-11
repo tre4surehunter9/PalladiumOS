@@ -66,6 +66,9 @@ const F_GETFD: u64 = 1;
 const F_SETFD: u64 = 2;
 const F_GETFL: u64 = 3;
 const F_SETFL: u64 = 4;
+const F_SETOWN: u64 = 8;
+const F_GETOWN: u64 = 9;
+const O_ASYNC: u64 = 0o20000;
 const F_DUPFD_CLOEXEC: u64 = 1030;
 const FD_CLOEXEC: u64 = 1;
 
@@ -141,6 +144,9 @@ struct Description {
     /// last rewind), so deleting entries while reading (rm -rf) can't make
     /// later reads skip others.
     dir_snapshot: Option<Vec<(String, u64, u8)>>,
+    /// O_ASYNC, and the process that gets SIGIO (F_SETOWN).
+    async_io: bool,
+    async_owner: u64,
 }
 
 impl Drop for Description {
@@ -195,7 +201,7 @@ fn handle(kind: Kind) -> Handle {
         Kind::Fb => "/dev/fb0".to_string(),
         Kind::Mouse => "/dev/input/mice".to_string(),
     };
-    Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0, nonblocking: false, dir_snapshot: None }) })
+    Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0, nonblocking: false, dir_snapshot: None, async_io: false, async_owner: 0 }) })
 }
 
 #[derive(Clone)]
@@ -904,13 +910,15 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                         };
                         (mode | if *append { O_APPEND } else { 0 }) as i64
                     }
-                    Kind::Console | Kind::Null | Kind::Zero | Kind::Random => O_RDWR as i64,
+                    Kind::Console => (O_RDWR | nb | if desc.async_io { O_ASYNC } else { 0 }) as i64,
+                    Kind::Null | Kind::Zero | Kind::Random => O_RDWR as i64,
                     Kind::Socket(s) => (O_RDWR | if s.is_nonblocking() { O_NONBLOCK } else { 0 }) as i64,
                     Kind::Pty { end, .. } => (O_RDWR | if end.is_nonblocking() { O_NONBLOCK } else { 0 }) as i64,
                     Kind::PipeWrite(_) => (O_WRONLY | nb) as i64,
                     Kind::PipeRead(_) => (O_RDONLY | nb) as i64,
                     Kind::Dir { .. } => O_RDONLY as i64,
-                    Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) | Kind::Fb | Kind::Mouse => (O_RDWR | nb) as i64,
+                    Kind::Mouse => (O_RDWR | nb | if desc.async_io { O_ASYNC } else { 0 }) as i64,
+                    Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) | Kind::Fb => (O_RDWR | nb) as i64,
                 }
             }
             // Record locks: granted (see sys_flock). F_GETLK reports
@@ -925,15 +933,25 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
             6 | 7 | 37 | 38 => 0,
             F_SETFL => {
                 // O_NONBLOCK works on pipes, sockets and terminals; other
-                // changes are accepted.
+                // changes are accepted. O_ASYNC: see async_input.
                 let mut desc = slot.handle.lock();
                 match &desc.kind {
                     Kind::Socket(s) => s.set_nonblocking(arg & O_NONBLOCK != 0),
                     Kind::Pty { end, .. } => end.set_nonblocking(arg & O_NONBLOCK != 0),
                     _ => desc.nonblocking = arg & O_NONBLOCK != 0,
                 }
+                desc.async_io = arg & O_ASYNC != 0;
+                async_input(&desc);
                 0
             }
+            F_SETOWN => {
+                let mut desc = slot.handle.lock();
+                // (A negative owner is a process group: its leader here.)
+                desc.async_owner = (arg as i32).unsigned_abs() as u64;
+                async_input(&desc);
+                0
+            }
+            F_GETOWN => slot.handle.lock().async_owner as i64,
             _ => -EINVAL,
         }
     })
@@ -948,7 +966,11 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
     let mut desc = h.lock();
     match &desc.kind {
         Kind::Console => {
+            let nonblocking = desc.nonblocking;
             drop(desc); // don't hold it while waiting for a key
+            if nonblocking && !buf.is_empty() && !crate::tty::input_ready() {
+                return -EAGAIN;
+            }
             crate::tty::read(buf)
         }
         Kind::Pty { end, .. } => {
@@ -3448,4 +3470,17 @@ fn console_ioctl(request: u64, arg: u64) -> Option<i64> {
         KDSETLED | KDMKTONE | KIOCSOUND => 0,
         _ => return None,
     })
+}
+
+/// O_ASYNC with an owner on the console or the mouse: the owner gets SIGIO
+/// when keyboard or mouse input arrives (the scheduler sends it).
+fn async_input(desc: &Description) {
+    if !matches!(desc.kind, Kind::Console | Kind::Mouse) || desc.async_owner == 0 {
+        return;
+    }
+    let mut owners = crate::process::SIGIO_INPUT.lock();
+    owners.retain(|&p| p != desc.async_owner);
+    if desc.async_io {
+        owners.push(desc.async_owner);
+    }
 }

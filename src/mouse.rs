@@ -80,6 +80,14 @@ pub fn init() -> bool {
         if !to_mouse(0xF6) || !to_mouse(0xF4) {
             return false;
         }
+        // Whatever replies are still waiting (an extra acknowledgment) would
+        // be taken for the start of a packet: drop them.
+        for _ in 0..16 {
+            if unsafe { Port::<u8>::new(0x64).read() } & 1 == 0 {
+                break;
+            }
+            unsafe { Port::<u8>::new(0x60).read() };
+        }
         PRESENT.store(true, Ordering::SeqCst);
         crate::interrupts::unmask_irq(12);
         true
@@ -94,7 +102,8 @@ pub fn present() -> bool {
 pub fn interrupt(byte: u8) {
     let Some(mut m) = MICE.try_lock() else { return };
     // The first byte of a packet always has bit 3 set: resynchronize on it.
-    if m.got == 0 && byte & 0x08 == 0 {
+    // An acknowledgment (0xFA) or self-test reply (0xAA) is never a packet.
+    if m.got == 0 && (byte & 0x08 == 0 || byte == 0xFA || byte == 0xAA) {
         return;
     }
     let i = m.got;

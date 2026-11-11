@@ -121,6 +121,11 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "graphics",
+        "the X Window System",
+        &[("Xfbdev", "the X server, on the whole screen (Xfbdev &; X programs use DISPLAY=:0)")],
+    ),
+    (
         "programming",
         "compilers, languages and other shells",
         &[
