@@ -65,6 +65,17 @@ pub fn pop_scancode() -> Option<u8> {
     SCANCODE_QUEUE.try_get().ok()?.pop()
 }
 
+/// Are scancodes waiting (without taking one)?
+pub fn has_scancodes() -> bool {
+    SCANCODE_QUEUE.try_get().is_ok_and(|q| !q.is_empty())
+}
+
+/// Input other than keys arrived (the mouse): wake whoever waits for the
+/// console, as a key would (they check what they wait for).
+pub fn note_arrival() {
+    ARRIVED.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+}
+
 use core::{pin::Pin, task::{Poll, Context}};
 use futures_util::stream::Stream;
 use futures_util::task::AtomicWaker;

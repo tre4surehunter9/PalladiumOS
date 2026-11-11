@@ -22,13 +22,21 @@ const SHM_DIR: Ino = 51;
 const PTS_BASE: Ino = 100;
 const DEVICES: &[(&str, Device)] = &[
     ("console", Device::Console),
+    ("fb0", Device::Fb),
     ("null", Device::Null),
+    ("psaux", Device::Mouse),
     ("ptmx", Device::Ptmx),
     ("random", Device::Random),
     ("tty", Device::Tty),
+    // The console as virtual terminals 0 and 1 (an X server asks for them).
+    ("tty0", Device::Console),
+    ("tty1", Device::Console),
     ("urandom", Device::Random),
     ("zero", Device::Zero),
 ];
+/// /dev/input, and /dev/input/mice in it.
+const INPUT_DIR: Ino = 52;
+const MICE: Ino = 53;
 
 pub struct DevFs;
 
@@ -49,6 +57,9 @@ impl FileSystem for DevFs {
         match dir {
             ROOT if name == "pts" => Ok(PTS_DIR),
             ROOT if name == "shm" => Ok(SHM_DIR),
+            ROOT if name == "input" => Ok(INPUT_DIR),
+            INPUT_DIR if name == "mice" => Ok(MICE),
+            INPUT_DIR => Err(ENOENT),
             ROOT => DEVICES.iter().position(|(n, _)| *n == name).map(|i| i as Ino + 2).ok_or(ENOENT),
             PTS_DIR => {
                 let n: u32 = name.parse().map_err(|_| ENOENT)?;
@@ -63,6 +74,10 @@ impl FileSystem for DevFs {
             (FileType::Dir, 0o755, 0, 0)
         } else if ino == SHM_DIR {
             (FileType::Dir, 0o1777, 0, 0)
+        } else if ino == INPUT_DIR {
+            (FileType::Dir, 0o755, 0, 0)
+        } else if ino == MICE {
+            (FileType::CharDevice(Device::Mouse), 0o660, 0, 0)
         } else if let Some(n) = pts_number(ino) {
             let (uid, gid, mode) = crate::pty::owner(n).ok_or(ENOENT)?;
             (FileType::CharDevice(Device::Pts(n)), mode, uid, gid)
@@ -97,9 +112,11 @@ impl FileSystem for DevFs {
                     .collect();
                 v.push(("pts".to_string(), PTS_DIR, FileType::Dir));
                 v.push(("shm".to_string(), SHM_DIR, FileType::Dir));
+                v.push(("input".to_string(), INPUT_DIR, FileType::Dir));
                 Ok(v)
             }
             SHM_DIR => Ok(Vec::new()),
+            INPUT_DIR => Ok(alloc::vec![("mice".to_string(), MICE, FileType::CharDevice(Device::Mouse))]),
             PTS_DIR => Ok(crate::pty::list()
                 .into_iter()
                 .map(|n| (format!("{}", n), PTS_BASE + n as Ino, FileType::CharDevice(Device::Pts(n))))

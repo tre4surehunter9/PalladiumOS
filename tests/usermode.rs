@@ -20,6 +20,10 @@ use alloc::vec::Vec;
 entry_point!(main, config = &palladiumos::BOOTLOADER_CONFIG);
 
 fn main(boot_info: &'static mut BootInfo) -> ! {
+    // The screen, as at boot (for /dev/fb0).
+    if let Some(fb) = core::mem::replace(&mut boot_info.framebuffer, bootloader_api::info::Optional::None).into_option() {
+        palladiumos::vga_buffer::init_framebuffer(fb);
+    }
     let boot_info: &'static BootInfo = boot_info;
     use palladiumos::allocator;
     use memory::BootInfoFrameAllocator;
@@ -46,6 +50,7 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     palladiumos::mounts::mount("/proc", alloc::boxed::Box::new(palladiumos::procfs::ProcFs));
     palladiumos::mounts::mount("/dev", alloc::boxed::Box::new(palladiumos::devfs::DevFs));
     palladiumos::block::mount_shm();
+    palladiumos::mouse::init();
 
     test_main();
     palladiumos::hlt_loop();
@@ -1917,6 +1922,16 @@ fn shared_memory_works() {
     assert!(file("/tmp/shm.out").contains("all checks passed"));
     assert!(only_kernel_left(), "{:?}", process::list());
     assert_eq!(frames_in_use(), before, "shared memory was freed");
+}
+
+#[test_case]
+fn framebuffer_console_and_mouse() {
+    let Some(_) = c_program("test_fb") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let status = sh("test_fb > /tmp/fb.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/fb.out"));
+    assert!(file("/tmp/fb.out").contains("all checks passed"));
+    assert!(!palladiumos::vga_buffer::is_graphics(), "text mode is back");
 }
 
 #[test_case]

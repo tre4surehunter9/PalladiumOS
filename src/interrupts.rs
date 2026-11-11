@@ -23,6 +23,7 @@ lazy_static! {
     idt[(PIC_1_OFFSET + 9) as usize].set_handler_fn(pci_irq9);
     idt[(PIC_1_OFFSET + 10) as usize].set_handler_fn(pci_irq10);
     idt[(PIC_1_OFFSET + 11) as usize].set_handler_fn(pci_irq11);
+    idt[(PIC_1_OFFSET + 12) as usize].set_handler_fn(mouse_irq12);
     idt.page_fault.set_handler_fn(page_fault_handler);
     idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
     idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
@@ -165,8 +166,15 @@ pub fn start_timer() {
 }
 
 /// Let interrupt line `irq` through the PICs (and the cascade, for 8-15).
+/// The PS/2 mouse (IRQ 12): a byte from it.
+extern "x86-interrupt" fn mouse_irq12(_f: InterruptStackFrame) {
+    let byte = unsafe { x86_64::instructions::port::Port::<u8>::new(0x60).read() };
+    crate::mouse::interrupt(byte);
+    unsafe { PICS.lock().notify_end_of_interrupt(PIC_1_OFFSET + 12) };
+}
+
 pub fn unmask_irq(irq: u8) {
-    if !(9..=11).contains(&irq) {
+    if !(9..=12).contains(&irq) {
         return; // no handler for other lines
     }
     x86_64::instructions::interrupts::without_interrupts(|| unsafe {

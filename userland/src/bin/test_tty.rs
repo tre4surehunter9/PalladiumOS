@@ -47,7 +47,8 @@ fn modes() -> i32 {
     check!(tcsetattr(STDIN, &saved.unwrap()) == 0);
     check!(tcgetattr(STDIN).map(|t| t.c_lflag & ICANON != 0) == Ok(true));
 
-    check!(window_size(STDOUT) == (25, 80));
+    let (rows, cols) = window_size(STDOUT);
+    check!(rows >= 25 && cols >= 80); // (the framebuffer console: 80x25 or bigger)
     check!(tcgetpgrp(STDIN) > 0);
     0
 }

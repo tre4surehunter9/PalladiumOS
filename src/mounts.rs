@@ -38,6 +38,10 @@ pub enum Device {
     Pts(u32),
     /// /dev/random and /dev/urandom
     Random,
+    /// /dev/fb0: the framebuffer
+    Fb,
+    /// /dev/input/mice, /dev/psaux: the mouse
+    Mouse,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

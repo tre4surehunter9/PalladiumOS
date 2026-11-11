@@ -110,6 +110,10 @@ enum Kind {
     SignalFd(Arc<Mutex<u64>>),
     /// inotify: watches on files, and the events that happened to them.
     Inotify(Arc<Mutex<crate::inotify::Instance>>),
+    /// /dev/fb0: the framebuffer (read, write, mmap, the fbdev ioctls).
+    Fb,
+    /// /dev/input/mice: the mouse.
+    Mouse,
 }
 
 struct EventFd {
@@ -188,6 +192,8 @@ fn handle(kind: Kind) -> Handle {
         Kind::TimerFd(_) => "anon_inode:[timerfd]".to_string(),
         Kind::SignalFd(_) => "anon_inode:[signalfd]".to_string(),
         Kind::Inotify(_) => "anon_inode:inotify".to_string(),
+        Kind::Fb => "/dev/fb0".to_string(),
+        Kind::Mouse => "/dev/input/mice".to_string(),
     };
     Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0, nonblocking: false, dir_snapshot: None }) })
 }
@@ -394,6 +400,8 @@ fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
                 Device::Zero => Kind::Zero,
                 Device::Random => Kind::Random,
                 Device::Console => Kind::Console,
+                Device::Fb => Kind::Fb,
+                Device::Mouse => Kind::Mouse,
                 Device::Ptmx => match crate::pty::open_master(nonblocking) {
                     // (its /dev/pts/N entry, for fstat and ttyname)
                     Ok(end) => {
@@ -439,6 +447,9 @@ fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
     }
     // (If there's no free fd, the description is dropped here, closing it.)
     let h = handle(kind);
+    // O_NONBLOCK, for what keeps it in the description (devices like the
+    // mouse; pseudo-terminals and pipes keep their own).
+    h.lock().nonblocking = flags & O_NONBLOCK != 0;
     match with_process(|p| alloc_fd(p, h, flags & O_CLOEXEC != 0)) {
         Ok(fd) => fd as i64,
         Err(e) => -e,
@@ -509,7 +520,12 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
     const FIONREAD: u64 = 0x541B;
     const FIONBIO: u64 = 0x5421;
     match get(fd) {
-        Ok(h) if matches!(h.lock().kind, Kind::Console) => {}
+        Ok(h) if matches!(h.lock().kind, Kind::Console) => {
+            if let Some(r) = console_ioctl(request, arg) {
+                return r;
+            }
+        }
+        Ok(h) if matches!(h.lock().kind, Kind::Fb) => return fb_ioctl(request, arg),
         Ok(h) if matches!(h.lock().kind, Kind::Pty { .. }) => {
             // (The description isn't held while it runs: TIOCSWINSZ signals.)
             let Kind::Pty { end, .. } = &h.lock().kind else { unreachable!() };
@@ -894,7 +910,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                     Kind::PipeWrite(_) => (O_WRONLY | nb) as i64,
                     Kind::PipeRead(_) => (O_RDONLY | nb) as i64,
                     Kind::Dir { .. } => O_RDONLY as i64,
-                    Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) => (O_RDWR | nb) as i64,
+                    Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) | Kind::Fb | Kind::Mouse => (O_RDWR | nb) as i64,
                 }
             }
             // Record locks: granted (see sys_flock). F_GETLK reports
@@ -1008,6 +1024,16 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
             drop(desc);
             inotify_read(&i, nonblocking, buf)
         }
+        Kind::Fb => {
+            let n = fb_copy(desc.offset, buf, false);
+            desc.offset += n;
+            n as i64
+        }
+        Kind::Mouse => {
+            let nonblocking = desc.nonblocking;
+            drop(desc);
+            crate::mouse::read(buf, nonblocking)
+        }
     }
 }
 
@@ -1033,6 +1059,7 @@ pub fn sys_pread(fd: u64, buf: &mut [u8], offset: u64) -> i64 {
                 Err(e) => -e,
             }
         }
+        Kind::Fb => fb_copy(offset as usize, buf, false) as i64,
         Kind::Dir { .. } => -EISDIR,
         Kind::Zero => {
             buf.fill(0);
@@ -1057,6 +1084,7 @@ pub fn sys_pwrite(fd: u64, bytes: &[u8], offset: u64) -> i64 {
     let (loc, writable, path) = match &h.lock().kind {
         Kind::File { loc, writable, path, .. } => (*loc, *writable, path.clone()),
         Kind::Null => return bytes.len() as i64,
+        Kind::Fb => return fb_copy(offset as usize, &mut bytes.to_vec(), true) as i64,
         Kind::Dir { .. } => return -EISDIR,
         _ => return -ESPIPE,
     };
@@ -1141,6 +1169,13 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
             eventfd_write(&e, nonblocking, bytes)
         }
         Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) => -EINVAL,
+        Kind::Fb => {
+            let mut data = bytes.to_vec();
+            let n = fb_copy(desc.offset, &mut data, true);
+            desc.offset += n;
+            if n == 0 && !bytes.is_empty() { -ENOSPC } else { n as i64 }
+        }
+        Kind::Mouse => crate::mouse::write(bytes),
     }
 }
 
@@ -1181,7 +1216,23 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
         }
         Kind::Dir { .. } => -EINVAL,
         Kind::Null | Kind::Zero | Kind::Random => 0,
-        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } | Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) => -ESPIPE,
+        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } | Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) | Kind::Mouse => -ESPIPE,
+        Kind::Fb => {
+            let size = crate::vga_buffer::framebuffer().map_or(0, |f| f.1) as i64;
+            let base = match whence {
+                SEEK_SET => 0,
+                SEEK_CUR => desc.offset as i64,
+                SEEK_END => size,
+                _ => return -EINVAL,
+            };
+            match base.checked_add(delta) {
+                Some(pos) if pos >= 0 => {
+                    desc.offset = pos as usize;
+                    pos
+                }
+                _ => -EINVAL,
+            }
+        }
     }
 }
 
@@ -1243,7 +1294,7 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
     };
     let desc = h.lock();
     match &desc.kind {
-        Kind::Console | Kind::Null | Kind::Zero | Kind::Random => {
+        Kind::Console | Kind::Null | Kind::Zero | Kind::Random | Kind::Fb | Kind::Mouse => {
             fill_stat(out, 0, 0, S_IFCHR | 0o666, 1, 0, 0);
             0
         }
@@ -1954,6 +2005,7 @@ pub fn poll_ready(fd: i32, events: i16) -> i16 {
         Kind::Inotify(i) => {
             if i.lock().readable() { POLLIN } else { 0 }
         }
+        Kind::Mouse => (if crate::mouse::readable() { POLLIN } else { 0 }) | POLLOUT,
         Kind::Epoll(list) => {
             // Readable when something it watches is ready (epolls inside
             // epolls aren't looked into).
@@ -3213,4 +3265,187 @@ fn inotify_read(i: &Arc<Mutex<crate::inotify::Instance>>, nonblocking: bool, buf
         }
         crate::process::block_on(crate::inotify::key(i));
     }
+}
+
+// ---------------------------------------------------------------- /dev/fb0
+
+/// The framebuffer of an fd that is /dev/fb0: (physical address, length).
+pub fn fd_framebuffer(fd: u64) -> Option<(u64, u64)> {
+    let is_fb = get(fd).is_ok_and(|h| matches!(h.lock().kind, Kind::Fb));
+    if !is_fb {
+        return None;
+    }
+    let (virt, len, ..) = crate::vga_buffer::framebuffer()?;
+    Some((crate::memory::kernel_phys(virt)?, len as u64))
+}
+
+/// read()/write() of the framebuffer at `offset`: bytes copied.
+fn fb_copy(offset: usize, buf: &mut [u8], write: bool) -> usize {
+    let Some((virt, len, ..)) = crate::vga_buffer::framebuffer() else { return 0 };
+    if offset >= len {
+        return 0;
+    }
+    let n = buf.len().min(len - offset);
+    let fb = (virt as usize + offset) as *mut u8;
+    unsafe {
+        if write {
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), fb, n);
+        } else {
+            core::ptr::copy_nonoverlapping(fb, buf.as_mut_ptr(), n);
+        }
+    }
+    n
+}
+
+/// The fbdev ioctls: the screen's description (fb_var_screeninfo,
+/// fb_fix_screeninfo), and the ones that change nothing here (the mode
+/// can't change, there's no palette with true color).
+fn fb_ioctl(request: u64, arg: u64) -> i64 {
+    const FBIOGET_VSCREENINFO: u64 = 0x4600;
+    const FBIOPUT_VSCREENINFO: u64 = 0x4601;
+    const FBIOGET_FSCREENINFO: u64 = 0x4602;
+    const FBIOGETCMAP: u64 = 0x4604;
+    const FBIOPUTCMAP: u64 = 0x4605;
+    const FBIOPAN_DISPLAY: u64 = 0x4606;
+    const FBIOBLANK: u64 = 0x4611;
+    let Some((virt, len, width, height, stride, bpp, bgr)) = crate::vga_buffer::framebuffer() else { return -ENODEV };
+    let put32 = |b: &mut [u8], off: usize, v: u32| b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    match request {
+        FBIOGET_VSCREENINFO | FBIOPUT_VSCREENINFO => {
+            // (PUT: the mode stays; the current one is reported back.)
+            let Some(b) = (unsafe { crate::syscall::user_slice_mut(arg, 160) }) else { return -EFAULT };
+            b.fill(0);
+            for (i, v) in [width, height, width, height, 0, 0, bpp * 8, 0].iter().enumerate() {
+                put32(b, i * 4, *v as u32);
+            }
+            // red, green, blue, transp: (offset, length, msb_right)
+            let (r, bl) = if bgr { (16, 0) } else { (0, 16) };
+            for (i, off) in [r, 8, bl].iter().enumerate() {
+                put32(b, 32 + i * 12, *off);
+                put32(b, 32 + i * 12 + 4, 8);
+            }
+            if bpp == 4 {
+                put32(b, 68, 24); // transp: the unused top byte
+            }
+            put32(b, 88, u32::MAX); // height in mm: unknown
+            put32(b, 92, u32::MAX); // width in mm: unknown
+            0
+        }
+        FBIOGET_FSCREENINFO => {
+            let Some(b) = (unsafe { crate::syscall::user_slice_mut(arg, 80) }) else { return -EFAULT };
+            b.fill(0);
+            b[..11].copy_from_slice(b"palladiumfb");
+            let phys = crate::memory::kernel_phys(virt).unwrap_or(0);
+            b[16..24].copy_from_slice(&phys.to_le_bytes()); // smem_start
+            put32(b, 24, len as u32); // smem_len
+            put32(b, 28, 0); // FB_TYPE_PACKED_PIXELS
+            put32(b, 36, 2); // FB_VISUAL_TRUECOLOR
+            put32(b, 48, (stride * bpp) as u32); // line_length
+            0
+        }
+        FBIOGETCMAP | FBIOPUTCMAP | FBIOPAN_DISPLAY | FBIOBLANK => 0,
+        _ => -ENOTTY,
+    }
+}
+
+/// The console's virtual-terminal and keyboard ioctls (what an X server
+/// uses), or None for the terminal ones handled by sys_ioctl. There's one
+/// virtual terminal, 1.
+fn console_ioctl(request: u64, arg: u64) -> Option<i64> {
+    use crate::syscall::{user_slice, user_slice_mut};
+    const KIOCSOUND: u64 = 0x4B2F;
+    const KDMKTONE: u64 = 0x4B30;
+    const KDGETLED: u64 = 0x4B31;
+    const KDSETLED: u64 = 0x4B32;
+    const KDGKBTYPE: u64 = 0x4B33;
+    const KDSETMODE: u64 = 0x4B3A;
+    const KDGETMODE: u64 = 0x4B3B;
+    const KDGKBMODE: u64 = 0x4B44;
+    const KDSKBMODE: u64 = 0x4B45;
+    const KDGKBENT: u64 = 0x4B46;
+    const VT_OPENQRY: u64 = 0x5600;
+    const VT_GETMODE: u64 = 0x5601;
+    const VT_SETMODE: u64 = 0x5602;
+    const VT_GETSTATE: u64 = 0x5603;
+    const VT_RELDISP: u64 = 0x5605;
+    const VT_ACTIVATE: u64 = 0x5606;
+    const VT_WAITACTIVE: u64 = 0x5607;
+    const VT_DISALLOCATE: u64 = 0x5608;
+    static VT_MODE: Mutex<[u8; 8]> = Mutex::new([0; 8]);
+    let put_int = |v: u32| match unsafe { user_slice_mut(arg, 4) } {
+        Some(b) => {
+            b.copy_from_slice(&v.to_le_bytes());
+            0
+        }
+        None => -EFAULT,
+    };
+    Some(match request {
+        VT_OPENQRY => put_int(1),
+        VT_GETSTATE => match unsafe { user_slice_mut(arg, 6) } {
+            Some(b) => {
+                b[0..2].copy_from_slice(&1u16.to_le_bytes()); // v_active
+                b[2..4].fill(0);
+                b[4..6].copy_from_slice(&0b10u16.to_le_bytes()); // v_state: 1 in use
+                0
+            }
+            None => -EFAULT,
+        },
+        VT_GETMODE => match unsafe { user_slice_mut(arg, 8) } {
+            Some(b) => {
+                b.copy_from_slice(&*VT_MODE.lock());
+                0
+            }
+            None => -EFAULT,
+        },
+        VT_SETMODE => match unsafe { user_slice(arg, 8) } {
+            Some(b) => {
+                VT_MODE.lock().copy_from_slice(b);
+                0
+            }
+            None => -EFAULT,
+        },
+        VT_RELDISP | VT_DISALLOCATE => 0,
+        VT_ACTIVATE | VT_WAITACTIVE => if arg <= 1 { 0 } else { -ENXIO },
+        KDSETMODE => match arg {
+            0 | 1 => {
+                crate::vga_buffer::set_graphics(arg == 1, crate::process::current_tgid());
+                0
+            }
+            _ => -EINVAL,
+        },
+        KDGETMODE => put_int(crate::vga_buffer::is_graphics() as u32),
+        KDGKBMODE => put_int(crate::tty::keyboard_mode() as u32),
+        KDSKBMODE => match arg as u8 {
+            m @ (crate::tty::K_RAW | crate::tty::K_XLATE | crate::tty::K_MEDIUMRAW | crate::tty::K_UNICODE) if arg < 4 => {
+                crate::tty::set_keyboard_mode(m);
+                0
+            }
+            _ => -EINVAL,
+        },
+        KDGKBENT => match unsafe { user_slice_mut(arg, 4) } {
+            // struct kbentry { u8 kb_table, kb_index; u16 kb_value; }
+            Some(b) => {
+                let v = crate::tty::keymap_entry(b[0], b[1]);
+                b[2..4].copy_from_slice(&v.to_le_bytes());
+                0
+            }
+            None => -EFAULT,
+        },
+        KDGKBTYPE => match unsafe { user_slice_mut(arg, 1) } {
+            Some(b) => {
+                b[0] = 0x02; // KB_101
+                0
+            }
+            None => -EFAULT,
+        },
+        KDGETLED => match unsafe { user_slice_mut(arg, 1) } {
+            Some(b) => {
+                b[0] = 0;
+                0
+            }
+            None => -EFAULT,
+        },
+        KDSETLED | KDMKTONE | KIOCSOUND => 0,
+        _ => return None,
+    })
 }

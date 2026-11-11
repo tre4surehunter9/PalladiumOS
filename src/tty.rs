@@ -64,7 +64,157 @@ pub fn set_mode(mode: Mode) {
 /// was Ctrl-C turned into SIGINT for the foreground program (then the key
 /// is dropped). Only in cooked mode with ISIG, and only when a user program
 /// has the keyboard; otherwise Ctrl-C is an ordinary key (byte 3).
+/// Keyboard modes (KDSKBMODE): K_XLATE is the normal, decoded one;
+/// K_RAW gives the scancodes, K_MEDIUMRAW Linux keycodes (an X server).
+pub const K_RAW: u8 = 0;
+pub const K_XLATE: u8 = 1;
+pub const K_MEDIUMRAW: u8 = 2;
+pub const K_UNICODE: u8 = 3;
+static KB_MODE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(K_XLATE);
+/// An 0xE0 prefix was the last scancode (medium raw mode).
+static E0_SEEN: AtomicBool = AtomicBool::new(false);
+
+pub fn keyboard_mode() -> u8 {
+    KB_MODE.load(Ordering::SeqCst)
+}
+
+pub fn set_keyboard_mode(mode: u8) {
+    KB_MODE.store(mode, Ordering::SeqCst);
+    E0_SEEN.store(false, Ordering::SeqCst);
+    *TTY.lock() = None; // decoded state starts over
+}
+
+fn raw_mode() -> bool {
+    matches!(keyboard_mode(), K_RAW | K_MEDIUMRAW)
+}
+
+/// A scancode as the keyboard mode wants it: as is (K_RAW), or as a Linux
+/// keycode (K_MEDIUMRAW: one byte, bit 7 for a release; None for the 0xE0
+/// prefix, which only changes the next code).
+fn raw_byte(scancode: u8) -> Option<u8> {
+    if keyboard_mode() == K_RAW {
+        return Some(scancode);
+    }
+    if scancode == 0xE0 {
+        E0_SEEN.store(true, Ordering::SeqCst);
+        return None;
+    }
+    let release = scancode & 0x80;
+    let code = scancode & 0x7f;
+    let keycode = if E0_SEEN.swap(false, Ordering::SeqCst) {
+        match code {
+            0x1C => 96,  // keypad Enter
+            0x1D => 97,  // right Ctrl
+            0x35 => 98,  // keypad /
+            0x37 => 99,  // Print Screen
+            0x38 => 100, // right Alt
+            0x47 => 102, // Home
+            0x48 => 103, // Up
+            0x49 => 104, // Page Up
+            0x4B => 105, // Left
+            0x4D => 106, // Right
+            0x4F => 107, // End
+            0x50 => 108, // Down
+            0x51 => 109, // Page Down
+            0x52 => 110, // Insert
+            0x53 => 111, // Delete
+            0x5B => 125, // left Meta
+            0x5C => 126, // right Meta
+            0x5D => 127, // Menu
+            _ => return None,
+        }
+    } else {
+        code // the rest: the keycode is the scancode
+    };
+    Some(keycode | release)
+}
+
+/// KDGKBENT: the key map entry of `keycode` in `table` (0 plain, 1 shift,
+/// 2 AltGr, 3 shift+AltGr) as Linux's kb_value, (type << 8) | value: a US
+/// keyboard. Unknown keys are K_HOLE.
+pub fn keymap_entry(table: u8, keycode: u8) -> u16 {
+    const KT_LATIN: u16 = 0;
+    const KT_FN: u16 = 1;
+    const KT_SPEC: u16 = 2;
+    const KT_PAD: u16 = 3;
+    const KT_CUR: u16 = 6;
+    const KT_SHIFT: u16 = 7;
+    const KT_LETTER: u16 = 11;
+    const HOLE: u16 = KT_SPEC << 8;
+    let shift = table & 1 != 0;
+    if table & 2 != 0 {
+        return HOLE; // no AltGr layer on a US keyboard
+    }
+    let k = |t: u16, v: u16| (t << 8) | v;
+    const ROW1: &[u8; 12] = b"1234567890-=";
+    const ROW1S: &[u8; 12] = b"!@#$%^&*()_+";
+    let pick = |plain: u8, shifted: u8| k(KT_LATIN, if shift { shifted } else { plain } as u16);
+    let letter = |c: u8| k(KT_LETTER, if shift { c.to_ascii_uppercase() } else { c } as u16);
+    match keycode {
+        1 => k(KT_LATIN, 0x1b),
+        2..=13 => pick(ROW1[keycode as usize - 2], ROW1S[keycode as usize - 2]),
+        14 => k(KT_LATIN, 0x7f),
+        15 => k(KT_LATIN, 0x09),
+        16..=25 => letter(b"qwertyuiop"[keycode as usize - 16]),
+        26 => pick(b'[', b'{'),
+        27 => pick(b']', b'}'),
+        28 => k(KT_SPEC, 1), // Enter
+        29 | 97 => k(KT_SHIFT, 2), // Ctrl
+        30..=38 => letter(b"asdfghjkl"[keycode as usize - 30]),
+        39 => pick(b';', b':'),
+        40 => pick(b'\'', b'"'),
+        41 => pick(b'`', b'~'),
+        42 | 54 => k(KT_SHIFT, 0), // Shift
+        43 => pick(b'\\', b'|'),
+        44..=50 => letter(b"zxcvbnm"[keycode as usize - 44]),
+        51 => pick(b',', b'<'),
+        52 => pick(b'.', b'>'),
+        53 => pick(b'/', b'?'),
+        55 => k(KT_PAD, 12), // keypad *
+        56 => k(KT_SHIFT, 3), // Alt
+        57 => k(KT_LATIN, 0x20),
+        58 => k(KT_SPEC, 7), // Caps Lock
+        59..=68 => k(KT_FN, keycode as u16 - 59), // F1-F10
+        69 => k(KT_SPEC, 8), // Num Lock
+        70 => k(KT_SPEC, 6), // Scroll Lock
+        71 => k(KT_PAD, 7),
+        72 => k(KT_PAD, 8),
+        73 => k(KT_PAD, 9),
+        74 => k(KT_PAD, 11), // keypad -
+        75 => k(KT_PAD, 4),
+        76 => k(KT_PAD, 5),
+        77 => k(KT_PAD, 6),
+        78 => k(KT_PAD, 10), // keypad +
+        79 => k(KT_PAD, 1),
+        80 => k(KT_PAD, 2),
+        81 => k(KT_PAD, 3),
+        82 => k(KT_PAD, 0),
+        83 => k(KT_PAD, 16), // keypad .
+        86 => pick(b'<', b'>'),
+        87 => k(KT_FN, 10), // F11
+        88 => k(KT_FN, 11), // F12
+        96 => k(KT_PAD, 14), // keypad Enter
+        98 => k(KT_PAD, 13), // keypad /
+        100 => k(KT_SHIFT, 1), // AltGr
+        102 => k(KT_FN, 20), // Home (K_FIND)
+        103 => k(KT_CUR, 3),
+        104 => k(KT_FN, 24), // Page Up
+        105 => k(KT_CUR, 1),
+        106 => k(KT_CUR, 2),
+        107 => k(KT_FN, 23), // End (K_SELECT)
+        108 => k(KT_CUR, 0),
+        109 => k(KT_FN, 25), // Page Down
+        110 => k(KT_FN, 21), // Insert
+        111 => k(KT_FN, 22), // Delete (K_REMOVE)
+        119 => k(KT_FN, 29), // Pause
+        _ => HOLE,
+    }
+}
+
 pub fn intercept_scancode(scancode: u8) -> bool {
+    if raw_mode() {
+        return false; // the program gets every key, Ctrl-C included
+    }
     const CTRL: u8 = 0x1d;
     const KEY_C: u8 = 0x2e;
     const KEY_Z: u8 = 0x2c;
@@ -144,7 +294,20 @@ pub fn read(buf: &mut [u8]) -> i64 {
     });
 
     loop {
-        {
+        // Raw keyboard modes: the codes themselves, no line editing or echo.
+        if raw_mode() {
+            let mut n = 0;
+            while n < buf.len() {
+                let Some(scancode) = crate::task::keyboard::pop_scancode() else { break };
+                if let Some(b) = raw_byte(scancode) {
+                    buf[n] = b;
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                return n as i64;
+            }
+        } else {
             let mut guard = TTY.lock();
             let tty = guard.get_or_insert_with(|| Tty {
                 keyboard: Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::MapLettersToUnicode),
@@ -171,6 +334,9 @@ pub fn read(buf: &mut [u8]) -> i64 {
                 continue;
             }
         } // TTY lock released before waiting
+        if raw_mode() && m.lflag & ICANON == 0 && m.vmin == 0 && timeout.is_none() {
+            return 0;
+        }
 
         if let Some(deadline) = timeout {
             if crate::process::ticks() >= deadline {
@@ -196,6 +362,9 @@ pub fn read(buf: &mut [u8]) -> i64 {
 /// read would (echoing them, finishing lines).
 pub fn input_ready() -> bool {
     crate::task::keyboard::init_queue();
+    if raw_mode() {
+        return crate::task::keyboard::has_scancodes();
+    }
     let mut guard = TTY.lock();
     let tty = guard.get_or_insert_with(|| Tty {
         keyboard: Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::MapLettersToUnicode),

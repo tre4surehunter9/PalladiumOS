@@ -283,9 +283,12 @@ fn unmap_pages(start: u64, end: u64) {
     let mut alloc = FRAME_ALLOCATOR.lock();
     let frames = alloc.as_mut().unwrap();
     for a in pages {
+        let device = matches!(mapper.translate(VirtAddr::new(a)), TranslateResult::Mapped { flags, .. } if flags.contains(memory::DEVICE));
         if let Ok((frame, flush)) = mapper.unmap(page(a)) {
             flush.flush();
-            frames.release(frame); // freed when nothing else uses it
+            if !device {
+                frames.release(frame); // freed when nothing else uses it
+            }
         }
     }
 }
@@ -390,6 +393,13 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
     }
     let len = page_up(len);
     drain_deferred();
+    // The framebuffer (/dev/fb0): its device memory, mapped as it is.
+    if let Some((phys, size)) = crate::vfs::fd_framebuffer(fd).filter(|_| !anon) {
+        if !shared || offset.saturating_add(len) > page_up(size) {
+            return -EINVAL;
+        }
+        return map_device(addr, len, prot, flags, phys + offset);
+    }
     // The shared memory to map, if shared: a bad fd leaves nothing mapped.
     let mem = if shared && anon {
         Some((SharedMem::anonymous(), 0))
@@ -452,6 +462,42 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
             }
         }
         remember(&mut maps, Map { start, end: start + len, prot, shared: mem });
+        Ok(start)
+    })();
+    process::with_current_mm(|mm| mm.maps = maps);
+    match result {
+        Ok(start) => start as i64,
+        Err(e) => -e,
+    }
+}
+
+/// Map device memory at `phys` (the framebuffer): eagerly, uncounted.
+fn map_device(addr: u64, len: u64, prot: u64, flags: u64, phys: u64) -> i64 {
+    let fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0;
+    let f = flags_for(prot).unwrap_or(F::PRESENT) | memory::DEVICE | F::NO_CACHE | F::WRITE_THROUGH;
+    let mut maps = process::with_current_mm(|mm| core::mem::take(&mut mm.maps));
+    let result = (|| {
+        let start = if fixed {
+            if !in_user_space(addr, addr + len) {
+                return Err(ENOMEM);
+            }
+            unmap_pages(addr, addr + len);
+            forget(&mut maps, addr, addr + len);
+            addr
+        } else {
+            find_free(&maps, addr & !0xfff, len).ok_or(ENOMEM)?
+        };
+        let mut mapper = memory::mapper_for(process::current_p4());
+        let mut alloc = FRAME_ALLOCATOR.lock();
+        let frames = alloc.as_mut().unwrap();
+        for i in 0..len / 4096 {
+            let frame = PhysFrame::containing_address(x86_64::PhysAddr::new(phys + i * 4096));
+            match unsafe { mapper.map_to(page(start + i * 4096), frame, f, frames) } {
+                Ok(flush) => flush.flush(),
+                Err(_) => return Err(ENOMEM),
+            }
+        }
+        remember(&mut maps, Map { start, end: start + len, prot, shared: None });
         Ok(start)
     })();
     process::with_current_mm(|mm| mm.maps = maps);

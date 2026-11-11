@@ -202,7 +202,7 @@ impl Writer {
         for row in 1..self.height {
             self.grid[row - 1] = self.grid[row];
         }
-        if let Some(fb) = &self.fb {
+        if let Some(fb) = self.fb.as_ref().filter(|_| !GRAPHICS.load(core::sync::atomic::Ordering::Relaxed)) {
             let row_bytes = fb.stride * fb.bpp * CELL_H * fb.scale;
             let used = row_bytes * self.height;
             if used <= fb.len {
@@ -413,6 +413,9 @@ impl Writer {
     /// Draw cell (row, col) into the framebuffer (with the cursor's
     /// underline if it's there).
     fn draw(&mut self, row: usize, col: usize) {
+        if GRAPHICS.load(core::sync::atomic::Ordering::Relaxed) {
+            return; // a program draws the screen (KDSETMODE KD_GRAPHICS)
+        }
         let Some(fb) = &self.fb else { return };
         let ch = self.grid[row][col];
         let fg = PALETTE[(ch.color_code.0 & 0xf) as usize];
@@ -492,6 +495,56 @@ pub fn init_framebuffer(fb: bootloader_api::info::FrameBuffer) {
         scale: (info.width / 1280).min(info.height / 720).max(1),
     };
     x86_64::instructions::interrupts::without_interrupts(|| WRITER.lock().use_framebuffer(fb));
+}
+
+/// A program has the screen (KDSETMODE KD_GRAPHICS, an X server): the
+/// console keeps its text but doesn't draw it until text mode comes back.
+static GRAPHICS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The process that switched to graphics (text comes back when it exits).
+static GRAPHICS_OWNER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn is_graphics() -> bool {
+    GRAPHICS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// KDSETMODE: graphics (a program draws) or text (the console redraws
+/// everything it has).
+pub fn set_graphics(on: bool, owner: u64) {
+    use core::sync::atomic::Ordering;
+    let was = GRAPHICS.swap(on, Ordering::SeqCst);
+    GRAPHICS_OWNER.store(if on { owner } else { 0 }, Ordering::SeqCst);
+    if was && !on {
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            let mut w = WRITER.lock();
+            if let Some(fb) = &w.fb {
+                unsafe { core::ptr::write_bytes(fb.buf, 0, fb.len) };
+            }
+            for row in 0..w.height {
+                for col in 0..w.width {
+                    w.draw(row, col);
+                }
+            }
+        });
+    }
+}
+
+/// A process exited: if it had the screen in graphics mode, text is back
+/// (an X server that crashed mustn't leave the console dark).
+pub fn process_exited(pid: u64) {
+    use core::sync::atomic::Ordering;
+    if pid != 0 && GRAPHICS_OWNER.load(Ordering::SeqCst) == pid {
+        set_graphics(false, 0);
+        crate::tty::set_keyboard_mode(crate::tty::K_XLATE);
+    }
+}
+
+/// The framebuffer, for /dev/fb0: (kernel address, length, width, height,
+/// pixels per line, bytes per pixel, BGR?).
+pub fn framebuffer() -> Option<(u64, usize, usize, usize, usize, usize, bool)> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let w = WRITER.lock();
+        w.fb.as_ref().map(|fb| (fb.buf as u64, fb.len, fb.width, fb.height, fb.stride, fb.bpp, fb.bgr))
+    })
 }
 
 /// The console's size in cells: (rows, columns).

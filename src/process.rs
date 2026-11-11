@@ -641,6 +641,8 @@ pub fn exit_thread(code: i32) -> ! {
 
 /// exit_group(), a fatal signal, a fault: end every thread of the process.
 pub fn exit_group(reason: ExitReason) -> ! {
+    // A program that had the screen (an X server) gives it back.
+    crate::vga_buffer::process_exited(current_tgid());
     let leader_alive_elsewhere = {
         let mut table = TABLE.lock();
         let cur = current_pid();

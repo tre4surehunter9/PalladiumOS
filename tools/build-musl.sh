@@ -118,4 +118,13 @@ cat > "$PREFIX/bin/palladium-cc-dyn" <<WRAPPER
 exec "\${REALGCC:-gcc}" "\$@" -specs "$PREFIX/lib/palladium-dyn.specs"
 WRAPPER
 chmod +x "$PREFIX/bin/palladium-cc-dyn"
+# Linux's userspace headers (<linux/fb.h>, <linux/kd.h>, <asm/ioctl.h>...),
+# from this machine's linux-api-headers, as musl toolchains get them:
+# PalladiumOS speaks the same interfaces (the X server needs them).
+for d in linux asm asm-generic mtd; do
+    if [ -d "/usr/include/$d" ]; then
+        rm -rf "$PREFIX/include/$d"
+        cp -r "/usr/include/$d" "$PREFIX/include/$d"
+    fi
+done
 echo "musl $VERSION installed in $PREFIX (compiler: $PREFIX/bin/palladium-cc)"

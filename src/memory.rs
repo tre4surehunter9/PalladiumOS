@@ -518,7 +518,7 @@ pub fn free_address_space(p4: PhysFrame, frames: &mut BootInfoFrameAllocator) {
             let child = PhysFrame::containing_address(entry.addr());
             if level > 1 {
                 free_table(child, level - 1, frames);
-            } else {
+            } else if !entry.flags().contains(DEVICE) {
                 frames.release(child); // shared pages stay until their last user
             }
         }
@@ -572,6 +572,16 @@ pub const COW: PageTableFlags = PageTableFlags::BIT_9;
 /// A page of shared memory (MAP_SHARED, see mmap.rs): fork leaves it
 /// writable in both processes, pointing at the same frame.
 pub const SHARED: PageTableFlags = PageTableFlags::BIT_10;
+/// Device memory mapped into a program (/dev/fb0's framebuffer): not RAM
+/// from the frame allocator, so never freed or counted, and fork shares it
+/// as it is.
+pub const DEVICE: PageTableFlags = PageTableFlags::BIT_11;
+
+/// The physical address of a kernel virtual address (in the kernel's map).
+pub fn kernel_phys(virt: u64) -> Option<u64> {
+    use x86_64::structures::paging::mapper::Translate;
+    mapper_for(kernel_p4()).translate_addr(VirtAddr::new(virt)).map(|p| p.as_u64())
+}
 
 /// The address space for a fork: the same pages, shared. Writable pages
 /// become read-only + COW in both (the first write to one makes a private
@@ -602,6 +612,10 @@ pub fn copy_address_space(src: PhysFrame, frames: &mut BootInfoFrameAllocator) -
                 }
             } else {
                 let mut flags = entry.flags();
+                if flags.contains(DEVICE) {
+                    to[i].set_addr(entry.addr(), flags); // device memory: the same, not counted
+                    continue;
+                }
                 if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(SHARED) {
                     flags = (flags - PageTableFlags::WRITABLE) | COW;
                     entry.set_flags(flags); // the parent's copy is read-only now too

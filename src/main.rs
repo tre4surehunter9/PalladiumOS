@@ -126,6 +126,9 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         // Keys pressed before anything reads the keyboard must not be lost.
         palladiumos::task::keyboard::init_queue();
         boot_ok!("Started the keyboard");
+        if palladiumos::mouse::init() {
+            boot_ok!("Started the PS/2 mouse (/dev/input/mice)");
+        }
         match palladiumos::xhci::init() {
             Some(0) => boot_ok!("Found a USB controller (xHCI): no keyboard"),
             Some(n) => boot_ok!("Found a USB controller (xHCI): {} USB keyboard{}", n, if n == 1 { "" } else { "s" }),
