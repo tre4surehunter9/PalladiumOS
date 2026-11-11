@@ -124,6 +124,8 @@ pub const SYS_PWRITEV: u64 = 296;
 pub const SYS_PREADV2: u64 = 327;
 pub const SYS_PWRITEV2: u64 = 328;
 pub const SYS_RT_SIGTIMEDWAIT: u64 = 128;
+pub const SYS_WAITID: u64 = 247;
+pub const SYS_IO_SETUP: u64 = 206;
 pub const SYS_TIMERFD_CREATE: u64 = 283;
 pub const SYS_TIMERFD_SETTIME: u64 = 286;
 pub const SYS_TIMERFD_GETTIME: u64 = 287;
@@ -667,6 +669,10 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_IOPRIO_SET | SYS_IOPRIO_GET | SYS_READAHEAD | SYS_SYNC_FILE_RANGE => 0,
         SYS_SYNCFS => vfs::sys_sync(),
         SYS_RT_SIGTIMEDWAIT => process::sys_rt_sigtimedwait(a1, a2, a3),
+        SYS_WAITID => process::sys_waitid(a1, a2, a3, a4, a5),
+        // Linux's native async I/O (libaio): not here; callers (MariaDB's
+        // InnoDB) fall back to their own I/O threads.
+        SYS_IO_SETUP => -ENOSYS,
         // At an offset (a4; a5 is its high half on 32-bit systems). The v2
         // forms' offset -1 means the fd's position; their flags are hints.
         SYS_PREADV | SYS_PWRITEV => if (a4 as i64) < 0 { -EINVAL } else { sys_iov_at(a1, a2, a3, num == SYS_PWRITEV, Some(a4)) },

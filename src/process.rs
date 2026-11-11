@@ -1118,7 +1118,6 @@ pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64, rusage: u64) -> i64 {
     const WNOHANG: u64 = 1;
     const WUNTRACED: u64 = 2;
     const WCONTINUED: u64 = 8;
-    let pid = pid as i64 as i32 as i64;
     let status_out = if status_ptr != 0 {
         match unsafe { user_slice_mut(status_ptr, 4) } {
             Some(s) => Some(s),
@@ -1127,9 +1126,105 @@ pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64, rusage: u64) -> i64 {
     } else {
         None
     };
+    let wait = WaitFor {
+        exited: true,
+        stopped: options & WUNTRACED != 0,
+        continued: options & WCONTINUED != 0,
+        nohang: options & WNOHANG != 0,
+        nowait: false,
+    };
+    match wait_core(pid as i64 as i32 as i64, wait, rusage) {
+        Ok(Some((pid, status, _))) => {
+            if let Some(out) = status_out {
+                out.copy_from_slice(&status.to_le_bytes());
+            }
+            pid as i64
+        }
+        Ok(None) => 0,
+        Err(e) => -e,
+    }
+}
+
+/// What wait4 and waitid report: exits, stops, continues; and whether to
+/// return at once if nothing is there (WNOHANG), and to leave the child
+/// waitable (WNOWAIT).
+#[derive(Clone, Copy)]
+struct WaitFor {
+    exited: bool,
+    stopped: bool,
+    continued: bool,
+    nohang: bool,
+    nowait: bool,
+}
+
+/// waitid(idtype, id, info, options, rusage): wait4 with a siginfo (how
+/// the child changed, its pid, uid and status), and the WEXITED, WSTOPPED,
+/// WCONTINUED, WNOHANG and WNOWAIT options.
+pub fn sys_waitid(idtype: u64, id: u64, info: u64, options: u64, rusage: u64) -> i64 {
+    const WNOHANG: u64 = 1;
+    const WSTOPPED: u64 = 2;
+    const WEXITED: u64 = 4;
+    const WCONTINUED: u64 = 8;
+    const WNOWAIT: u64 = 0x0100_0000;
+    const P_ALL: u64 = 0;
+    const P_PID: u64 = 1;
+    const P_PGID: u64 = 2;
+    if options & !(WNOHANG | WSTOPPED | WEXITED | WCONTINUED | WNOWAIT | 0x6000_0000) != 0
+        || options & (WEXITED | WSTOPPED | WCONTINUED) == 0
+    {
+        return -EINVAL;
+    }
+    // As wait4's pid argument.
+    let sel = match idtype {
+        P_ALL => -1,
+        P_PID if id as i64 > 0 => id as i64,
+        P_PGID if id == 0 => 0,
+        P_PGID if id as i64 > 0 => -(id as i64),
+        _ => return -EINVAL, // (P_PIDFD: no pidfds)
+    };
+    let wait = WaitFor {
+        exited: options & WEXITED != 0,
+        stopped: options & WSTOPPED != 0,
+        continued: options & WCONTINUED != 0,
+        nohang: options & WNOHANG != 0,
+        nowait: options & WNOWAIT != 0,
+    };
+    let found = match wait_core(sel, wait, rusage) {
+        Ok(f) => f,
+        Err(e) => return -e,
+    };
+    if info != 0 {
+        let Some(out) = (unsafe { user_slice_mut(info, 128) }) else { return -EFAULT };
+        out.fill(0);
+        if let Some((pid, status, uid)) = found {
+            // si_code: CLD_EXITED 1, KILLED 2, DUMPED 3, STOPPED 5, CONTINUED 6.
+            let (code, value) = if status == 0xffff {
+                (6, SIGCONT as u32)
+            } else if status & 0xff == 0x7f {
+                (5, (status >> 8) & 0xff)
+            } else if status & 0x7f == 0 {
+                (1, (status >> 8) & 0xff)
+            } else if status & 0x80 != 0 {
+                (3, status & 0x7f)
+            } else {
+                (2, status & 0x7f)
+            };
+            out[0..4].copy_from_slice(&(SIGCHLD as u32).to_le_bytes());
+            out[8..12].copy_from_slice(&(code as u32).to_le_bytes());
+            out[16..20].copy_from_slice(&(pid as u32).to_le_bytes());
+            out[20..24].copy_from_slice(&uid.to_le_bytes());
+            out[24..28].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    0
+}
+
+/// Wait for a child matching `pid` (wait4's meaning) to change as `wait`
+/// asks: (pid, wait status, uid), or None for WNOHANG with nothing there.
+fn wait_core(pid: i64, wait: WaitFor, rusage: u64) -> Result<Option<(u64, u32, u32)>, i64> {
     loop {
-        if options & WNOHANG == 0 && signal_pending() {
-            return -EINTR;
+        if !wait.nohang && signal_pending() {
+            return Err(EINTR);
         }
         let found = {
             let mut table = TABLE.lock();
@@ -1148,7 +1243,7 @@ pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64, rusage: u64) -> i64 {
                     }
             };
             if !table.values().any(|p| matches(p)) {
-                return -ECHILD;
+                return Err(ECHILD);
             }
             // A process is done when its first thread is a zombie and no
             // other thread of it is still running.
@@ -1156,27 +1251,37 @@ pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64, rusage: u64) -> i64 {
                 matches!(p.state, State::Zombie(_))
                     && !table.values().any(|t| t.tgid == p.pid && t.pid != p.pid && !matches!(t.state, State::Zombie(_)))
             };
-            if let Some(zpid) = table.values().find(|p| matches(p) && done(p)).map(|p| p.pid) {
-                let p = table.remove(&zpid).unwrap();
-                let State::Zombie(reason) = p.state else { unreachable!() };
-                let cpu = p.cpu_ticks;
-                drop(table);
-                free_process(p);
-                if rusage != 0 {
-                    fill_rusage(rusage, cpu);
+            let zombie = if wait.exited { table.values().find(|p| matches(p) && done(p)).map(|p| p.pid) } else { None };
+            if let Some(zpid) = zombie {
+                if wait.nowait {
+                    // Reported, but left to be waited for again.
+                    let p = &table[&zpid];
+                    let State::Zombie(reason) = p.state else { unreachable!() };
+                    Some((zpid, reason.wait_status() as u32, p.cred.ruid))
+                } else {
+                    let p = table.remove(&zpid).unwrap();
+                    let State::Zombie(reason) = p.state else { unreachable!() };
+                    let (cpu, uid) = (p.cpu_ticks, p.cred.ruid);
+                    drop(table);
+                    free_process(p);
+                    if rusage != 0 {
+                        fill_rusage(rusage, cpu);
+                    }
+                    Some((zpid, reason.wait_status() as u32, uid))
                 }
-                Some((zpid, reason.wait_status() as u32))
             } else {
                 // A stop (status 0x7f) or continue (0xffff) not yet reported?
-                let wanted = |e: u32| (e & 0xff == 0x7f && options & WUNTRACED != 0) || (e == 0xffff && options & WCONTINUED != 0);
+                let wanted = |e: u32| (e & 0xff == 0x7f && wait.stopped) || (e == 0xffff && wait.continued);
                 let event = table.values().find(|p| matches(p) && p.wait_event.is_some_and(wanted)).map(|p| p.pid);
                 match event {
                     Some(epid) => {
                         let p = table.get_mut(&epid).unwrap();
-                        Some((epid, p.wait_event.take().unwrap()))
+                        let uid = p.cred.ruid;
+                        let e = if wait.nowait { p.wait_event.unwrap() } else { p.wait_event.take().unwrap() };
+                        Some((epid, e, uid))
                     }
-                    None if options & WNOHANG != 0 => return 0,
-                    None if loud_pending_locked(&table, cur) => return -EINTR,
+                    None if wait.nohang => return Ok(None),
+                    None if loud_pending_locked(&table, cur) => return Err(EINTR),
                     None => {
                         table.get_mut(&cur).unwrap().state = State::Waiting;
                         None
@@ -1185,12 +1290,7 @@ pub fn sys_wait4(pid: u64, status_ptr: u64, options: u64, rusage: u64) -> i64 {
             }
         };
         match found {
-            Some((pid, status)) => {
-                if let Some(out) = status_out {
-                    out.copy_from_slice(&status.to_le_bytes());
-                }
-                return pid as i64;
-            }
+            Some(f) => return Ok(Some(f)),
             None => schedule(),
         }
     }

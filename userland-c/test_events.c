@@ -436,6 +436,39 @@ static int remove_while_reading(const char *base)
     return 0;
 }
 
+static int waitids(void)
+{
+    siginfo_t si;
+    /* An exit: seen with WNOWAIT (still waitable), then reaped. */
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(7);
+    memset(&si, 0, sizeof si);
+    CHECK(waitid(P_PID, pid, &si, WEXITED | WNOWAIT) == 0);
+    CHECK(si.si_signo == SIGCHLD && si.si_code == CLD_EXITED && si.si_pid == pid && si.si_status == 7);
+    memset(&si, 0, sizeof si);
+    CHECK(waitid(P_ALL, 0, &si, WEXITED) == 0 && si.si_pid == pid && si.si_status == 7);
+    CHECK(waitpid(pid, NULL, 0) == -1 && errno == ECHILD);
+
+    /* WNOHANG with the child still running: 0, si_pid 0. */
+    pid = fork();
+    if (pid == 0) {
+        pause();
+        _exit(0);
+    }
+    si.si_pid = 123;
+    CHECK(waitid(P_PID, pid, &si, WEXITED | WNOHANG) == 0 && si.si_pid == 0);
+    /* Stopped, continued, killed. */
+    CHECK(kill(pid, SIGSTOP) == 0);
+    CHECK(waitid(P_PID, pid, &si, WSTOPPED) == 0 && si.si_code == CLD_STOPPED && si.si_status == SIGSTOP);
+    CHECK(kill(pid, SIGCONT) == 0);
+    CHECK(waitid(P_PID, pid, &si, WCONTINUED) == 0 && si.si_code == CLD_CONTINUED);
+    CHECK(kill(pid, SIGKILL) == 0);
+    CHECK(waitid(P_PID, pid, &si, WEXITED) == 0 && si.si_code == CLD_KILLED && si.si_status == SIGKILL);
+    CHECK(waitid(P_PID, pid, &si, WEXITED) == -1 && errno == ECHILD);
+    return 0;
+}
+
 static int timerfds(void)
 {
     uint64_t n;
@@ -495,7 +528,7 @@ static int timerfds(void)
 int main(int argc, char **argv)
 {
     int r;
-    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()) || (r = sigwaits()) || (r = remove_while_reading("/tmp")))
+    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()) || (r = sigwaits()) || (r = waitids()) || (r = remove_while_reading("/tmp")))
         return r;
     /* The big program needs a directory on a disk (argv[1]). */
     if (argc > 1 && ((r = big_program(argv[1])) || (r = remove_while_reading(argv[1]))))
