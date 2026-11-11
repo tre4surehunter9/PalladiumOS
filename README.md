@@ -28,11 +28,11 @@
 
 ## Features
 * **Linux-compatible system calls** (the x86_64 ABI): ordinary Linux programs run unchanged, static or dynamically linked (with musl's or glibc's own dynamic linker), including C programs built with an unmodified [musl](https://musl.libc.org) libc
-* **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control, `epoll` and `eventfd` event loops, and memory on demand (programs can reserve gigabytes and only use what they touch; programs bigger than the kernel's heap load piece by piece)
+* **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control, `epoll`, `eventfd`, `timerfd`, `signalfd` and `inotify`, shared memory (`MAP_SHARED`, `/dev/shm`, POSIX semaphores between processes), and memory on demand (programs can reserve gigabytes and only use what they touch; programs bigger than the kernel's heap load piece by piece)
 * **Users and permissions**: login, passwords, POSIX file permissions, setuid programs, `su`
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
 * **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink, and an **SSH server** (Dropbear): log in from your own terminal with `ssh -p 2222 root@localhost`; a web server in PalladiumOS on port 80 (Apache, `busybox httpd`) is at `http://localhost:8080`
-* **Alpine Linux**: `alpine` sets up a real Alpine root filesystem on its own disk, where `apk add` installs Alpine's packages (Python, Node.js, git, curl, vim, ...) and they run on PalladiumOS
+* **Alpine Linux**: `alpine` sets up a real Alpine root filesystem on its own disk, where `apk add` installs Alpine's packages and they run on PalladiumOS: Python (including `multiprocessing`), Node.js, git, curl, vim, htop, and a web stack: Apache with PHP, SQLite and MariaDB
 * **Terminals**: pseudo-terminals (`/dev/ptmx`, `/dev/pts/N`), sessions and controlling terminals, job control
 * **A userland**: a POSIX-style shell, about 50 of PalladiumOS's own tools, and ported software: BusyBox, Lua, dash, MicroPython, fastfetch and TinyCC (a C compiler that runs inside PalladiumOS)
 * **A Linux-style boot log** with `[  OK  ]` lines, and `dmesg`
@@ -125,6 +125,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 23 / 270 | select, pselect6 | yes (on top of poll) |
 | 24 | sched_yield | yes |
 | 25 | mremap | answers like Linux (`ENOMEM`, or `EFAULT` outside memory); libc then allocates and copies |
+| 26 | msync | writes shared file mappings back to their files |
 | 32 | dup | yes |
 | 33 | dup2 | yes |
 | 34 | pause | yes |
@@ -158,8 +159,10 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 90 | chmod | yes (also fchmod, fchmodat) |
 | 92/93/94/260 | chown, fchown, lchown, fchownat | yes |
 | 95 | umask | yes |
+| 96 | gettimeofday | yes |
 | 97 / 302 | getrlimit, prlimit64 | reports the limits (setting is ignored) |
 | 99 | sysinfo | uptime, memory, number of processes |
+| 100 | times | the process's CPU time, ticks since boot |
 | 102/104/107/108 | getuid, getgid, geteuid, getegid | yes |
 | 105/106/113/114/117/119 | setuid, setgid, setreuid, setregid, setresuid, setresgid | yes (POSIX rules) |
 | 109 | setpgid | yes |
@@ -171,18 +174,29 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 121 | getpgid | yes |
 | 125 | capget | no capabilities (root is uid 0) |
 | 127 | rt_sigpending | yes |
+| 128 | rt_sigtimedwait | yes (sigwait; a signal blocked where it was sent goes to a thread waiting for it) |
 | 130 | rt_sigsuspend | yes |
 | 131 | sigaltstack | remembered (handlers run on the normal stack) |
+| 132 / 235 | utime, utimes | the modification time |
+| 135 | personality | Linux only |
 | 137 | statfs | yes (also fstatfs) |
+| 140 / 141 | getpriority, setpriority | every process has nice 0 |
+| 143-148 | sched_getparam, sched_setscheduler, sched_getscheduler, sched_get_priority_max/min, sched_rr_get_interval | normal scheduling (`SCHED_OTHER`, priority 0); real-time policies accepted from root |
+| 149-152 / 325 | mlock, munlock, mlockall, munlockall, mlock2 | accepted (no swap: memory never leaves RAM) |
 | 157 | prctl | `PR_SET_NAME`/`PR_GET_NAME`; the precautionary options are accepted |
 | 158 | arch_prctl | FS/GS base (thread-local storage) |
 | 161 | chroot | yes (root only; paths, symlinks, `..` and the program interpreter stay inside) |
 | 162 | sync | yes |
 | 165 / 166 | mount, umount2 | `proc`, `devtmpfs` and `tmpfs` (root only; disks are mounted at boot) |
 | 169 | reboot | yes (restart, power off, halt; syncs first) |
+| 170 | sethostname | root; `/etc/hostname` is read at boot |
 | 186 | gettid | yes (`getpid` is the process, `gettid` the thread) |
+| 187 | readahead | accepted (a hint) |
 | 200/234 | tkill, tgkill | yes |
+| 201 | time | yes |
 | 202 | futex | `WAIT`, `WAKE` (and `_BITSET`), `REQUEUE`, `CMP_REQUEUE`, timeouts |
+| 203 | sched_setaffinity | the one CPU (the mask must include CPU 0) |
+| 206 | io_setup | not supported (Linux native AIO: callers fall back) |
 | 213 / 291 | epoll_create, epoll_create1 | yes |
 | 217 | getdents64 | yes |
 | 218 | set_tid_address | yes |
@@ -191,15 +205,30 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 231 | exit_group | yes |
 | 232 / 281 / 441 | epoll_wait, epoll_pwait, epoll_pwait2 | level-triggered (edge-triggered requests too), `EPOLLONESHOT`, timeouts |
 | 233 | epoll_ctl | `ADD`, `MOD`, `DEL` (regular files refused, as on Linux) |
+| 247 | waitid | `P_ALL`, `P_PID`, `P_PGID`; `WEXITED`, `WSTOPPED`, `WCONTINUED`, `WNOHANG`, `WNOWAIT` |
+| 251 / 252 | ioprio_set, ioprio_get | accepted (no I/O priorities) |
+| 253 / 254 / 255 / 294 | inotify_init, inotify_add_watch, inotify_rm_watch, inotify_init1 | create, modify, close, delete, move (with cookies), attrib; watches on files and directories |
 | 257 | openat | yes |
 | 258-263 | mkdirat, newfstatat, unlinkat | yes |
+| 275 | splice | between a pipe and another fd |
+| 277 | sync_file_range | accepted |
 | 280 | utimensat | modification time |
+| 282 / 289 | signalfd, signalfd4 | yes (readable in poll/epoll) |
+| 283 / 286 / 287 | timerfd_create, timerfd_settime, timerfd_gettime | one-shot and repeating, relative or absolute (55 ms resolution) |
 | 284 / 290 | eventfd, eventfd2 | yes (`EFD_SEMAPHORE`, `EFD_NONBLOCK`) |
+| 285 | fallocate | growing a file |
 | 292 | dup3 | yes (`O_CLOEXEC`) |
 | 293 | pipe2 | yes (`O_CLOEXEC`, `O_NONBLOCK`) |
+| 295 / 296 / 327 / 328 | preadv, pwritev, preadv2, pwritev2 | yes |
+| 306 | syncfs | a full sync |
+| 309 | getcpu | CPU 0 |
 | 318 | getrandom | yes (RDRAND when available) |
+| 319 | memfd_create | an anonymous file in memory (up to 4 MiB) |
 | 324 | membarrier | yes (one CPU: every command is already satisfied) |
+| 326 | copy_file_range | yes |
 | 332 | statx | yes |
+| 436 | close_range | closing, or `CLOSE_RANGE_CLOEXEC` |
+| 452 | fchmodat2 | `AT_SYMLINK_NOFOLLOW`, `AT_EMPTY_PATH` |
 
 ## Networking
 PalladiumOS has TCP/IP: a driver for the RTL8139 network card (what `cargo run` gives QEMU, on its user network), the [smoltcp](https://github.com/smoltcp-rs/smoltcp) stack, and BSD sockets.
