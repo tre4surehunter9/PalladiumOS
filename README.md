@@ -16,7 +16,7 @@
 > * Guiding for implementing stuff
 > * Ring 3/usermode stuff
 >
-> For 0.5.0, almost all of the new code was written with AI (Claude Code), including:
+> From 0.5.0 on (0.6.x too), almost all of the new code was written with AI (Claude Code), including:
 > * The Linux-compatible system calls and the program loader
 > * The userland: the Rust programs, `/bin/sh` and its scripting
 > * Processes, the scheduler, `fork`/`exec`, copy-on-write, threads and signals
@@ -25,17 +25,19 @@
 > * Running C programs with musl, and the ports (BusyBox, Lua, dash, MicroPython, fastfetch, TinyCC)
 > * Networking: the network card driver, TCP/IP and sockets
 > * The higher-half kernel, the boot log, the tests and most of this README
+> * UEFI booting and the framebuffer console, the AHCI and USB keyboard drivers, running Alpine Linux, and the X Window System (the kernel's side, and the ports: TinyX, rxvt, evilwm, fvwm95)
 
 ## Features
 * **Linux-compatible system calls** (the x86_64 ABI): ordinary Linux programs run unchanged, static or dynamically linked (with musl's or glibc's own dynamic linker), including C programs built with an unmodified [musl](https://musl.libc.org) libc
 * **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control, `epoll`, `eventfd`, `timerfd`, `signalfd` and `inotify`, shared memory (`MAP_SHARED`, `/dev/shm`, POSIX semaphores between processes), and memory on demand (programs can reserve gigabytes and only use what they touch; programs bigger than the kernel's heap load piece by piece)
+* **Hardware**: boots with BIOS or UEFI, a framebuffer console (1280x720 in QEMU), IDE and AHCI (SATA) disks, PS/2 and USB (xHCI) keyboards, a PS/2 mouse, the RTL8139 network card
 * **Users and permissions**: login, passwords, POSIX file permissions, setuid programs, `su`
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
 * **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink, and an **SSH server** (Dropbear): log in from your own terminal with `ssh -p 2222 root@localhost`; a web server in PalladiumOS on port 80 (Apache, `busybox httpd`) is at `http://localhost:8080`
 * **Alpine Linux**: `alpine` sets up a real Alpine root filesystem on its own disk, where `apk add` installs Alpine's packages and they run on PalladiumOS: Python (including `multiprocessing`), Node.js, git, curl, vim, htop, and a web stack: Apache with PHP, SQLite and MariaDB
 * **The X Window System**, native: an X server (TinyX's `Xfbdev`) on the framebuffer, with the keyboard and a PS/2 mouse, window managers (fvwm95, with a taskbar and a Start menu, and evilwm) and terminals (rxvt). See [X](#the-x-window-system)
 * **Terminals**: pseudo-terminals (`/dev/ptmx`, `/dev/pts/N`), sessions and controlling terminals, job control
-* **A userland**: a POSIX-style shell, about 50 of PalladiumOS's own tools, and ported software: BusyBox, Lua, dash, MicroPython, fastfetch and TinyCC (a C compiler that runs inside PalladiumOS)
+* **A userland**: a POSIX-style shell, about 55 of PalladiumOS's own tools, and ported software: BusyBox, Lua, dash, MicroPython, fastfetch, TinyCC (a C compiler that runs inside PalladiumOS), Dropbear SSH, and the X programs (TinyX, rxvt, evilwm, fvwm95)
 * **A Linux-style boot log** with `[  OK  ]` lines, and `dmesg`
 
 ## Programs
@@ -58,6 +60,7 @@ PalladiumOS's own tools, written in Rust, live in `/bin` and run from the shell 
 * sleep - waits for a number of seconds (`sleep 0.5` works)
 * kill - sends a signal (`kill -9 PID`, `kill -l`)
 * uptime - time since boot
+* dmesg - the boot log again (`-n` without colors)
 * date - the date and time (`date +%s` for seconds since 1970)
 * mv / cp - move and copy files (`cp -r` for directories; `mv` works across filesystems)
 * ln - hard links, or symbolic links with `-s`; readlink shows where a link points
@@ -113,12 +116,12 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 6 | lstat | yes |
 | 7 / 271 | poll, ppoll | yes (pipes, sockets, terminals; files are always ready) |
 | 8 | lseek | yes |
-| 9 / 10 / 11 | mmap, mprotect, munmap | anonymous (memory comes when a page is first used, so reserving gigabytes is free), private file mappings, and shared mappings (`MAP_SHARED`: anonymous memory shared with forked children, and files such as `/dev/shm`, written back on `msync` and when unmapped) |
+| 9 / 10 / 11 | mmap, mprotect, munmap | anonymous (memory comes when a page is first used, so reserving gigabytes is free), private file mappings, shared mappings (`MAP_SHARED`: anonymous memory shared with forked children, and files such as `/dev/shm`, written back on `msync` and when unmapped), and the screen itself (`/dev/fb0`) |
 | 12 | brk | yes (the heap behind `userlib`'s allocator) |
 | 13 | rt_sigaction | yes (handlers, `SA_RESTART`, `SA_NODEFER`, `SA_RESETHAND`, `SA_NOCLDSTOP`, `sa_mask`) |
 | 14 | rt_sigprocmask | yes |
 | 15 | rt_sigreturn | yes |
-| 16 | ioctl | terminals: `TCGETS`/`TCSETS` (raw and cooked mode), `TIOCGWINSZ`/`TIOCSWINSZ`, `TIOCGPGRP`/`TIOCSPGRP`, `TIOCSCTTY`/`TIOCNOTTY`, `TIOCGSID`, `TCFLSH`, and for pseudo-terminals `TIOCGPTN`/`TIOCSPTLCK`; pipes and sockets: `FIONBIO`, `FIONREAD`; sockets: the interface queries (`SIOCGIFNAME`, `SIOCGIFADDR`...) |
+| 16 | ioctl | terminals: `TCGETS`/`TCSETS` (raw and cooked mode), `TIOCGWINSZ`/`TIOCSWINSZ`, `TIOCGPGRP`/`TIOCSPGRP`, `TIOCSCTTY`/`TIOCNOTTY`, `TIOCGSID`, `TCFLSH`, and for pseudo-terminals `TIOCGPTN`/`TIOCSPTLCK`; the console's virtual terminal and keyboard ioctls (`VT_GETSTATE`, `VT_OPENQRY`, `VT_SETMODE`, `VT_ACTIVATE`..., `KDSETMODE` for graphics mode, `KDSKBMODE` for raw keycodes, `KDGKBENT` for the keymap, the LEDs and the bell); the framebuffer `/dev/fb0` (`FBIOGET_VSCREENINFO`, `FBIOGET_FSCREENINFO`, `FBIOPUT_VSCREENINFO`, `FBIOGETCMAP`/`FBIOPUTCMAP`, `FBIOPAN_DISPLAY`, `FBIOBLANK`); pipes and sockets: `FIONBIO`, `FIONREAD`; sockets: the interface queries (`SIOCGIFNAME`, `SIOCGIFADDR`...) |
 | 17 / 18 | pread64, pwrite64 | yes |
 | 19 / 20 | readv, writev | yes |
 | 21 | access | yes |
@@ -144,7 +147,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 61 | wait4 | yes (`WNOHANG`, `WUNTRACED`, `WCONTINUED`, process groups, rusage) |
 | 62 | kill | yes (pid, process group, or -1 for all; `EPERM` for other users' processes) |
 | 63 | uname | yes |
-| 72 | fcntl | `F_DUPFD`(`_CLOEXEC`), `F_GETFD`/`F_SETFD` (close-on-exec), `F_GETFL`/`F_SETFL` (`O_NONBLOCK`), record locks (`F_SETLK` & co.: always granted) |
+| 72 | fcntl | `F_DUPFD`(`_CLOEXEC`), `F_GETFD`/`F_SETFD` (close-on-exec), `F_GETFL`/`F_SETFL` (`O_NONBLOCK`, `O_ASYNC`), `F_SETOWN`/`F_GETOWN` (who gets `SIGIO` when keyboard or mouse input arrives), record locks (`F_SETLK` & co.: always granted) |
 | 73 | flock | always granted (one user's programs on one CPU: nobody to wait for) |
 | 76 / 77 | truncate, ftruncate | yes |
 | 79 | getcwd | yes |
@@ -237,7 +240,7 @@ PalladiumOS has TCP/IP: a driver for the RTL8139 network card (what `cargo run` 
 * Sockets: `AF_INET` TCP, UDP and raw IP: `socket`, `bind`, `listen`, `accept`/`accept4`, `connect`, `send`/`recv`(`to`/`from`/`msg`), `shutdown`, `getsockname`/`getpeername`, `setsockopt`/`getsockopt` (`SO_ERROR`), `poll`, non-blocking mode (`SOCK_NONBLOCK`, `O_NONBLOCK`, `FIONBIO`, `MSG_DONTWAIT`), `EPIPE`/`SIGPIPE`. Closing with unread data resets the connection, as on Linux.
 * Raw sockets (`SOCK_RAW`, root only, as Linux needs `CAP_NET_RAW`) give packets with their IPv4 header; sent data gets a header from the kernel unless `IP_HDRINCL` is set (or the protocol is `IPPROTO_RAW`). PalladiumOS answers pings itself.
 * So BusyBox's `wget`, `nslookup`, `nc`, `telnet`, `httpd` and `ping` (as root), MicroPython's `socket`, and C programs with musl's resolver work: `wget http://example.com/` downloads a page, `ping example.com` gets answers, and the host is reachable at 10.0.2.2.
-* Unix-domain sockets (`AF_UNIX`), for programs on the same machine: stream and datagram, `socketpair`, names that are paths (`bind` makes the file; `connect` needs write permission on it) or abstract (`sun_path` starting with a NUL), `SO_PEERCRED`, non-blocking mode and `poll`, and passing file descriptors to another process (`SCM_RIGHTS`, arriving with the data they were sent with). Not yet: socket files show up as plain files in `ls`.
+* Unix-domain sockets (`AF_UNIX`), for programs on the same machine: stream and datagram, `socketpair`, names that are paths (`bind` makes the file; `connect` needs write permission on it) or abstract (`sun_path` starting with a NUL), `SO_PEERCRED`, non-blocking mode and `poll`, and passing file descriptors to another process (`SCM_RIGHTS`, arriving with the data they were sent with). A bound name is a socket file (`ls -l` shows `s`, `test -S` finds it; `open` on it fails with `ENXIO`, as on Linux).
 * Netlink (`AF_NETLINK`, read-only): programs can list the interfaces, their addresses and the routes the way Linux answers, so `getifaddrs()`, BusyBox's `ip addr` / `ip link` / `ip route` and fastfetch's Local IP work. The interface `ioctl`s (`SIOCGIFNAME`, `SIOCGIFINDEX`, `SIOCGIFADDR`, `SIOCGIFMTU`, `SIOCGIFHWADDR`...) work too. Changing settings this way isn't supported.
 * Not yet: IPv6, more than one card type.
 
@@ -261,7 +264,7 @@ Dynamically linked programs work as on Linux: the kernel loads the program and t
 * Test: `test_dyn` (a dynamically linked program and `libgreet.so`, from `userland-c/dynamic/`).
 
 ### Ported Software
-Real-world programs are built from their original source by scripts in `tools/ports/` (after `tools/build-musl.sh`). `tools/build-all.sh` builds musl (if needed) and every port that's missing or out of date (`tools/build-all.sh tcc` rebuilds just that one, `--rebuild` everything, `--run` then boots with `cargo run`). Each downloads a pinned, checksum-verified release and installs into `target/ports/bin`, which goes into `/bin`:
+Real-world programs are built from their original source by scripts in `tools/ports/` (after `tools/build-musl.sh`). `tools/build-all.sh` builds musl (if needed) and every port that's missing or out of date (`tools/build-all.sh tcc` rebuilds just that one, `--rebuild` everything, `--run` then boots with `cargo run`). Each downloads a pinned, checksum-verified release and installs into `target/ports/bin`, which goes into `/bin` (big programs and their files, like fvwm95's, go on the system disk, `target/sysroot`, which is `/usr`):
 
 * `tools/ports/lua.sh`: Lua 5.4.7 (`lua` and `luac`). The REPL, scripts (also as `#!/bin/lua`), `io`, `os.execute`, `io.popen` and `os.clock` work.
 * `tools/ports/dash.sh`: dash 0.5.12, the Debian Almquist shell, a full POSIX shell (here-documents, `getopts`, `trap`, job control with Ctrl-Z/`fg`/`bg`). Run `dash`, or `dash script.sh`.
@@ -293,12 +296,22 @@ PalladiumOS boots into `login`. A fresh disk has two accounts, `root` and `user`
 * Only the owner may `chmod` a file; only root may `chown` it to someone else. `access()` checks with the real IDs.
 * Setuid/setgid programs run as the file's owner/group (`su` and `passwd` are setuid root); the bits are ignored on `#!` scripts.
 * Accounts live in `/etc/passwd`, `/etc/group` and `/etc/shadow` (mode 600). Passwords are hashed with SHA-256 crypt (`$5$salt$hash`), the standard format Linux and libc's `crypt()` use, so C programs like Dropbear can check them. Hashes in the format PalladiumOS 0.5.0 and earlier wrote (`$sha256$...`) still work; setting the password again converts them.
-* Tools: `login`, `su [-] [user] [-c cmd]`, `passwd [-d] [user]`, `whoami`, `id`, `groups`, `useradd [-u uid] [-G groups] name`, `userdel [-r] name`, `chown user[:group]`, `chgrp`. `ls -l` shows owners, and the prompt shows `user@palladium:~ $` (`#` for root).
+* Tools: `login`, `su [-] [user] [-c cmd]`, `passwd [-d] [user]`, `whoami`, `id`, `groups`, `useradd [-u uid] [-G groups] name`, `userdel [-r] name`, `chown user[:group]`, `chgrp`. `ls -l` shows owners, and the prompt shows `user@palladium:~ $` (`#` for root; the name is the hostname, from `/etc/hostname`).
 
 ## Files, Pipes and Signals
 Open files work like POSIX: an fd refers to a shared open file description, so after `fork` or `dup` both fds share one file offset. Pipes hold 16 KiB; readers wait for data and get end-of-file when every writer has closed, writers wait for room and get SIGPIPE/`EPIPE` when no reader is left. With `O_NONBLOCK` (`pipe2`, `fcntl` or `FIONBIO`) they return `EAGAIN` instead of waiting. `O_CLOEXEC` fds are closed by `execve`.
 
+Signals work as in POSIX:
+* Handlers (`sigaction`), with the Linux x86_64 signal frame and `rt_sigreturn`, so a C library's handlers work unchanged. A handler can interrupt a program in the middle of a computation (the timer interrupt saves every register), not only at syscalls.
+* Signal masks (`sigprocmask`, `sigpending`, `sigsuspend`), `pause`, `alarm` and `setitimer`, `SIGCHLD`.
+* Blocking syscalls interrupted by a handler fail with `EINTR`, or restart with `SA_RESTART`. Ignored and stop/continue signals never interrupt them: a `sleep 10` stopped and continued still sleeps 10 s.
+* Job control: SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU stop a process, SIGCONT continues it, and `wait4` reports both. Ctrl-C sends SIGINT, Ctrl-Z SIGTSTP and Ctrl-\ SIGQUIT to the foreground process group. As POSIX says, Ctrl-Z doesn't stop orphaned process groups (like programs the kernel started), which nobody could continue.
+* `execve` resets handlers to the default (ignored signals and the mask are kept).
+* Not yet: `SA_SIGINFO` details (the siginfo has only the signal number), alternate signal stacks (`sigaltstack` is remembered, but handlers run on the normal stack), handlers for faults (a segfault always ends the program).
+
 ## Terminals and Sessions
+The console understands the usual ANSI escape sequences (cursor movement, absolute row and column, clearing, inserting and deleting characters and lines, scrolling, colors and reverse video), so full-screen programs like `edit`, BusyBox's `vi` and Alpine's `nano` work.
+
 Besides the console, programs can make terminals of their own: **pseudo-terminals**. Opening `/dev/ptmx` gives the *master* end (the program playing the terminal, like an SSH server), and `/dev/pts/N` is the terminal programs run on (musl's `openpty`, `posix_openpt`, `grantpt`, `unlockpt` and `ptsname` work). Between them is a line discipline, as on Linux:
 * Typed input is echoed and edited a line at a time (Backspace, Ctrl-U, Ctrl-W; Ctrl-D is end-of-file), or handed over at once in raw mode (`VMIN`/`VTIME`). Ctrl-C, Ctrl-Z and Ctrl-\\ send SIGINT, SIGTSTP and SIGQUIT to the terminal's foreground process group. Output gets `\r\n` line ends.
 * The window size (`TIOCSWINSZ`) sends SIGWINCH to the foreground group.
@@ -320,18 +333,9 @@ ssh -p 2222 root@localhost
 
 You get a PalladiumOS shell in your own terminal, with its scrolling, copy and paste and window size. Keys work too: put your public key in `~/.ssh/authorized_keys` (mode 600, in a directory of mode 700). `dbclient` and `scp` connect to other machines from inside PalladiumOS.
 
-Signals work as in POSIX:
-* Handlers (`sigaction`), with the Linux x86_64 signal frame and `rt_sigreturn`, so a C library's handlers work unchanged. A handler can interrupt a program in the middle of a computation (the timer interrupt saves every register), not only at syscalls.
-* Signal masks (`sigprocmask`, `sigpending`, `sigsuspend`), `pause`, `alarm` and `setitimer`, `SIGCHLD`.
-* Blocking syscalls interrupted by a handler fail with `EINTR`, or restart with `SA_RESTART`. Ignored and stop/continue signals never interrupt them: a `sleep 10` stopped and continued still sleeps 10 s.
-* Job control: SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU stop a process, SIGCONT continues it, and `wait4` reports both. Ctrl-C sends SIGINT, Ctrl-Z SIGTSTP and Ctrl-\ SIGQUIT to the foreground process group. As POSIX says, Ctrl-Z doesn't stop orphaned process groups (like programs the kernel started), which nobody could continue.
-* `execve` resets handlers to the default (ignored signals and the mask are kept).
-* Not yet: `SA_SIGINFO` details (the siginfo has only the signal number), `sigaltstack`, handlers for faults (a segfault always ends the program).
-The console understands the usual ANSI escape sequences (cursor movement, absolute row and column, clearing, inserting and deleting characters and lines, scrolling, colors and reverse video), so full-screen programs like `edit`, BusyBox's `vi` and Alpine's `nano` work.
-
-Programs live in `/bin` as ordinary files, installed at boot.
-
 ## The X Window System
+![fvwm95 on PalladiumOS](screenshots/fvwm95-desktop.png)
+
 PalladiumOS runs an X server natively, no Alpine needed: `Xfbdev` (TinyX, the small "kdrive" X server TinyCore Linux uses) draws on the framebuffer (`/dev/fb0`), takes the keyboard from the console and the mouse from `/dev/psaux`. From the console:
 
 ```sh
@@ -345,7 +349,7 @@ startx evilwm       # or the X server and the programs you name
 * rxvt runs the PalladiumOS shell. Its programs work as anywhere else (`rxvt -e busybox top` runs one in a window of its own).
 * **Ctrl+Alt+Backspace** stops the X server and gives the console back. X's messages are in `/tmp/Xfbdev.log`.
 
-What the kernel provides for it: `/dev/fb0` (the Linux framebuffer ioctls, and `mmap` of the screen itself), the console's VT and keyboard ioctls (graphics mode, medium-raw keycodes, the keymap), a PS/2 mouse (`/dev/input/mice`, `/dev/psaux`, with the IntelliMouse wheel protocol), `SIGIO` on input, and Unix-domain sockets for X's clients. The fonts are libXfont's two built-in ones (`fixed` and `cursor`). In QEMU, use the UEFI image with `-vga none -device VGA,edid=on,xres=1280,yres=720` for a 720p screen.
+What the kernel provides for it: `/dev/fb0` (the Linux framebuffer ioctls, and `mmap` of the screen itself), the console's VT and keyboard ioctls (graphics mode, medium-raw keycodes, the keymap), a PS/2 mouse (`/dev/input/mice`, `/dev/psaux`, with the IntelliMouse wheel protocol), `SIGIO` on input, and Unix-domain sockets for X's clients. The fonts are libXfont's two built-in ones (`fixed` and `cursor`). `cargo run` gives the screen 1280x720; with the release images, add `-vga none -device VGA,edid=on,xres=1280,yres=720` to QEMU. X needs QEMU's window: click into it for the mouse, and Ctrl+Alt+G lets the mouse go again.
 
 ## Alpine Linux
 PalladiumOS can run [Alpine Linux](https://alpinelinux.org)'s userland, its package manager and its packages, unchanged: Alpine builds everything against musl, dynamically linked, which is what PalladiumOS runs.
@@ -363,7 +367,7 @@ How it works: `cargo run` attaches a third disk, `target/alpine.img` (1 GiB, spa
 
 ## Running the Tests
 `cargo test` boots each test kernel in QEMU (no window) and reports results over serial.
-* `tests/usermode.rs` - ring 3 programs, syscalls, exit statuses and fault handling
+* `tests/usermode.rs` - ring 3 programs, syscalls, exit statuses and fault handling, and the C test programs in `userland-c/` (libc, threads, events, shared memory, sockets, pseudo-terminals, the framebuffer...)
 * `tests/filesystem.rs` - the filesystem and shell commands
 * `tests/ext2.rs` - the ext2 driver, the VFS, `/dev`, the ATA disk driver and the clock
 * `tests/ahci.rs` - the AHCI (SATA) disk driver, on QEMU's q35 machine
@@ -379,12 +383,13 @@ The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh
 |------|------------|---|
 | `/` | ext2 on the disk | saved; falls back to memory if there's no disk |
 | `/bin` | memory | the bundled programs, refreshed every boot |
-| `/usr` | ext2 on the system disk, read-only | BusyBox's links, musl's headers and libraries (for tcc), rebuilt every build as `target/usr.img` |
+| `/usr` | ext2 on the system disk, read-only | BusyBox's links, musl's headers and libraries (for tcc), the shared libraries, fvwm95 and its files, rebuilt every build as `target/usr.img` |
+| `/alpine` | ext2 on the Alpine disk | Alpine Linux, once `alpine` has set it up (`target/alpine.img`) |
 | `/tmp` | memory | cleared on reboot |
-| `/dev` | devfs | `null`, `zero`, `random`, `urandom`, `tty`, `console`, `ptmx`, `pts/N` |
+| `/dev` | devfs | `null`, `zero`, `random`, `urandom`, `tty`, `console`, `tty0`/`tty1` (the console), `ptmx`, `pts/N`, `fb0` (the screen), `input/mice` and `psaux` (the mouse), `shm/` |
 | `/proc` | procfs | live process and system information (below) |
 
-**Keyboards**: PS/2, and USB keyboards on an xHCI (USB 3) controller, the USB controller of PCs since about 2012. The kernel sets the controller up, finds keyboards on its ports, and turns their key reports into the same scancodes a PS/2 keyboard sends (with key repeat, which USB keyboards leave to the computer). `cargo run` gives QEMU a USB keyboard, so typing in the window goes through USB.
+**Keyboards**: PS/2, and USB keyboards on an xHCI (USB 3) controller, the USB controller of PCs since about 2012. The kernel sets the controller up, finds keyboards on its ports, and turns their key reports into the same scancodes a PS/2 keyboard sends (with key repeat, which USB keyboards leave to the computer). `cargo run` gives QEMU a USB keyboard, so typing in the window goes through USB. **Mouse**: a PS/2 mouse (IRQ 12), read from `/dev/input/mice` or `/dev/psaux` with the PS/2 mouse protocol (and the IntelliMouse one, with the wheel), as on Linux.
 
 Disks work on IDE (QEMU's default machine; the kernel talks ATA through I/O ports) and on **AHCI**, the SATA controller standard of modern PCs (the kernel finds the controller on PCI and moves sectors by DMA). Disk N is QEMU's `-drive ...,index=N`: the IDE position N, or SATA port N. Try it with `cargo run -- -machine q35`, where every disk is on AHCI.
 
@@ -392,7 +397,7 @@ Disks work on IDE (QEMU's default machine; the kernel talks ATA through I/O port
 
 The kernel has a small VFS layer: every filesystem implements one interface, and paths are resolved through the mount table. The ext2 driver reads and writes files (including indirect blocks), creates and removes files and directories, and frees a file deleted while open only when it's closed. Linux tools can check and read the disk: `e2fsck -f target/disk.img`, `debugfs -R "ls -l /" target/disk.img`. Run `sync` (or `poweroff`/`reboot`, which sync first) before closing QEMU.
 
-`/proc` works like Linux's: `/proc/PID/` has `status`, `stat`, `cmdline`, and symlinks `cwd`, `exe` and `fd/N` (what each open file is: a path, `/dev/tty` or `pipe:[...]`); `/proc/self` is the reading process. System files: `meminfo`, `uptime`, `loadavg`, `mounts`, `version`, `cpuinfo`. The contents are generated when read, so they're always current.
+`/proc` works like Linux's: `/proc/PID/` has `status`, `stat`, `statm`, `cmdline`, `task/` (its threads), and symlinks `cwd`, `exe` and `fd/N` (what each open file is: a path, `/dev/tty` or `pipe:[...]`); `/proc/self` is the reading process. System files: `stat`, `meminfo`, `uptime`, `loadavg`, `mounts`, `version`, `cpuinfo`, `kmsg`. The contents are generated when read, so they're always current.
 
 The date comes from the PC's real-time clock, so file times and `date` are real.
 
@@ -403,11 +408,12 @@ The kernel reports each boot step like Linux with systemd: timestamped facts (`[
 You need Rust (the nightly toolchain in `rust-toolchain.toml` is picked automatically, with `rust-src` and `llvm-tools-preview`), QEMU, and `mke2fs` (e2fsprogs, for the disk images). Then:
 
 ```sh
-cargo run                  # build and boot in QEMU, with a disk and a network card (SSH: port 2222)
+cargo run                  # build and boot in QEMU, with disks and a network card (SSH: port 2222, web: 8080)
+cargo run --release        # the same with an optimized kernel (much faster)
 tools/build-all.sh         # optional: musl and the ported software (see above)
 ```
 
-`cargo build` builds the kernel. PalladiumOS boots with the [bootloader](https://github.com/rust-osdev/bootloader) crate (0.11): cargo runs kernels through `tools/runner` (built by `build.rs`), which turns the kernel into a bootable BIOS disk image and starts QEMU, for `cargo run` and for each test kernel of `cargo test`. To make an image yourself: `target/runner/release/palladium-runner image KERNEL OUT.img` (it runs on its own: `qemu-system-x86_64 -drive format=raw,file=OUT.img`).
+`cargo build` builds the kernel. PalladiumOS boots with the [bootloader](https://github.com/rust-osdev/bootloader) crate (0.11): cargo runs kernels through `tools/runner` (built by `build.rs`), which turns the kernel into a bootable disk image (UEFI or BIOS, below) and starts QEMU (with 1 GiB of memory), for `cargo run` and for each test kernel of `cargo test`. To make an image yourself: `target/runner/release/palladium-runner image KERNEL OUT.img` (it runs on its own: `qemu-system-x86_64 -drive format=raw,file=OUT.img`).
 
 `cargo run` boots with UEFI when the OVMF firmware is installed (Arch: `edk2-ovmf`, Debian/Ubuntu: `ovmf`; or set `OVMF` to the firmware file), at 1280x720 (142x45 characters, through the screen's EDID; change `xres`/`yres` in `tools/runner` for another size); without OVMF, or with `cargo run -- --bios`, it boots with BIOS, also at 1280x720. It makes a UEFI disk image (GPT with an EFI system partition); `palladium-runner image KERNEL OUT.img --uefi` makes one to keep. `cargo test` boots with BIOS (`PALLADIUM_UEFI=1 cargo test` for UEFI). The console uses whatever screen the firmware offers, scaling the font up on very big ones (2x at 2560x1600).
 
@@ -426,7 +432,7 @@ After you log in, you get `/bin/sh`, a POSIX-style shell that runs in userland a
 * Options: `sh -e` / `set -e` (stop at the first failing command), `sh -x` / `set -x` (print commands as they run)
 * Job control: Ctrl-Z stops the running command; `jobs` lists jobs, `fg [%N]` and `bg [%N]` continue them
 * Traps: `trap 'commands' INT TERM ...`, `trap '' SIG` (ignore), `trap - SIG` (default), `trap '...' EXIT`
-* `help` lists topics (files, text, processes, system, users, programming, busybox, builtins, syntax, keys); `help TOPIC` shows one, `help NAME` describes a command
+* `help` lists topics (files, text, processes, system, users, network, graphics, programming, busybox, builtins, syntax, keys); `help TOPIC` shows one, `help NAME` describes a command
 * Builtins: `cd`, `pwd`, `exit`, `export`, `unset`, `set`, `wait`, `jobs`, `fg`, `bg`, `trap`, `kill` (understands `%1`), `.`, `source`, `help`, `true`, `false`, and `run`/`script` like the kernel shell
 * Keys: Up/Down for history, Left/Right/Home/End to edit the line, Tab completes commands and file names, Ctrl-C interrupts the running program (or clears the line), Ctrl-Z stops it, Ctrl-D exits, Ctrl-L clears the screen
 
