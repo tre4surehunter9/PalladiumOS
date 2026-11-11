@@ -44,6 +44,8 @@ IconPath   /usr/lib/X11/mini-icons/
 
 Style "*"      TitleIcon mini-x2.xpm
 Style "rxvt"   TitleIcon mini-term.xpm
+Style "xterm"  TitleIcon mini-term.xpm
+Style "Links*" TitleIcon mini-nscape.xpm
 Style "xclock" TitleIcon mini-clock.xpm
 Style "xcalc"  TitleIcon mini-calc.xpm
 Style "xeyes"  TitleIcon mini-eyes.xpm
@@ -112,6 +114,8 @@ AddToMenu "Programs" \
 + "System tools%mini-modules.xpm%"  Popup SystemTools
 + ""                                Nop
 + "Terminal%mini-term.xpm%"         Exec rxvt
++ "XTerm%mini-term.xpm%"            Exec xterm
++ "Web browser (Links)%mini-nscape.xpm%" Exec links -g https://example.com/
 + "Processes (top)%mini-run.xpm%"   Exec rxvt -T top -e busybox top
 + "System info%mini-bx2.xpm%"       Exec rxvt -T fastfetch -e sh -c "fastfetch; sh"
 + "Text editor%mini-edit.xpm%"      Exec rxvt -T edit -e edit

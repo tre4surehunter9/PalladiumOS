@@ -39,6 +39,11 @@ install_fonts() {
         [ -n "$name" ] && echo "$(basename "$f" .bdf).pcf.gz $name" >> "$tmp"
     done
     { wc -l < "$tmp" | tr -d ' '; sort "$tmp"; } > "$dest/fonts.dir"
+    # Older programs ask for Latin-1 fonts by name (...-iso8859-1): the
+    # Unicode fonts' first 256 characters are Latin-1, so each answers to
+    # that name too.
+    awk 'NF == 2 && $2 ~ /-iso10646-1$/ { n = $2; sub(/-iso10646-1$/, "-iso8859-1", n); print n, $2 }' "$tmp" \
+        > "$dest/fonts.alias"
     rm -f "$tmp"
     install -m 644 "$src/COPYING" "$dest/COPYING"
 }
@@ -51,7 +56,7 @@ rm -f 12x13ja.bdf 18x18ja.bdf 18x18ko.bdf k14.bdf
 install_fonts "$PWD" "$FONTS/misc"
 # The short names. "fixed" is what X programs ask for when they ask for
 # nothing in particular.
-cat > "$FONTS/misc/fonts.alias" <<'ALIAS'
+cat >> "$FONTS/misc/fonts.alias" <<'ALIAS'
 fixed        -misc-fixed-medium-r-semicondensed--13-120-75-75-c-60-iso10646-1
 variable     -adobe-helvetica-bold-r-normal--12-120-75-75-p-70-iso10646-1
 5x7          -misc-fixed-medium-r-normal--7-70-75-75-c-50-iso10646-1

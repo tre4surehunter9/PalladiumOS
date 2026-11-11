@@ -129,6 +129,8 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
             ("Xfbdev", "the X server, on the whole screen (Xfbdev &; X programs use DISPLAY=:0)"),
             ("evilwm", "a window manager (move: Alt+drag, resize: Alt+middle-drag, terminal: Ctrl+Alt+Enter)"),
             ("rxvt", "a terminal window (rxvt &, or rxvt -e PROGRAM)"),
+            ("xterm", "X's own terminal (xterm &, or xterm -e PROGRAM)"),
+            ("links", "a web browser: links -g URL in X (pictures too), links URL in a terminal"),
             ("xpmroot", "set the desktop's background to an XPM picture"),
             ("xcalc", "a calculator"),
             ("xclock", "a clock (xclock -digital for digits)"),
