@@ -134,6 +134,10 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
             ("xclock", "a clock (xclock -digital for digits)"),
             ("xeyes", "eyes that follow the mouse"),
             ("xlogo", "the X Window System's logo"),
+            ("xedit", "a text editor (xedit FILE)"),
+            ("xmessage", "show a message in a window (xmessage 'hello')"),
+            ("xwd", "a screenshot (xwd -root -out FILE; xwud -in FILE shows it)"),
+            ("xev", "show the X events a window gets (keys, the mouse)"),
         ],
     ),
     (

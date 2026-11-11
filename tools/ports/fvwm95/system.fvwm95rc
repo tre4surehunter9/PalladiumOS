@@ -48,6 +48,14 @@ Style "xclock" TitleIcon mini-clock.xpm
 Style "xcalc"  TitleIcon mini-calc.xpm
 Style "xeyes"  TitleIcon mini-eyes.xpm
 Style "xlogo"  TitleIcon mini-bx2.xpm
+Style "xedit"  TitleIcon mini-edit.xpm
+Style "xload"  TitleIcon mini-perf.xpm
+Style "oclock" TitleIcon mini-clock.xpm
+Style "XFontSel" TitleIcon mini-font.xpm
+Style "xmag"   TitleIcon mini-zoom.xpm
+Style "bitmap" TitleIcon mini-paint.xpm
+Style "Ico*"   TitleIcon mini-bball.xpm
+Style "xmessage" TitleIcon mini-exclam.xpm
 
 #------------------------------------------------------------------------------
 # At start
@@ -101,6 +109,7 @@ AddToMenu "StartMenu@fvwm-menu.xpm@^#808080^" \
 DestroyMenu "Programs"
 AddToMenu "Programs" \
   "Accessories%mini-hammer.xpm%"    Popup Accessories
++ "System tools%mini-modules.xpm%"  Popup SystemTools
 + ""                                Nop
 + "Terminal%mini-term.xpm%"         Exec rxvt
 + "Processes (top)%mini-run.xpm%"   Exec rxvt -T top -e busybox top
@@ -115,9 +124,25 @@ AddToMenu "Programs" \
 DestroyMenu "Accessories"
 AddToMenu "Accessories" \
   "Calculator%mini-calc.xpm%"       Exec xcalc
++ "Text editor (xedit)%mini-edit.xpm%" Exec xedit
++ "Magnifying glass%mini-zoom.xpm%" Exec xmag
++ "Font viewer%mini-font.xpm%"      Exec xfontsel
++ "Bitmap editor%mini-paint.xpm%"   Exec bitmap
++ ""                                Nop
 + "Clock%mini-clock.xpm%"           Exec xclock
++ "Round clock%mini-clock.xpm%"     Exec oclock
++ "System load%mini-perf.xpm%"      Exec xload
 + "Eyes%mini-eyes.xpm%"             Exec xeyes
++ "Polyhedron%mini-bball.xpm%"      Exec ico
 + "X logo%mini-bx2.xpm%"            Exec xlogo
+
+DestroyMenu "SystemTools"
+AddToMenu "SystemTools" \
+  "Input events (xev)%mini-hex.xpm%" Exec rxvt -T xev -e xev
++ "Window info (click one)%mini-ray.xpm%" Exec rxvt -T xwininfo -e sh -c "xwininfo; sleep 60"
++ "Display info%mini-display.xpm%"  Exec rxvt -T xdpyinfo -e sh -c "xdpyinfo | busybox less"
++ "Kill a window (click it)%mini-crosbone.xpm%" Exec xkill
++ "Screenshot (/tmp/screen.xwd)%mini-camera.xpm%" Exec sh -c "xwd -root -out /tmp/screen.xwd && xmessage 'Saved /tmp/screen.xwd (view: xwud -in /tmp/screen.xwd)'"
 
 DestroyMenu "Shutdown"
 AddToMenu "Shutdown" \
