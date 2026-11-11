@@ -119,6 +119,10 @@ pub const SYS_IOPRIO_SET: u64 = 251;
 pub const SYS_IOPRIO_GET: u64 = 252;
 pub const SYS_SYNC_FILE_RANGE: u64 = 277;
 pub const SYS_SYNCFS: u64 = 306;
+pub const SYS_PREADV: u64 = 295;
+pub const SYS_PWRITEV: u64 = 296;
+pub const SYS_PREADV2: u64 = 327;
+pub const SYS_PWRITEV2: u64 = 328;
 pub const SYS_TIMERFD_CREATE: u64 = 283;
 pub const SYS_TIMERFD_SETTIME: u64 = 286;
 pub const SYS_TIMERFD_GETTIME: u64 = 287;
@@ -661,6 +665,14 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         // I/O priorities, read-ahead and partial syncs: accepted, no effect.
         SYS_IOPRIO_SET | SYS_IOPRIO_GET | SYS_READAHEAD | SYS_SYNC_FILE_RANGE => 0,
         SYS_SYNCFS => vfs::sys_sync(),
+        // At an offset (a4; a5 is its high half on 32-bit systems). The v2
+        // forms' offset -1 means the fd's position; their flags are hints.
+        SYS_PREADV | SYS_PWRITEV => if (a4 as i64) < 0 { -EINVAL } else { sys_iov_at(a1, a2, a3, num == SYS_PWRITEV, Some(a4)) },
+        SYS_PREADV2 | SYS_PWRITEV2 => match a4 as i64 {
+            -1 => sys_iov_at(a1, a2, a3, num == SYS_PWRITEV2, None),
+            o if o < 0 => -EINVAL,
+            o => sys_iov_at(a1, a2, a3, num == SYS_PWRITEV2, Some(o as u64)),
+        },
         SYS_TIMERFD_CREATE => vfs::sys_timerfd_create(a1, a2),
         SYS_TIMERFD_SETTIME => vfs::sys_timerfd_settime(a1, a2, a3, a4),
         SYS_TIMERFD_GETTIME => vfs::sys_timerfd_gettime(a1, a2),
@@ -805,7 +817,13 @@ fn sys_sendfile(out_fd: u64, in_fd: u64, offset_ptr: u64, count: u64) -> i64 {
 
 /// readv/writev(fd, iov, iovcnt): one read/write per buffer, stopping at
 /// a short one.
+/// readv/writev, and with `at` (preadv/pwritev and their v2 forms) at a
+/// file offset without moving the fd's position.
 fn sys_iov(fd: u64, iov: u64, count: u64, write: bool) -> i64 {
+    sys_iov_at(fd, iov, count, write, None)
+}
+
+fn sys_iov_at(fd: u64, iov: u64, count: u64, write: bool, at: Option<u64>) -> i64 {
     if count > 1024 {
         return -EINVAL;
     }
@@ -820,14 +838,16 @@ fn sys_iov(fd: u64, iov: u64, count: u64, write: bool) -> i64 {
             continue;
         }
         let r = if write {
-            match unsafe { user_slice(base, len) } {
-                Some(buf) => vfs::sys_write(fd, buf),
-                None => -EFAULT,
+            match (unsafe { user_slice(base, len) }, at) {
+                (Some(buf), Some(off)) => vfs::sys_pwrite(fd, buf, off + total as u64),
+                (Some(buf), None) => vfs::sys_write(fd, buf),
+                (None, _) => -EFAULT,
             }
         } else {
-            match unsafe { user_slice_mut(base, len) } {
-                Some(buf) => vfs::sys_read(fd, buf),
-                None => -EFAULT,
+            match (unsafe { user_slice_mut(base, len) }, at) {
+                (Some(buf), Some(off)) => vfs::sys_pread(fd, buf, off + total as u64),
+                (Some(buf), None) => vfs::sys_read(fd, buf),
+                (None, _) => -EFAULT,
             }
         };
         if r < 0 {

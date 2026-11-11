@@ -20,6 +20,7 @@
 #include <sys/time.h>
 #include <sys/utsname.h>
 #include <sys/personality.h>
+#include <sys/uio.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
@@ -291,6 +292,15 @@ static int misc(void)
     CHECK(sf >= 0 && syncfs(sf) == 0 && sync_file_range(sf, 0, 0, 0) == 0 && readahead(sf, 0, 4096) == 0);
     close(sf);
     unlink("/tmp/test_events.sync");
+    /* preadv/pwritev (and v2, where -1 means the fd's position). */
+    int vf = open("/tmp/test_events.vec", O_CREAT | O_TRUNC | O_RDWR, 0644);
+    char va[4] = "abc", vb[4] = "def", ra[4] = {0}, rb[4] = {0};
+    struct iovec wv[2] = { { va, 3 }, { vb, 3 } }, rv[2] = { { ra, 3 }, { rb, 3 } };
+    CHECK(vf >= 0 && pwritev(vf, wv, 2, 10) == 6 && lseek(vf, 0, SEEK_CUR) == 0);
+    CHECK(preadv(vf, rv, 2, 10) == 6 && memcmp(ra, "abc", 3) == 0 && memcmp(rb, "def", 3) == 0);
+    CHECK(syscall(SYS_pwritev2, vf, wv, 1, -1L, 0L, 0) == 3 && lseek(vf, 0, SEEK_CUR) == 3); /* (moves) */
+    close(vf);
+    unlink("/tmp/test_events.vec");
     char cmdline[64] = {0};
     int cf = open("/proc/cmdline", O_RDONLY);
     CHECK(cf >= 0 && read(cf, cmdline, sizeof cmdline - 1) > 0 && strstr(cmdline, "palladiumos"));
