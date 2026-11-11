@@ -123,6 +123,7 @@ AddToMenu "Programs" \
 + ""                                Nop
 + "Python%mini-run.xpm%"            Exec rxvt -T MicroPython -e micropython
 + "Lua%mini-run.xpm%"               Exec rxvt -T Lua -e lua
++ "Tcl/Tk: widget tour%mini-modules.xpm%" Exec wish /usr/lib/tk8.6/demos/widget
 + "Alpine Linux%mini-penguin.xpm%"  Exec rxvt -T Alpine -e alpine
 
 DestroyMenu "Accessories"

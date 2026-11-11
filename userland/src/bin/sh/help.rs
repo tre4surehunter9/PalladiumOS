@@ -147,6 +147,8 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
         "compilers, languages and other shells",
         &[
             ("tcc", "C compiler: tcc hi.c -o hi, or tcc -run hi.c"),
+            ("tclsh", "Tcl 8.6"),
+            ("wish", "Tcl with Tk, for windows in X (try wish /usr/lib/tk8.6/demos/widget)"),
             ("lua", "Lua 5.4"),
             ("luac", "Lua compiler"),
             ("micropython", "MicroPython (Python 3)"),
