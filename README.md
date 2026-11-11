@@ -2,8 +2,7 @@
 
 ## An OS (more of a kernel) coded entirely in Rust
 
-![Screenshot](screenshots/Screenshot_20261107_193402.png)
-
+![Screenshot](screenshots/Screenshot_20261111_103415.png)
 ## Notice
 > [!WARNING]
 > I do want to make things clear and say I used AI for a lot of my code, as this is my first kernel, so I don't understand much yet.
