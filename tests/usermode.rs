@@ -1692,7 +1692,7 @@ fn fastfetch_port_works() {
     let _ = filesystem::make_dir("/tmp");
     assert_eq!(sh("fastfetch --logo none > /tmp/ff 2>&1"), 0);
     let out = file("/tmp/ff");
-    for want in ["OS: PalladiumOS 0.6.3 x86_64", "Kernel: PalladiumOS 0.6.3", "Memory: ", "Disk (/): "] {
+    for want in ["OS: PalladiumOS 0.6.4 x86_64", "Kernel: PalladiumOS 0.6.4", "Memory: ", "Disk (/): "] {
         assert!(out.contains(want), "{:?} missing from:\n{}", want, out);
     }
     assert!(!out.contains("not implemented"), "{}", out);

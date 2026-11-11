@@ -33,6 +33,7 @@
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
 * **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink, and an **SSH server** (Dropbear): log in from your own terminal with `ssh -p 2222 root@localhost`; a web server in PalladiumOS on port 80 (Apache, `busybox httpd`) is at `http://localhost:8080`
 * **Alpine Linux**: `alpine` sets up a real Alpine root filesystem on its own disk, where `apk add` installs Alpine's packages and they run on PalladiumOS: Python (including `multiprocessing`), Node.js, git, curl, vim, htop, and a web stack: Apache with PHP, SQLite and MariaDB
+* **The X Window System**, native: an X server (TinyX's `Xfbdev`) on the framebuffer, with the keyboard and a PS/2 mouse, a window manager (evilwm) and terminals (rxvt). See [X](#the-x-window-system)
 * **Terminals**: pseudo-terminals (`/dev/ptmx`, `/dev/pts/N`), sessions and controlling terminals, job control
 * **A userland**: a POSIX-style shell, about 50 of PalladiumOS's own tools, and ported software: BusyBox, Lua, dash, MicroPython, fastfetch and TinyCC (a C compiler that runs inside PalladiumOS)
 * **A Linux-style boot log** with `[  OK  ]` lines, and `dmesg`
@@ -269,6 +270,8 @@ Real-world programs are built from their original source by scripts in `tools/po
 * `tools/ports/micropython.sh`: MicroPython 1.29.0 (the unix port, without threads, FFI or TLS). The `>>>` REPL, scripts (also as `#!/bin/micropython`), files, `os.system`, `time`, `json`, `re`, `hashlib`..., and Ctrl-C as `KeyboardInterrupt`. The heap is 2 MB by default (`micropython -X heapsize=8M` for more).
 * `tools/ports/fastfetch.sh`: fastfetch 2.71.0 (needs `cmake` on the host). Shows the system with a PalladiumOS logo (configured in `/etc/xdg/fastfetch/config.jsonc`; the OS name comes from `/etc/os-release`).
 * `tools/ports/dropbear.sh`: Dropbear SSH 2026.94 (GPG-signed release, checksum-pinned): `dropbear` (the server), `dbclient` (a client), `dropbearkey` and `scp`. See [SSH](#ssh).
+* `tools/ports/tinyx.sh`: the X server, TinyX's `Xfbdev`, and the X libraries it and X programs need (libX11 on libxcb, libXext, libXfont 1.5 without FreeType, zlib...), static, into `target/ports/x11`. See [X](#the-x-window-system).
+* `tools/ports/x11-clients.sh`: X programs built on those libraries: `rxvt` 2.7.10 (a terminal) and `evilwm` 1.5 (a window manager), patched for the X server's built-in fonts and its lack of XKB.
 
 The binaries are ordinary Linux static executables too, so they can be run on a Linux host to compare behaviour.
 
@@ -326,6 +329,20 @@ Signals work as in POSIX:
 The console understands the usual ANSI escape sequences (cursor movement, absolute row and column, clearing, inserting and deleting characters and lines, scrolling, colors and reverse video), so full-screen programs like `edit`, BusyBox's `vi` and Alpine's `nano` work.
 
 Programs live in `/bin` as ordinary files, installed at boot.
+
+## The X Window System
+PalladiumOS runs an X server natively, no Alpine needed: `Xfbdev` (TinyX, the small "kdrive" X server TinyCore Linux uses) draws on the framebuffer (`/dev/fb0`), takes the keyboard from the console and the mouse from `/dev/psaux`. From the console:
+
+```sh
+Xfbdev :0 & sleep 10; export DISPLAY=:0; evilwm & rxvt &
+```
+
+The X server takes the screen and keyboard as soon as it starts, so type the whole line at once. Then:
+* **Ctrl+Alt+Enter** opens a terminal (rxvt), running the PalladiumOS shell. Its programs work as anywhere else (`rxvt -e busybox top` runs one in a window of its own).
+* The window under the mouse gets the keyboard. **Alt+drag** moves a window, **Alt+middle-drag** resizes it, **Alt+right-click** lowers it, **Ctrl+Alt+Esc** closes it.
+* **Ctrl+Alt+Backspace** stops the X server and gives the console back.
+
+What the kernel provides for it: `/dev/fb0` (the Linux framebuffer ioctls, and `mmap` of the screen itself), the console's VT and keyboard ioctls (graphics mode, medium-raw keycodes, the keymap), a PS/2 mouse (`/dev/input/mice`, `/dev/psaux`, with the IntelliMouse wheel protocol), `SIGIO` on input, and Unix-domain sockets for X's clients. The fonts are libXfont's two built-in ones (`fixed` and `cursor`). In QEMU, use the UEFI image with `-vga none -device VGA,edid=on,xres=1280,yres=720` for a 720p screen.
 
 ## Alpine Linux
 PalladiumOS can run [Alpine Linux](https://alpinelinux.org)'s userland, its package manager and its packages, unchanged: Alpine builds everything against musl, dynamically linked, which is what PalladiumOS runs.
@@ -443,6 +460,11 @@ The release images include software by other people, under their own licences. P
 | [MicroPython](https://micropython.org) | 1.29.0 | MIT | `/bin/micropython` | [micropython-1.29.0.tar.xz](https://github.com/micropython/micropython/releases/download/v1.29.0/micropython-1.29.0.tar.xz) |
 | [fastfetch](https://github.com/fastfetch-cli/fastfetch) | 2.71.0 | MIT | `/bin/fastfetch` | [2.71.0.tar.gz](https://github.com/fastfetch-cli/fastfetch/archive/refs/tags/2.71.0.tar.gz) |
 | [Dropbear SSH](https://matt.ucc.asn.au/dropbear/dropbear.html) | 2026.94 | MIT-style, with parts under BSD licences and public domain (libtomcrypt, libtommath); see its `LICENSE` | `/bin/dropbear`, `dbclient`, `dropbearkey`, `scp` | [dropbear-2026.94.tar.bz2](https://matt.ucc.asn.au/dropbear/releases/dropbear-2026.94.tar.bz2) |
+| [TinyX](https://github.com/tinycorelinux/tinyx) | git feab72ca891b | MIT/X11 (X.Org's licences; see its `COPYING`) | `/bin/Xfbdev` | [commit feab72ca891b](https://github.com/tinycorelinux/tinyx/archive/feab72ca891bc04b18763763e15ee4e532369cdf.tar.gz); PalladiumOS's build changes are in `tools/ports/tinyx.sh` |
+| [X.Org](https://www.x.org) libraries and protocol headers: libX11 1.8.14, libxcb 1.17.0, libXext 1.3.7, libXfont 1.5.4, libfontenc 1.1.8, libXau 1.0.12, libXdmcp 1.1.5, xtrans 1.5.2, xcb-proto 1.17.0, xorgproto 2026.1 | see each | MIT/X11-style; see each one's `COPYING` | linked into `Xfbdev`, `rxvt` and `evilwm` | [x.org/releases/individual](https://www.x.org/releases/individual/) |
+| [zlib](https://zlib.net) | 1.3.1 | Zlib | linked into `Xfbdev` | [zlib-1.3.1.tar.gz](https://zlib.net/fossils/zlib-1.3.1.tar.gz) |
+| [rxvt](https://rxvt.sourceforge.net) | 2.7.10 | GPL-2.0-or-later | `/bin/rxvt` | [rxvt-2.7.10.tar.gz](https://distfiles.macports.org/rxvt/rxvt-2.7.10.tar.gz) (MacPorts' copy; same checksums as MacPorts' and Arch's); PalladiumOS's changes are in `tools/ports/x11-clients.sh` |
+| [evilwm](https://www.6809.org.uk/evilwm/) | 1.5 | permissive (the aewm and 9wm licences; see its `README`) | `/bin/evilwm` | [evilwm-1.5.tar.gz](https://www.6809.org.uk/evilwm/evilwm-1.5.tar.gz); PalladiumOS's changes are in `tools/ports/x11-clients.sh` |
 | GCC runtime (`libgcc`, `crtbeginS.o`) | 16.2.1 | GPL-3.0 with the GCC Runtime Library Exception | linked into the C programs | [gcc.gnu.org](https://gcc.gnu.org) |
 | Rust crates ([smoltcp](https://github.com/smoltcp-rs/smoltcp), [x86_64](https://github.com/rust-osdev/x86_64), [bootloader](https://github.com/rust-osdev/bootloader), [spin](https://github.com/mvdnes/spin-rs), [pc-keyboard](https://github.com/rust-embedded-community/pc-keyboard)...) | see `Cargo.lock` | permissive: MIT and/or Apache-2.0 for most, 0BSD (smoltcp, managed), Unlicense-or-MIT (byteorder); `cargo metadata` lists each | the kernel | [crates.io](https://crates.io) |
 

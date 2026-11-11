@@ -123,7 +123,11 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
     (
         "graphics",
         "the X Window System",
-        &[("Xfbdev", "the X server, on the whole screen (Xfbdev &; X programs use DISPLAY=:0)")],
+        &[
+            ("Xfbdev", "the X server, on the whole screen (Xfbdev &; X programs use DISPLAY=:0)"),
+            ("evilwm", "a window manager (move: Alt+drag, resize: Alt+middle-drag, terminal: Ctrl+Alt+Enter)"),
+            ("rxvt", "a terminal window (rxvt &, or rxvt -e PROGRAM)"),
+        ],
     ),
     (
         "programming",
