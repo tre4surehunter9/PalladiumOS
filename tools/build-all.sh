@@ -17,7 +17,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-ALL_PORTS="lua dash fastfetch tcc micropython busybox dropbear tinyx x11-clients fvwm95"
+ALL_PORTS="lua dash fastfetch tcc micropython busybox dropbear fonts tinyx x11-clients fvwm95"
 STAMPS=target/ports/stamps
 
 # What each port produces (relative to target/).
@@ -30,6 +30,7 @@ outputs() {
         micropython) echo "ports/bin/micropython" ;;
         busybox) echo "ports/bin/busybox sysroot/bin/vi" ;;
         dropbear) echo "ports/bin/dropbear ports/bin/dbclient ports/bin/dropbearkey ports/bin/scp" ;;
+        fonts) echo "sysroot/share/fonts/X11/misc/fonts.dir sysroot/share/fonts/X11/75dpi/fonts.dir" ;;
         tinyx) echo "ports/bin/Xfbdev ports/x11/lib/libX11.a" ;;
         x11-clients) echo "ports/bin/rxvt ports/bin/evilwm" ;;
         fvwm95) echo "sysroot/bin/fvwm95 sysroot/bin/xpmroot sysroot/lib/X11/fvwm95/FvwmTaskBar" ;;
@@ -38,7 +39,8 @@ outputs() {
 
 # Fingerprint of everything a port is built from.
 fingerprint() {
-    cat "tools/ports/$1.sh" tools/ports/common.sh target/musl/lib/libc.a 2>/dev/null | sha256sum | cut -d' ' -f1
+    # (Its own files too, like tools/ports/fvwm95/'s configuration.)
+    { cat "tools/ports/$1.sh" tools/ports/common.sh target/musl/lib/libc.a; [ -d "tools/ports/$1" ] && find "tools/ports/$1" -type f | sort | xargs cat; } 2>/dev/null | sha256sum | cut -d' ' -f1
 }
 
 up_to_date() {

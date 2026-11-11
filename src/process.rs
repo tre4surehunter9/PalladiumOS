@@ -550,7 +550,24 @@ pub fn schedule() {
             }
             None => return,
         }
-    })
+    });
+    // Nothing else to run here, and the caller goes on: on more cores, let
+    // the kernel go for a moment. The caller may be waiting for a process
+    // another core is running, which may be waiting to get into the kernel
+    // (a loop around schedule() on one core would never let it in).
+    if multi {
+        breathe();
+    }
+}
+
+/// Let other cores have the kernel for a moment (if they want it).
+fn breathe() {
+    if crate::smp::unlock_kernel_for_others() {
+        for _ in 0..64 {
+            core::hint::spin_loop();
+        }
+        crate::smp::lock_kernel();
+    }
 }
 
 /// Let other ready processes run (sched_yield).

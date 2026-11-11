@@ -3,8 +3,9 @@
 # An X server for PalladiumOS: tools/ports/tinyx.sh -> /bin/Xfbdev, TinyX's
 # framebuffer X server (the small "kdrive" server, as TinyCore Linux uses).
 # It draws on /dev/fb0, takes the keyboard from the console (medium raw
-# mode) and the mouse from /dev/input/mice. Fonts: the built-in "fixed" and
-# "cursor" of libXfont.
+# mode) and the mouse from /dev/input/mice. Fonts: the ones on the system
+# disk (tools/ports/fonts.sh: misc and Adobe's 75dpi), then libXfont's
+# built-in "fixed" and "cursor".
 #
 # Its libraries are built first, static, into target/ports/x11 (where the X
 # client libraries go too, see tools/ports/x11-clients.sh).
@@ -108,7 +109,8 @@ TINYX_CFLAGS="-O2 -std=gnu17 -DKDRIVESERVER -DINITARGS=void -Wno-error=implicit-
     -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=return-mismatch"
 ./configure $CONF CC="$PCC" CFLAGS="$TINYX_CFLAGS" LDFLAGS="$LDFLAGS -static" \
     --disable-xvesa --enable-xfbdev --disable-xdmcp --disable-xdm-auth-1 --disable-dpms \
-    --with-default-font-path="built-ins" --with-vendor-name="PalladiumOS" >configure.log 2>&1 ||
+    --with-default-font-path="/usr/share/fonts/X11/misc/,/usr/share/fonts/X11/75dpi/,built-ins" \
+    --with-vendor-name="PalladiumOS" >configure.log 2>&1 ||
     { tail -30 configure.log; exit 1; }
 make -j"$(nproc)" >make.log 2>&1 || { grep -B2 -A6 "error" make.log | tail -40; exit 1; }
 install -m 755 -s kdrive/fbdev/Xfbdev "$BIN/Xfbdev"

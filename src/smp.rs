@@ -122,6 +122,13 @@ pub fn unlock_kernel() {
     let _ = BKL.compare_exchange(me, 0, Ordering::Release, Ordering::Relaxed);
 }
 
+/// Let the big kernel lock go if this core has it, for others to take
+/// (the caller takes it back). Returns whether it was let go.
+pub fn unlock_kernel_for_others() -> bool {
+    let me = cpu_index() + 1;
+    BKL.compare_exchange(me, 0, Ordering::Release, Ordering::Relaxed).is_ok()
+}
+
 /// Inside the kernel until dropped: for interrupt and fault handlers. It
 /// takes the lock if this core didn't have it (it interrupted a program,
 /// or idle), and gives it back when the handler returns.

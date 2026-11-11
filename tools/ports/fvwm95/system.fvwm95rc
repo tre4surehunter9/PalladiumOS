@@ -1,16 +1,16 @@
 # fvwm95's configuration on PalladiumOS: /usr/lib/X11/fvwm95/system.fvwm95rc
 # (used when there's no ~/.fvwm95rc). Made from fvwm95 2.0.43f's own
 # system.fvwm95rc (GPL, like fvwm95): its styles, window functions, window
-# menus, bindings and taskbar, with the X server's built-in "fixed" font
-# (the only one) and a Start menu of PalladiumOS's programs.
+# menus, bindings and taskbar, and a Start menu of PalladiumOS's programs.
+# Fonts: Adobe's Helvetica (tools/ports/fonts.sh), as fvwm95's own setup.
 
 #------------------------------------------------------------------------------
 # Fonts and colors
 #------------------------------------------------------------------------------
 
-WindowFont      fixed
+WindowFont      -adobe-helvetica-bold-r-normal--12-*-75-75-*-*-*-*
 IconFont        fixed
-MenuFont        fixed
+MenuFont        -adobe-helvetica-medium-r-normal--12-*-75-75-*-*-*-*
 
 DefaultColors   Black #c3c3c3 #c3c3c3 #828282
 HilightColors   White #000080
@@ -183,8 +183,8 @@ Key Tab     A       M       Next [*] Focus
 *FvwmTaskBarGeometry +0-0
 *FvwmTaskBarFore Black
 *FvwmTaskBarBack #c0c0c0
-*FvwmTaskBarFont fixed
-*FvwmTaskBarSelFont fixed
+*FvwmTaskBarFont -adobe-helvetica-medium-r-normal--12-*-75-75-*-*-*-*
+*FvwmTaskBarSelFont -adobe-helvetica-bold-r-normal--12-*-75-75-*-*-*-*
 *FvwmTaskBarStatusFont fixed
 *FvwmTaskBarAction Click1 Iconify -1,Raise,Focus
 *FvwmTaskBarAction Click2 Iconify
@@ -199,4 +199,4 @@ Key Tab     A       M       Next [*] Focus
 *FvwmTaskBarHighlightFocus
 *FvwmTaskBarDeskOnly
 
-*FvwmIdentFont fixed
+*FvwmIdentFont -adobe-helvetica-medium-r-normal--12-*-75-75-*-*-*-*
