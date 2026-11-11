@@ -120,7 +120,7 @@ fn dup_test() -> i32 {
 
     check!(dup(99) == -EBADF as isize);
     check!(dup2(99, 5) == -EBADF as isize);
-    check!(dup2(STDOUT, 1000) == -EBADF as isize);
+    check!(dup2(STDOUT, 5000) == -EBADF as isize); // (past the limit of 1024 fds)
     check!(dup2(STDOUT, STDOUT) == STDOUT as isize);
     check!(unlink("/dup_test.txt") == 0);
     0

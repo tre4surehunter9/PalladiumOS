@@ -7,6 +7,9 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use userlib::*;
 
 userlib::entry!(main);
@@ -192,18 +195,17 @@ fn all() -> i32 {
     close(fd);
 
     // ---- limits and bad input ----
-    let mut fds = [0i32; 64];
-    let mut opened = 0;
+    let mut fds = Vec::new();
     loop {
         let fd = open("/t", O_RDONLY);
         if fd < 0 {
             check!(fd == -EMFILE);
             break;
         }
-        fds[opened] = fd as i32;
-        opened += 1;
+        fds.push(fd as i32);
     }
-    check!(opened == 64 - 3); // 0/1/2 are taken
+    let opened = fds.len();
+    check!(opened == 1024 - 3); // 0/1/2 are taken
     for &fd in &fds[..opened] {
         close(fd);
     }

@@ -120,6 +120,9 @@ pub struct Process {
     pub ctty: u32,
     /// Signals sent but not yet acted on (bit n-1 = signal n).
     pending: u64,
+    /// Signals this thread waits for in rt_sigtimedwait (sigwait): one
+    /// blocked by the thread it was sent to comes here instead.
+    sigwait: u64,
     /// What to do for each signal (index n-1), see sigaction.
     /// (Boxed: it's 2 KiB, and Process values pass through small kernel stacks.)
     actions: Box<[SigAction; MAX_SIGNAL as usize]>,
@@ -265,6 +268,7 @@ pub fn init() {
         sid: 0,
         ctty: CTTY_CONSOLE,
         pending: 0,
+        sigwait: 0,
         actions: Box::new([SigAction::DEFAULT; MAX_SIGNAL as usize]),
         blocked: 0,
         saved_mask: None,
@@ -894,6 +898,7 @@ fn fork_with(frame: &SyscallFrame, kind: CloneKind, stack: u64) -> i64 {
         sid,
         ctty,
         pending: 0,
+        sigwait: 0,
         actions, // handlers and the mask are inherited; pending signals and alarms aren't
         blocked,
         saved_mask: None,
@@ -1227,6 +1232,7 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         sid: pid,  // and session, on the console
         ctty: CTTY_CONSOLE,
         pending: 0,
+        sigwait: 0,
         actions: Box::new([SigAction::DEFAULT; MAX_SIGNAL as usize]),
         blocked: 0,
         saved_mask: None,
@@ -1549,6 +1555,20 @@ fn signal_locked(table: &mut BTreeMap<u64, Box<Process>>, pid: u64, sig: i32) ->
         }
         orphaned_locked(table, p.pgid)
     };
+    // Blocked where it was sent, but a thread of the process is in
+    // sigwait for it (a program's signal thread): it goes there.
+    let pid = {
+        let p = &table[&pid];
+        if sig != SIGKILL && p.blocked & bit(sig) != 0 {
+            let tgid = p.tgid;
+            table
+                .values()
+                .find(|t| t.tgid == tgid && t.sigwait & bit(sig) != 0 && !matches!(t.state, State::Zombie(_)))
+                .map_or(pid, |t| t.pid)
+        } else {
+            pid
+        }
+    };
     let mut continued = false;
     {
         let p = table.get_mut(&pid).unwrap();
@@ -1567,7 +1587,7 @@ fn signal_locked(table: &mut BTreeMap<u64, Box<Process>>, pid: u64, sig: i32) ->
         let default_stop = p.actions[(sig - 1) as usize].handler == SIG_DFL && sig != SIGSTOP && STOP_SIGNALS & bit(sig) != 0;
         if !discarded(p, sig) && !(default_stop && orphan) {
             p.pending |= bit(sig);
-            let wake = sig == SIGKILL || p.blocked & bit(sig) == 0;
+            let wake = sig == SIGKILL || p.blocked & bit(sig) == 0 || p.sigwait & bit(sig) != 0;
             if wake && matches!(p.state, State::Waiting | State::Sleeping | State::Blocked(_)) {
                 p.state = State::Ready; // so it notices
             }
@@ -2076,6 +2096,69 @@ pub fn sys_rt_sigpending(set: u64) -> i64 {
     match write_u64(set, pending) {
         Ok(()) => 0,
         Err(e) => -e,
+    }
+}
+
+/// rt_sigtimedwait(set, info, timeout, sigsetsize): wait for one of the
+/// signals in `set` (normally blocked) and take it, without running a
+/// handler: its number, and its siginfo in `info`. EAGAIN after the
+/// timeout, EINTR if another signal interrupts.
+pub fn sys_rt_sigtimedwait(set: u64, info: u64, timeout: u64) -> i64 {
+    let set = match read_u64(set) {
+        Ok(s) => s & !UNBLOCKABLE,
+        Err(e) => return -e,
+    };
+    let deadline = if timeout == 0 {
+        None
+    } else {
+        let Some(ts) = (unsafe { user_slice(timeout, 16) }) else { return -EFAULT };
+        let sec = u64::from_le_bytes(ts[0..8].try_into().unwrap());
+        let nsec = u64::from_le_bytes(ts[8..16].try_into().unwrap());
+        Some(ticks() + sec.saturating_mul(1_000_000_000).saturating_add(nsec).div_ceil(TICK_NS))
+    };
+    loop {
+        let taken = {
+            let mut table = TABLE.lock();
+            let cur = current_pid();
+            let tgid = table[&cur].tgid;
+            // Ours, or one the process got before we started waiting.
+            let from = [cur, tgid].into_iter().find(|t| table.get(t).is_some_and(|p| p.pending & set != 0));
+            match from {
+                Some(t) => {
+                    let p = table.get_mut(&t).unwrap();
+                    let sig = lowest(p.pending & set);
+                    p.pending &= !bit(sig);
+                    table.get_mut(&cur).unwrap().sigwait = 0;
+                    Some(sig)
+                }
+                None => {
+                    table.get_mut(&cur).unwrap().sigwait = set;
+                    None
+                }
+            }
+        };
+        if let Some(sig) = taken {
+            if info != 0 {
+                let Some(out) = (unsafe { user_slice_mut(info, 128) }) else { return -EFAULT };
+                out.fill(0);
+                out[0..4].copy_from_slice(&sig.to_le_bytes()); // si_signo (si_code 0: SI_USER)
+            }
+            return sig as i64;
+        }
+        let stop = |r: i64| {
+            with_current(|p| p.sigwait = 0);
+            r
+        };
+        if deadline.is_some_and(|d| ticks() >= d) {
+            return stop(-crate::syscall::EAGAIN);
+        }
+        if signal_pending() {
+            return stop(-EINTR);
+        }
+        match deadline {
+            Some(d) => block_on_until(SIGNAL_ONLY, d),
+            None => block_on(SIGNAL_ONLY),
+        }
     }
 }
 

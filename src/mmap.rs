@@ -49,8 +49,9 @@ const MAP_FIXED_NOREPLACE: u64 = 0x10_0000;
 
 pub const MMAP_BASE: u64 = 0x2000_0000_0000;
 const MMAP_END: u64 = 0x7000_0000_0000;
-/// The largest single mapping (address space; memory comes when used).
-const MAX_MAP: u64 = 1 << 40;
+/// The largest single mapping: the whole mmap area (address space only:
+/// memory comes when used). MariaDB reserves 8 TiB for its buffer pool.
+const MAX_MAP: u64 = MMAP_END - MMAP_BASE;
 
 fn page_up(x: u64) -> u64 {
     (x + 4095) & !4095

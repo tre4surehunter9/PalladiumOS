@@ -14,6 +14,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sched.h>
+#include <signal.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
@@ -372,6 +373,38 @@ static int big_program(const char *dir)
     return 0;
 }
 
+static volatile int waited_sig;
+
+static void *signal_thread(void *arg)
+{
+    int sig;
+    if (sigwait(arg, &sig) == 0)
+        waited_sig = sig;
+    return NULL;
+}
+
+static int sigwaits(void)
+{
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGUSR1);
+    CHECK(pthread_sigmask(SIG_BLOCK, &s, NULL) == 0);
+    struct timespec ts = { 0, 100 * 1000000 };
+    CHECK(sigtimedwait(&s, NULL, &ts) == -1 && errno == EAGAIN);
+    siginfo_t si;
+    CHECK(kill(getpid(), SIGUSR1) == 0);
+    CHECK(sigtimedwait(&s, &si, &ts) == SIGUSR1 && si.si_signo == SIGUSR1);
+    /* A signal thread: blocked everywhere, sent to the process, taken by
+     * the thread in sigwait (how MariaDB handles signals). */
+    pthread_t th;
+    CHECK(pthread_create(&th, NULL, signal_thread, &s) == 0);
+    usleep(150 * 1000);
+    CHECK(kill(getpid(), SIGUSR1) == 0);
+    CHECK(pthread_join(th, NULL) == 0 && waited_sig == SIGUSR1);
+    CHECK(pthread_sigmask(SIG_UNBLOCK, &s, NULL) == 0);
+    return 0;
+}
+
 static int timerfds(void)
 {
     uint64_t n;
@@ -431,7 +464,7 @@ static int timerfds(void)
 int main(int argc, char **argv)
 {
     int r;
-    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()))
+    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()) || (r = sigwaits()))
         return r;
     /* The big program needs a directory on a disk (argv[1]). */
     if (argc > 1 && (r = big_program(argv[1])))
