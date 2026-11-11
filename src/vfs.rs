@@ -108,6 +108,8 @@ enum Kind {
     TimerFd(Arc<Mutex<TimerFd>>),
     /// signalfd: the signals in its mask are read from it.
     SignalFd(Arc<Mutex<u64>>),
+    /// inotify: watches on files, and the events that happened to them.
+    Inotify(Arc<Mutex<crate::inotify::Instance>>),
 }
 
 struct EventFd {
@@ -143,6 +145,10 @@ impl Drop for Description {
         // file deleted while open is freed now).
         if let Kind::File { loc, .. } | Kind::Dir { loc, .. } = &self.kind {
             mounts::with_fs(loc.mount, |fs| fs.close_inode(loc.ino));
+        }
+        if let Kind::File { path, writable, .. } = &self.kind {
+            let ev = if *writable { crate::inotify::IN_CLOSE_WRITE } else { crate::inotify::IN_CLOSE_NOWRITE };
+            crate::inotify::changed(path, ev, false, 0);
         }
     }
 }
@@ -181,6 +187,7 @@ fn handle(kind: Kind) -> Handle {
         Kind::Epoll(_) => "anon_inode:[eventpoll]".to_string(),
         Kind::TimerFd(_) => "anon_inode:[timerfd]".to_string(),
         Kind::SignalFd(_) => "anon_inode:[signalfd]".to_string(),
+        Kind::Inotify(_) => "anon_inode:inotify".to_string(),
     };
     Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0, nonblocking: false, dir_snapshot: None }) })
 }
@@ -355,6 +362,7 @@ fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
             match made {
                 Ok(found) => {
                     created = true;
+                    crate::inotify::changed(abs, crate::inotify::IN_CREATE, false, 0);
                     found
                 }
                 Err(e) => return -e,
@@ -886,7 +894,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                     Kind::PipeWrite(_) => (O_WRONLY | nb) as i64,
                     Kind::PipeRead(_) => (O_RDONLY | nb) as i64,
                     Kind::Dir { .. } => O_RDONLY as i64,
-                    Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) => (O_RDWR | nb) as i64,
+                    Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) => (O_RDWR | nb) as i64,
                 }
             }
             // Record locks: granted (see sys_flock). F_GETLK reports
@@ -994,6 +1002,12 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
             drop(desc);
             signalfd_read(mask, nonblocking, buf)
         }
+        Kind::Inotify(i) => {
+            let i = i.clone();
+            let nonblocking = desc.nonblocking;
+            drop(desc);
+            inotify_read(&i, nonblocking, buf)
+        }
     }
 }
 
@@ -1040,8 +1054,8 @@ pub fn sys_pwrite(fd: u64, bytes: &[u8], offset: u64) -> i64 {
         Ok(h) => h,
         Err(e) => return -e,
     };
-    let (loc, writable) = match &h.lock().kind {
-        Kind::File { loc, writable, .. } => (*loc, *writable),
+    let (loc, writable, path) = match &h.lock().kind {
+        Kind::File { loc, writable, path, .. } => (*loc, *writable, path.clone()),
         Kind::Null => return bytes.len() as i64,
         Kind::Dir { .. } => return -EISDIR,
         _ => return -ESPIPE,
@@ -1052,6 +1066,7 @@ pub fn sys_pwrite(fd: u64, bytes: &[u8], offset: u64) -> i64 {
     match mounts::with_fs(loc.mount, |fs| fs.write(loc.ino, offset, bytes)) {
         Ok(n) => {
             crate::mmap::file_written(loc.mount, loc.ino, offset, &bytes[..n]);
+            crate::inotify::changed(&path, crate::inotify::IN_MODIFY, false, 0);
             n as i64
         }
         Err(e) => -e,
@@ -1100,6 +1115,9 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
                 Ok((offset, n)) => {
                     crate::mmap::file_written(loc.mount, loc.ino, offset, &bytes[..n]);
                     desc.offset = offset as usize + n;
+                    if let Kind::File { path, .. } = &desc.kind {
+                        crate::inotify::changed(path, crate::inotify::IN_MODIFY, false, 0);
+                    }
                     n as i64
                 }
                 Err(e) => -e,
@@ -1122,7 +1140,7 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
             drop(desc);
             eventfd_write(&e, nonblocking, bytes)
         }
-        Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) => -EINVAL,
+        Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) => -EINVAL,
     }
 }
 
@@ -1163,7 +1181,7 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
         }
         Kind::Dir { .. } => -EINVAL,
         Kind::Null | Kind::Zero | Kind::Random => 0,
-        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } | Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) => -ESPIPE,
+        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } | Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) => -ESPIPE,
     }
 }
 
@@ -1243,7 +1261,7 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
             fill_stat(out, 0, 0, S_IFIFO | 0o600, 1, 0, 0);
             0
         }
-        Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) => {
+        Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) => {
             fill_stat(out, 0, 0, 0o600, 1, 0, 0); // an anonymous inode
             0
         }
@@ -1481,7 +1499,10 @@ pub fn sys_mkdirat(dirfd: u64, path: u64, mode: u64) -> i64 {
     };
     let perm = mode as u32 & 0o7777 & !with_process(|p| p.umask);
     match mounts::create(&abs, FileType::Dir, perm) {
-        Ok(_) => 0,
+        Ok(_) => {
+            crate::inotify::changed(&abs, crate::inotify::IN_CREATE, true, 0);
+            0
+        }
         Err(e) => -e,
     }
 }
@@ -1498,7 +1519,10 @@ pub fn sys_unlinkat(dirfd: u64, path: u64, flags: u64) -> i64 {
         Err(e) => return -e,
     };
     match mounts::remove(&abs, flags & AT_REMOVEDIR != 0) {
-        Ok(()) => 0,
+        Ok(()) => {
+            crate::inotify::changed(&abs, crate::inotify::IN_DELETE, flags & AT_REMOVEDIR != 0, 0);
+            0
+        }
         Err(e) => -e,
     }
 }
@@ -1512,8 +1536,14 @@ pub fn sys_renameat(olddirfd: u64, old: u64, newdirfd: u64, new: u64, flags: u64
         (Ok(o), Ok(n)) => (o, n),
         (Err(e), _) | (_, Err(e)) => return -e,
     };
+    let is_dir = mounts::lstat(&old).is_ok_and(|(_, m)| m.kind == FileType::Dir);
     match mounts::rename(&old, &new) {
-        Ok(()) => 0,
+        Ok(()) => {
+            let cookie = crate::inotify::next_cookie();
+            crate::inotify::changed(&old, crate::inotify::IN_MOVED_FROM, is_dir, cookie);
+            crate::inotify::changed(&new, crate::inotify::IN_MOVED_TO, is_dir, cookie);
+            0
+        }
         Err(e) => -e,
     }
 }
@@ -1531,7 +1561,10 @@ pub fn sys_linkat(olddirfd: u64, old: u64, newdirfd: u64, new: u64, flags: u64) 
         }
     }
     match mounts::link(&old, &new) {
-        Ok(()) => 0,
+        Ok(()) => {
+            crate::inotify::changed(&new, crate::inotify::IN_CREATE, false, 0);
+            0
+        }
         Err(e) => -e,
     }
 }
@@ -1547,7 +1580,10 @@ pub fn sys_symlinkat(target: u64, newdirfd: u64, linkpath: u64) -> i64 {
         Err(e) => return -e,
     };
     match mounts::symlink(&target, &abs) {
-        Ok(()) => 0,
+        Ok(()) => {
+            crate::inotify::changed(&abs, crate::inotify::IN_CREATE, false, 0);
+            0
+        }
         Err(e) => -e,
     }
 }
@@ -1583,7 +1619,13 @@ pub fn sys_fchmodat(dirfd: u64, path: u64, mode: u64) -> i64 {
         Err(e) => return -e,
     };
     match mounts::stat(&abs) {
-        Ok((loc, meta)) => chmod_loc(loc, &meta, mode),
+        Ok((loc, meta)) => {
+            let r = chmod_loc(loc, &meta, mode);
+            if r == 0 {
+                crate::inotify::changed(&abs, crate::inotify::IN_ATTRIB, meta.kind == FileType::Dir, 0);
+            }
+            r
+        }
         Err(e) => -e,
     }
 }
@@ -1908,6 +1950,9 @@ pub fn poll_ready(fd: i32, events: i16) -> i16 {
         }
         Kind::SignalFd(m) => {
             if crate::process::signal_waiting(*m.lock()) { POLLIN } else { 0 }
+        }
+        Kind::Inotify(i) => {
+            if i.lock().readable() { POLLIN } else { 0 }
         }
         Kind::Epoll(list) => {
             // Readable when something it watches is ready (epolls inside
@@ -3080,4 +3125,92 @@ pub fn sys_splice(fd_in: u64, off_in: u64, fd_out: u64, off_out: u64, len: u64) 
         }
     }
     done as i64
+}
+
+// ---------------------------------------------------------------- inotify
+
+/// inotify_init1(flags: IN_CLOEXEC, IN_NONBLOCK), and inotify_init
+pub fn sys_inotify_init(flags: u64) -> i64 {
+    if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
+        return -EINVAL;
+    }
+    let h = handle(Kind::Inotify(crate::inotify::new_instance()));
+    h.lock().nonblocking = flags & O_NONBLOCK != 0;
+    match with_process(|p| alloc_fd(p, h, flags & O_CLOEXEC != 0)) {
+        Ok(fd) => fd as i64,
+        Err(e) => -e,
+    }
+}
+
+fn inotify_of(fd: u64) -> Result<Arc<Mutex<crate::inotify::Instance>>, i64> {
+    match &get(fd)?.lock().kind {
+        Kind::Inotify(i) => Ok(i.clone()),
+        _ => Err(EINVAL),
+    }
+}
+
+/// inotify_add_watch(fd, path, mask): a watch descriptor.
+pub fn sys_inotify_add_watch(fd: u64, path: u64, mask: u64) -> i64 {
+    use crate::inotify::{IN_DONT_FOLLOW, IN_ONLYDIR};
+    let inst = match inotify_of(fd) {
+        Ok(i) => i,
+        Err(e) => return -e,
+    };
+    let mask = mask as u32;
+    if mask & 0xfff == 0 {
+        return -EINVAL; // no events asked for
+    }
+    let abs = match user_path(path) {
+        Ok(p) => absolute(&p),
+        Err(e) => return -e,
+    };
+    let (meta, real) = match mounts::resolve_full(&abs, mask & IN_DONT_FOLLOW == 0) {
+        Ok((_, meta, real)) => (meta, real),
+        Err(e) => return -e,
+    };
+    if mask & IN_ONLYDIR != 0 && meta.kind != FileType::Dir {
+        return -ENOTDIR;
+    }
+    if let Err(e) = perm::check(&meta, &crate::process::current_cred(), perm::READ) {
+        return -e;
+    }
+    inst.lock().add_watch(real, mask) as i64
+}
+
+/// inotify_rm_watch(fd, wd)
+pub fn sys_inotify_rm_watch(fd: u64, wd: u64) -> i64 {
+    let inst = match inotify_of(fd) {
+        Ok(i) => i,
+        Err(e) => return -e,
+    };
+    let removed = inst.lock().rm_watch(wd as i32);
+    if removed {
+        crate::process::wake(crate::inotify::key(&inst));
+        0
+    } else {
+        -EINVAL
+    }
+}
+
+/// read: whole events (waiting for one unless non-blocking); EINVAL if
+/// the buffer can't hold the first.
+fn inotify_read(i: &Arc<Mutex<crate::inotify::Instance>>, nonblocking: bool, buf: &mut [u8]) -> i64 {
+    loop {
+        {
+            let mut inst = i.lock();
+            if inst.readable() {
+                return match inst.take(buf) {
+                    Some(n) => n as i64,
+                    None => -EINVAL,
+                };
+            }
+        }
+        if nonblocking {
+            return -EAGAIN;
+        }
+        if crate::process::signal_pending() {
+            return -EINTR;
+        }
+        crate::process::block_on(crate::inotify::key(i));
+    }
 }

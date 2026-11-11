@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/inotify.h>
 #include <sys/eventfd.h>
 #include <sched.h>
 #include <signal.h>
@@ -532,6 +533,89 @@ static int splices(void)
     return 0;
 }
 
+/* Read inotify events until none are waiting; returns the masks seen
+ * (ORed) and copies the first event's name. */
+static uint32_t drain_events(int fd, char *first_name, size_t name_size)
+{
+    char buf[4096] __attribute__((aligned(8)));
+    uint32_t masks = 0;
+    int first = 1;
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof buf)) > 0) {
+        for (char *p = buf; p < buf + n;) {
+            struct inotify_event *e = (struct inotify_event *)p;
+            masks |= e->mask;
+            if (first && first_name) {
+                snprintf(first_name, name_size, "%s", e->len ? e->name : "");
+                first = 0;
+            }
+            p += sizeof *e + e->len;
+        }
+    }
+    return masks;
+}
+
+static int inotifies(void)
+{
+    char name[64];
+    mkdir("/tmp/watched", 0755);
+    int in = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    CHECK(in >= 0);
+    int wd = inotify_add_watch(in, "/tmp/watched", IN_CREATE | IN_MODIFY | IN_CLOSE_WRITE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_ATTRIB);
+    CHECK(wd > 0);
+    CHECK(read(in, name, sizeof name) == -1 && errno == EAGAIN);
+
+    /* Create, write, close: CREATE (named), MODIFY, CLOSE_WRITE. */
+    int f = open("/tmp/watched/a.txt", O_CREAT | O_WRONLY, 0644);
+    CHECK(f >= 0 && write(f, "x", 1) == 1);
+    close(f);
+    uint32_t m = drain_events(in, name, sizeof name);
+    CHECK((m & IN_CREATE) && (m & IN_MODIFY) && (m & IN_CLOSE_WRITE) && strcmp(name, "a.txt") == 0);
+
+    /* poll sees it; a rename is a FROM/TO pair with one cookie. */
+    struct pollfd p = { .fd = in, .events = POLLIN };
+    CHECK(rename("/tmp/watched/a.txt", "/tmp/watched/b.txt") == 0);
+    CHECK(poll(&p, 1, 1000) == 1);
+    char buf[512] __attribute__((aligned(8)));
+    ssize_t n = read(in, buf, sizeof buf);
+    CHECK(n > 0);
+    struct inotify_event *e1 = (struct inotify_event *)buf;
+    struct inotify_event *e2 = (struct inotify_event *)(buf + sizeof *e1 + e1->len);
+    CHECK(e1->mask == IN_MOVED_FROM && e2->mask == IN_MOVED_TO && e1->cookie == e2->cookie && e1->cookie != 0);
+    CHECK(strcmp(e1->name, "a.txt") == 0 && strcmp(e2->name, "b.txt") == 0);
+
+    /* chmod, mkdir, delete. */
+    CHECK(chmod("/tmp/watched/b.txt", 0600) == 0);
+    CHECK(drain_events(in, NULL, 0) & IN_ATTRIB);
+    CHECK(mkdir("/tmp/watched/sub", 0755) == 0);
+    CHECK(drain_events(in, NULL, 0) == (IN_CREATE | IN_ISDIR));
+    CHECK(rmdir("/tmp/watched/sub") == 0 && unlink("/tmp/watched/b.txt") == 0);
+    CHECK(drain_events(in, NULL, 0) == (IN_DELETE | IN_ISDIR | IN_DELETE));
+
+    /* A watch on a file itself: MODIFY, then DELETE_SELF and IGNORED. */
+    f = open("/tmp/watched/c.txt", O_CREAT | O_WRONLY, 0644);
+    close(f);
+    drain_events(in, NULL, 0);
+    int fwd = inotify_add_watch(in, "/tmp/watched/c.txt", IN_MODIFY | IN_DELETE_SELF);
+    CHECK(fwd > 0 && fwd != wd);
+    f = open("/tmp/watched/c.txt", O_WRONLY);
+    CHECK(pwrite(f, "y", 1, 0) == 1);
+    close(f);
+    CHECK(unlink("/tmp/watched/c.txt") == 0);
+    m = drain_events(in, NULL, 0);
+    CHECK((m & IN_MODIFY) && (m & IN_DELETE_SELF) && (m & IN_IGNORED) && (m & IN_DELETE));
+
+    /* Removing a watch: IGNORED, and no more events. */
+    CHECK(inotify_rm_watch(in, wd) == 0 && (drain_events(in, NULL, 0) & IN_IGNORED));
+    CHECK(inotify_rm_watch(in, wd) == -1 && errno == EINVAL);
+    close(open("/tmp/watched/d.txt", O_CREAT | O_WRONLY, 0644));
+    CHECK(drain_events(in, NULL, 0) == 0);
+    unlink("/tmp/watched/d.txt");
+    rmdir("/tmp/watched");
+    close(in);
+    return 0;
+}
+
 static int timerfds(void)
 {
     uint64_t n;
@@ -591,7 +675,7 @@ static int timerfds(void)
 int main(int argc, char **argv)
 {
     int r;
-    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()) || (r = sigwaits()) || (r = waitids()) || (r = signalfds()) || (r = splices()) || (r = remove_while_reading("/tmp")))
+    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()) || (r = sigwaits()) || (r = waitids()) || (r = signalfds()) || (r = splices()) || (r = inotifies()) || (r = remove_while_reading("/tmp")))
         return r;
     /* The big program needs a directory on a disk (argv[1]). */
     if (argc > 1 && ((r = big_program(argv[1])) || (r = remove_while_reading(argv[1]))))

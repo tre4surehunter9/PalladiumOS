@@ -128,6 +128,10 @@ pub const SYS_WAITID: u64 = 247;
 pub const SYS_SPLICE: u64 = 275;
 pub const SYS_SIGNALFD: u64 = 282;
 pub const SYS_SIGNALFD4: u64 = 289;
+pub const SYS_INOTIFY_INIT: u64 = 253;
+pub const SYS_INOTIFY_ADD_WATCH: u64 = 254;
+pub const SYS_INOTIFY_RM_WATCH: u64 = 255;
+pub const SYS_INOTIFY_INIT1: u64 = 294;
 pub const SYS_IO_SETUP: u64 = 206;
 pub const SYS_TIMERFD_CREATE: u64 = 283;
 pub const SYS_TIMERFD_SETTIME: u64 = 286;
@@ -676,6 +680,10 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_SPLICE => vfs::sys_splice(a1, a2, a3, a4, a5),
         SYS_SIGNALFD => vfs::sys_signalfd4(a1, a2, a3, 0),
         SYS_SIGNALFD4 => vfs::sys_signalfd4(a1, a2, a3, a4),
+        SYS_INOTIFY_INIT => vfs::sys_inotify_init(0),
+        SYS_INOTIFY_INIT1 => vfs::sys_inotify_init(a1),
+        SYS_INOTIFY_ADD_WATCH => vfs::sys_inotify_add_watch(a1, a2, a3),
+        SYS_INOTIFY_RM_WATCH => vfs::sys_inotify_rm_watch(a1, a2),
         // Linux's native async I/O (libaio): not here; callers (MariaDB's
         // InnoDB) fall back to their own I/O threads.
         SYS_IO_SETUP => -ENOSYS,
