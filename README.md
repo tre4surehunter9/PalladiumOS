@@ -334,13 +334,14 @@ Programs live in `/bin` as ordinary files, installed at boot.
 PalladiumOS runs an X server natively, no Alpine needed: `Xfbdev` (TinyX, the small "kdrive" X server TinyCore Linux uses) draws on the framebuffer (`/dev/fb0`), takes the keyboard from the console and the mouse from `/dev/psaux`. From the console:
 
 ```sh
-Xfbdev :0 & sleep 10; export DISPLAY=:0; evilwm & rxvt &
+startx              # the X server, the evilwm window manager and an rxvt terminal
+startx rxvt         # or the X server and the programs you name
 ```
 
-The X server takes the screen and keyboard as soon as it starts, so type the whole line at once. Then:
+`startx` waits for the X server to be ready, then starts the programs, and comes back to the console when X stops. While X runs, it alone gets the keyboard (like the virtual terminal an X server switches to on Linux): the shell it was started from waits. Then:
 * **Ctrl+Alt+Enter** opens a terminal (rxvt), running the PalladiumOS shell. Its programs work as anywhere else (`rxvt -e busybox top` runs one in a window of its own).
 * The window under the mouse gets the keyboard. **Alt+drag** moves a window, **Alt+middle-drag** resizes it, **Alt+right-click** lowers it, **Ctrl+Alt+Esc** closes it.
-* **Ctrl+Alt+Backspace** stops the X server and gives the console back.
+* **Ctrl+Alt+Backspace** stops the X server and gives the console back. X's messages are in `/tmp/Xfbdev.log`.
 
 What the kernel provides for it: `/dev/fb0` (the Linux framebuffer ioctls, and `mmap` of the screen itself), the console's VT and keyboard ioctls (graphics mode, medium-raw keycodes, the keymap), a PS/2 mouse (`/dev/input/mice`, `/dev/psaux`, with the IntelliMouse wheel protocol), `SIGIO` on input, and Unix-domain sockets for X's clients. The fonts are libXfont's two built-in ones (`fixed` and `cursor`). In QEMU, use the UEFI image with `-vga none -device VGA,edid=on,xres=1280,yres=720` for a 720p screen.
 

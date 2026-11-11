@@ -46,6 +46,7 @@ fn mode_string(mode: u32) -> alloc::string::String {
         userlib::S_IFLNK => 'l',
         userlib::S_IFCHR => 'c',
         userlib::S_IFIFO => 'p',
+        userlib::S_IFSOCK => 's',
         _ => '-',
     };
     let mut s = alloc::string::String::new();

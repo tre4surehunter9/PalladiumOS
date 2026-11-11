@@ -78,7 +78,15 @@ pub fn keyboard_mode() -> u8 {
     KB_MODE.load(Ordering::SeqCst)
 }
 
+/// The process (thread group) that put the keyboard in a raw mode: an X
+/// server. Like the virtual terminal it switched to on Linux, it alone gets
+/// the keys; other readers of the console (the shell it was started from)
+/// wait until the keyboard is back to normal.
+static KB_OWNER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn set_keyboard_mode(mode: u8) {
+    let raw = matches!(mode, K_RAW | K_MEDIUMRAW);
+    KB_OWNER.store(if raw { crate::process::current_tgid() } else { 0 }, Ordering::SeqCst);
     KB_MODE.store(mode, Ordering::SeqCst);
     E0_SEEN.store(false, Ordering::SeqCst);
     *TTY.lock() = None; // decoded state starts over
@@ -86,6 +94,21 @@ pub fn set_keyboard_mode(mode: u8) {
 
 fn raw_mode() -> bool {
     matches!(keyboard_mode(), K_RAW | K_MEDIUMRAW)
+}
+
+/// Is the keyboard another process's (in a raw mode it set)? Then this
+/// process's console reads wait, taking nothing.
+fn not_ours() -> bool {
+    let owner = KB_OWNER.load(Ordering::SeqCst);
+    raw_mode() && owner != 0 && owner != crate::process::current_tgid()
+}
+
+/// A process exited: if it had the keyboard in a raw mode, it's back to
+/// normal (an X server that crashed mustn't take the keyboard with it).
+pub fn process_exited(tgid: u64) {
+    if tgid != 0 && KB_OWNER.load(Ordering::SeqCst) == tgid {
+        set_keyboard_mode(K_XLATE);
+    }
 }
 
 /// A scancode as the keyboard mode wants it: as is (K_RAW), or as a Linux
@@ -294,6 +317,22 @@ pub fn read(buf: &mut [u8]) -> i64 {
     });
 
     loop {
+        if not_ours() {
+            // The keyboard is an X server's: wait for it to give it back.
+            if let Some(deadline) = timeout {
+                if crate::process::ticks() >= deadline {
+                    return 0;
+                }
+            }
+            if crate::process::signal_pending() {
+                return -crate::syscall::EINTR;
+            }
+            match timeout {
+                Some(deadline) => crate::process::block_on_until(crate::process::CONSOLE_KEY, deadline),
+                None => crate::process::block_on(crate::process::CONSOLE_KEY),
+            }
+            continue;
+        }
         // Raw keyboard modes: the codes themselves, no line editing or echo.
         if raw_mode() {
             let mut n = 0;
@@ -362,6 +401,9 @@ pub fn read(buf: &mut [u8]) -> i64 {
 /// read would (echoing them, finishing lines).
 pub fn input_ready() -> bool {
     crate::task::keyboard::init_queue();
+    if not_ours() {
+        return false;
+    }
     if raw_mode() {
         return crate::task::keyboard::has_scancodes();
     }

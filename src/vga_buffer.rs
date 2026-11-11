@@ -532,6 +532,7 @@ pub fn set_graphics(on: bool, owner: u64) {
 /// (an X server that crashed mustn't leave the console dark).
 pub fn process_exited(pid: u64) {
     use core::sync::atomic::Ordering;
+    crate::tty::process_exited(pid);
     if pid != 0 && GRAPHICS_OWNER.load(Ordering::SeqCst) == pid {
         set_graphics(false, 0);
         crate::tty::set_keyboard_mode(crate::tty::K_XLATE);

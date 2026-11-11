@@ -45,6 +45,8 @@ pub struct Fdfs {
     mtimes: alloc::collections::BTreeMap<usize, u64>,
     /// File nodes that are symlinks (their data is the target).
     symlinks: alloc::collections::BTreeSet<usize>,
+    /// File nodes that are Unix sockets' names (no data).
+    sockets: alloc::collections::BTreeSet<usize>,
     /// (uid, gid) of nodes not owned by root.
     owners: alloc::collections::BTreeMap<usize, (u32, u32)>,
     /// Hard links: extra names (directory, name) for file nodes. A node's
@@ -64,6 +66,7 @@ impl Fdfs {
             perms: Default::default(),
             mtimes: Default::default(),
             symlinks: Default::default(),
+            sockets: Default::default(),
             owners: Default::default(),
             links: Vec::new(),
         }
@@ -427,6 +430,7 @@ impl FileSystem for Fdfs {
         let i = ino as usize;
         let (kind, size, perm, nlink) = match self.nodes.get(i).ok_or(ENOENT)? {
             Node::File { data, .. } if self.symlinks.contains(&i) => (FileType::Symlink, data.len() as u64, 0o777, 1),
+            Node::File { .. } if self.sockets.contains(&i) => (FileType::Socket, 0, 0o755, 1),
             Node::File { data, .. } => {
                 let names = 1 + self.links.iter().filter(|&&(_, _, node)| node == i).count() as u32;
                 (FileType::File, data.len() as u64, 0o644, names)
@@ -464,6 +468,8 @@ impl FileSystem for Fdfs {
                     FileType::Dir
                 } else if self.symlinks.contains(&idx) {
                     FileType::Symlink
+                } else if self.sockets.contains(&idx) {
+                    FileType::Socket
                 } else {
                     FileType::File
                 };
@@ -474,6 +480,11 @@ impl FileSystem for Fdfs {
 
     fn create(&mut self, dir: Ino, name: &str, kind: FileType, perm: u32) -> FsResult<Ino> {
         let idx = self.create_in(dir as usize, name, kind == FileType::Dir)?;
+        if kind == FileType::Socket {
+            self.sockets.insert(idx);
+        } else {
+            self.sockets.remove(&idx);
+        }
         self.perms.insert(idx, perm & 0o7777);
         self.mtimes.insert(idx, crate::rtc::now());
         Ok(idx as Ino)

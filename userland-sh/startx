@@ -1,0 +1,55 @@
+#!/bin/busybox sh
+# Copyright (c) 2026 tre4surehunter9
+# startx: the X Window System on the whole screen.
+#
+#   startx              the X server (Xfbdev), evilwm and a terminal (rxvt)
+#   startx PROGRAM...   the X server and PROGRAM instead (e.g. startx rxvt)
+#
+# Ctrl+Alt+Enter opens a terminal, Ctrl+Alt+Backspace stops X and comes
+# back here. The X server's messages are in /tmp/Xfbdev.log.
+
+if ! [ -x /bin/Xfbdev ]; then
+    echo "startx: no X server (build it with tools/ports/tinyx.sh)" >&2
+    exit 1
+fi
+if [ -S /tmp/.X11-unix/X0 ] && busybox pgrep Xfbdev >/dev/null; then
+    echo "startx: X is already running (DISPLAY=:0)" >&2
+    exit 1
+fi
+rm -f /tmp/.X11-unix/X0
+
+Xfbdev :0 >/tmp/Xfbdev.log 2>&1 &
+x=$!
+
+# Wait for it to listen (not a fixed time: X programs started too early
+# just quit).
+i=0
+while ! [ -S /tmp/.X11-unix/X0 ]; do
+    if ! kill -0 $x 2>/dev/null; then
+        wait $x
+        echo "startx: the X server stopped (status $?):" >&2
+        tail -5 /tmp/Xfbdev.log >&2
+        exit 1
+    fi
+    i=$((i + 1))
+    if [ $i -gt 300 ]; then
+        echo "startx: the X server didn't start (see /tmp/Xfbdev.log)" >&2
+        kill $x
+        exit 1
+    fi
+    sleep 0.1
+done
+
+export DISPLAY=:0
+if [ $# -gt 0 ]; then
+    "$@" &
+else
+    evilwm &
+    rxvt &
+fi
+
+# Until the X server ends (Ctrl+Alt+Backspace); its programs quit with it
+# (their connection is gone).
+wait $x
+rm -f /tmp/.X11-unix/X0
+echo "X stopped."

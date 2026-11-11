@@ -198,7 +198,19 @@ int main(void)
     int srv = socket(AF_UNIX, SOCK_STREAM, 0);
     CHECK(srv >= 0 && bind(srv, (struct sockaddr *)&addr, alen) == 0 && listen(srv, 4) == 0);
     struct stat sb;
-    CHECK(stat("/tmp/test.sock", &sb) == 0); /* the name is a file */
+    CHECK(stat("/tmp/test.sock", &sb) == 0 && S_ISSOCK(sb.st_mode)); /* the name is a socket file */
+    CHECK(open("/tmp/test.sock", O_RDONLY) == -1 && errno == ENXIO); /* connected to, not opened */
+    {
+        /* also on ext2 (/tmp is in memory) */
+        struct sockaddr_un ea;
+        socklen_t el = path_addr(&ea, "/test_unix.sock");
+        unlink("/test_unix.sock");
+        int es = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(es >= 0 && bind(es, (struct sockaddr *)&ea, el) == 0);
+        CHECK(lstat("/test_unix.sock", &sb) == 0 && S_ISSOCK(sb.st_mode));
+        close(es);
+        CHECK(unlink("/test_unix.sock") == 0);
+    }
     socklen_t gl = sizeof got;
     CHECK(getsockname(srv, (struct sockaddr *)&got, &gl) == 0 && strcmp(got.sun_path, "/tmp/test.sock") == 0);
     int again = socket(AF_UNIX, SOCK_STREAM, 0);

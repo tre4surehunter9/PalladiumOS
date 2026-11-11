@@ -50,6 +50,8 @@ pub enum FileType {
     Dir,
     Symlink,
     CharDevice(Device),
+    /// A Unix-domain socket's name (made by bind).
+    Socket,
 }
 
 /// Filesystem usage, for statfs/df.

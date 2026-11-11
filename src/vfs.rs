@@ -75,12 +75,14 @@ const FD_CLOEXEC: u64 = 1;
 // st_mode bits
 const S_IFIFO: u32 = 0o010000;
 const S_IFCHR: u32 = 0o020000;
+const S_IFSOCK: u32 = 0o140000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 const S_IFLNK: u32 = 0o120000;
 
 // d_type values for getdents64
 const DT_CHR: u8 = 2;
+const DT_SOCK: u8 = 12;
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 const DT_LNK: u8 = 10;
@@ -250,14 +252,24 @@ impl Files {
     }
 
     /// Close the close-on-exec fds (done by execve).
-    pub fn close_on_exec(&mut self) {
+    /// execve: take out the close-on-exec descriptors. They close when the
+    /// result is dropped: the caller does that without holding the process
+    /// table (closing a terminal's master hangs it up, which takes it).
+    #[must_use]
+    pub fn close_on_exec(&mut self) -> ClosedFds {
+        let mut closed = Vec::new();
         for slot in &mut self.fds {
             if slot.as_ref().is_some_and(|s| s.cloexec) {
-                *slot = None;
+                closed.extend(slot.take());
             }
         }
+        ClosedFds(closed)
     }
 }
+
+/// Descriptors taken out of a table (close_on_exec): they close when this
+/// is dropped.
+pub struct ClosedFds(#[allow(dead_code)] Vec<Slot>);
 
 fn with_process<T>(f: impl FnOnce(&mut Files) -> T) -> T {
     crate::process::with_current_files(f)
@@ -435,6 +447,7 @@ fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
             }
         }
         FileType::Symlink => return -ELOOP, // a loop of symlinks
+        FileType::Socket => return -ENXIO, // sockets are connected to, not opened
         FileType::File => {
             if flags & O_DIRECTORY != 0 {
                 return -ENOTDIR;
@@ -1293,6 +1306,7 @@ fn stat_loc(loc: Loc, out: &mut [u8]) -> i64 {
         FileType::Dir => S_IFDIR,
         FileType::Symlink => S_IFLNK,
         FileType::CharDevice(_) => S_IFCHR,
+        FileType::Socket => S_IFSOCK,
     };
     fill_stat_owned(
         out,
@@ -1397,6 +1411,7 @@ pub fn sys_getdents64(fd: u64, out: &mut [u8]) -> i64 {
                     FileType::File => DT_REG,
                     FileType::Symlink => DT_LNK,
                     FileType::CharDevice(_) => DT_CHR,
+                    FileType::Socket => DT_SOCK,
                 };
                 (name, ino, t)
             })),

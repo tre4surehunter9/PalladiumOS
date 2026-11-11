@@ -238,6 +238,33 @@ int main(void)
     close(p[0]);
     close(p[1]);
 
+    /* A program exits with a terminal's master still open while its child's
+     * session has the terminal (as rxvt does when X goes away): the session
+     * is hung up (SIGHUP). The kernel used to freeze here: the files were
+     * closed with the process table held, which hanging up takes again. */
+    {
+        pid_t owner = fork();
+        if (owner == 0) {
+            int mm, ss;
+            if (openpty(&mm, &ss, NULL, NULL, NULL) != 0)
+                _exit(2);
+            pid_t c = fork();
+            if (c == 0) {
+                close(mm);
+                setsid();
+                if (ioctl(ss, TIOCSCTTY, 0) != 0)
+                    _exit(3);
+                pause(); /* until the hang-up's SIGHUP ends it */
+                _exit(0);
+            }
+            close(ss);
+            usleep(200000);
+            _exit(0); /* the master is still open */
+        }
+        CHECK(waitpid(owner, &st, 0) == owner && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+        usleep(300000); /* the hung-up session's process goes (the kernel reaps it) */
+    }
+
     printf("test_pty: all checks passed\n");
     return 0;
 }

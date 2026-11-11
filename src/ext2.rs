@@ -47,12 +47,14 @@ const S_IFMT: u16 = 0xF000;
 const S_IFDIR: u16 = 0x4000;
 const S_IFREG: u16 = 0x8000;
 const S_IFLNK: u16 = 0xA000;
+const S_IFSOCK: u16 = 0xC000;
 /// Symlink targets shorter than this live in the inode itself.
 const FAST_SYMLINK_MAX: usize = 60;
 const INDEX_FL: u32 = 0x1000;
 
 const FT_REG: u8 = 1;
 const FT_DIR: u8 = 2;
+const FT_SOCK: u8 = 6;
 const FT_SYMLINK: u8 = 7;
 
 const CACHE_BLOCKS: usize = 1024;
@@ -746,6 +748,7 @@ impl Ext2 {
         match kind {
             FileType::Dir => FT_DIR,
             FileType::Symlink => FT_SYMLINK,
+            FileType::Socket => FT_SOCK,
             _ => FT_REG,
         }
     }
@@ -754,6 +757,7 @@ impl Ext2 {
         match inode.mode() & S_IFMT {
             S_IFDIR => FileType::Dir,
             S_IFLNK => FileType::Symlink,
+            S_IFSOCK => FileType::Socket,
             _ => FileType::File,
         }
     }
@@ -1015,6 +1019,7 @@ impl FileSystem for Ext2 {
                 FT_DIR => FileType::Dir,
                 FT_REG => FileType::File,
                 FT_SYMLINK => FileType::Symlink,
+                FT_SOCK => FileType::Socket,
                 _ => self.meta(ino).map(|m| m.kind).unwrap_or(FileType::File),
             };
             out.push((name, ino, kind));
@@ -1246,6 +1251,10 @@ impl Ext2 {
                 if t.len() < FAST_SYMLINK_MAX {
                     inode.raw[40..40 + t.len()].copy_from_slice(t.as_bytes());
                 }
+            }
+            FileType::Socket => {
+                wr16(&mut inode.raw, 0, S_IFSOCK | perm);
+                inode.set_links(1);
             }
             _ => {
                 wr16(&mut inode.raw, 0, S_IFREG | perm);

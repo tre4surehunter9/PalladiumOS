@@ -134,7 +134,7 @@ fn key_for(name: &Name, must_exist: bool) -> Result<Key, i64> {
                     return Err(EADDRINUSE);
                 }
                 let umask = crate::process::with_current_files(|f| f.umask);
-                let loc = crate::mounts::create(abs, crate::mounts::FileType::File, 0o777 & !umask)?;
+                let loc = crate::mounts::create(abs, crate::mounts::FileType::Socket, 0o777 & !umask)?;
                 return Ok(Key::File(loc.mount, loc.ino));
             }
             let (loc, meta) = crate::mounts::stat(abs)?;

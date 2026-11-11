@@ -534,6 +534,7 @@ pub fn preempt() {
 /// End the current process. Its parent is woken if it's waiting; its
 /// children are handed to the kernel (task 0), which reaps them.
 pub fn exit_current(reason: ExitReason) -> ! {
+    drop_files_of_current();
     {
         let mut table = TABLE.lock();
         let cur = current_pid();
@@ -542,9 +543,6 @@ pub fn exit_current(reason: ExitReason) -> ! {
         let ppid = {
             let p = table.get_mut(&cur).unwrap();
             p.state = State::Zombie(reason);
-            // Closes everything (pipe ends included) unless other threads
-            // still share the files.
-            p.files = Arc::new(Mutex::new(Files::empty()));
             p.ppid
         };
         for p in table.values_mut() {
@@ -579,6 +577,15 @@ pub fn exit_current(reason: ExitReason) -> ! {
     unreachable!("a zombie was scheduled");
 }
 
+/// An exiting thread lets go of its files: everything closes (pipe ends,
+/// terminals...) unless other threads still share them. Done before it's a
+/// zombie (nobody reaps it meanwhile) and without the process table held:
+/// closing can take it (a terminal's master hangs up its session).
+fn drop_files_of_current() {
+    let old = TABLE.lock().get_mut(&current_pid()).map(|p| core::mem::replace(&mut p.files, Arc::new(Mutex::new(Files::empty()))));
+    drop(old);
+}
+
 /// Kill the current process (all its threads) with a signal (used by
 /// fault handlers).
 pub fn kill_current(signal: i32) -> ! {
@@ -608,19 +615,24 @@ fn other_threads(table: &BTreeMap<u64, Box<Process>>, cur: u64) -> Vec<u64> {
 /// End another thread now (it isn't running: there's one CPU). Its kernel
 /// stack goes when it's reaped: by the kernel, unless it's the process's
 /// first thread, which its parent waits for.
-fn end_thread_locked(table: &mut BTreeMap<u64, Box<Process>>, tid: u64, reason: ExitReason) {
-    let Some(t) = table.get_mut(&tid) else { return };
+/// Returns its files, for the caller to drop once the table is unlocked
+/// (see drop_files_of_current).
+#[must_use]
+fn end_thread_locked(table: &mut BTreeMap<u64, Box<Process>>, tid: u64, reason: ExitReason) -> Option<Arc<Mutex<Files>>> {
+    let t = table.get_mut(&tid)?;
     t.state = State::Zombie(reason);
-    t.files = Arc::new(Mutex::new(Files::empty()));
+    let files = core::mem::replace(&mut t.files, Arc::new(Mutex::new(Files::empty())));
     if t.pid != t.tgid {
         t.ppid = 0;
     }
+    Some(files)
 }
 
 /// exit(): end the calling thread. The last thread of a process ends the
 /// process; a process's first thread that exits early stays a zombie
 /// until the others are done (that's what its parent waits for).
 pub fn exit_thread(code: i32) -> ! {
+    drop_files_of_current();
     let alone = {
         let mut table = TABLE.lock();
         let cur = current_pid();
@@ -628,7 +640,7 @@ pub fn exit_thread(code: i32) -> ! {
         let others = other_threads(&table, cur);
         if !others.is_empty() && table[&cur].pid != table[&cur].tgid {
             // Not the first thread, and not the last: just this thread.
-            end_thread_locked(&mut table, cur, ExitReason::Exited(code));
+            let _ = end_thread_locked(&mut table, cur, ExitReason::Exited(code)); // (already dropped)
             wake_kernel_locked(&mut table);
             false
         } else {
@@ -646,15 +658,18 @@ pub fn exit_thread(code: i32) -> ! {
 pub fn exit_group(reason: ExitReason) -> ! {
     // A program that had the screen (an X server) gives it back.
     crate::vga_buffer::process_exited(current_tgid());
-    let leader_alive_elsewhere = {
+    drop_files_of_current();
+    let (leader_alive_elsewhere, their_files) = {
         let mut table = TABLE.lock();
         let cur = current_pid();
         let tgid = table[&cur].tgid;
+        let mut files = Vec::new();
         for t in other_threads(&table, cur) {
-            end_thread_locked(&mut table, t, reason);
+            files.extend(end_thread_locked(&mut table, t, reason));
         }
-        tgid != cur
+        (tgid != cur, files)
     };
+    drop(their_files); // (the table is unlocked)
     if leader_alive_elsewhere {
         // A thread other than the first ends the process: the first thread
         // (ended above, a zombie now) is what the parent sees exit.
@@ -662,7 +677,7 @@ pub fn exit_group(reason: ExitReason) -> ! {
         let cur = current_pid();
         let tgid = table[&cur].tgid;
         clear_child_tid(&mut table, cur);
-        end_thread_locked(&mut table, cur, reason);
+        let _ = end_thread_locked(&mut table, cur, reason); // (already dropped)
         notify_exit_locked(&mut table, tgid);
         drop(table);
         schedule();
@@ -1070,18 +1085,22 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
     };
 
     // Point of no return: switch to the new address space, free the old one.
+    // (Files closed here are dropped after the table is unlocked: see
+    // drop_files_of_current.)
+    let mut closed_files = Vec::new();
+    let closed_fds;
     let old_p4 = {
         let mut table = TABLE.lock();
         let cur = current_pid();
         // The other threads end; they keep the old address space until
         // they're reaped (the last one frees it).
         for t in other_threads(&table, cur) {
-            end_thread_locked(&mut table, t, ExitReason::Signaled(SIGKILL));
+            closed_files.extend(end_thread_locked(&mut table, t, ExitReason::Signaled(SIGKILL)));
         }
         wake_kernel_locked(&mut table);
         let p = table.get_mut(&cur).unwrap();
         let old_shared = Arc::strong_count(&p.mm) > 1;
-        p.files.lock().close_on_exec();
+        closed_fds = Some(p.files.lock().close_on_exec());
         p.name = basename(&path);
         p.argv = argv.clone();
         p.exe = crate::filesystem::normalize(&p.files.lock().cwd, &path);
@@ -1099,6 +1118,8 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
         (core::mem::replace(&mut p.p4, image.p4), borrowed, old_shared)
     };
     let (old_p4, borrowed, old_shared) = old_p4;
+    drop(closed_files);
+    drop(closed_fds);
     apply_exec_ids(setuid, setgid);
     let (_, flags) = Cr3::read();
     unsafe { Cr3::write(image.p4, flags) };
