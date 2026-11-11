@@ -1,0 +1,14 @@
+/* XPM */
+/* The desktop's background: teal, as Windows 95's. */
+static char *desktop[] = {
+"8 8 1 1",
+"  c #008080",
+"        ",
+"        ",
+"        ",
+"        ",
+"        ",
+"        ",
+"        ",
+"        "
+};

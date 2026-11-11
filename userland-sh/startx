@@ -2,11 +2,13 @@
 # Copyright (c) 2026 tre4surehunter9
 # startx: the X Window System on the whole screen.
 #
-#   startx              the X server (Xfbdev), evilwm and a terminal (rxvt)
-#   startx PROGRAM...   the X server and PROGRAM instead (e.g. startx rxvt)
+#   startx              the X server (Xfbdev) with fvwm95 (a taskbar and a
+#                       Start menu) and a terminal (rxvt)
+#   startx PROGRAM...   the X server and PROGRAM instead (e.g. startx evilwm)
 #
-# Ctrl+Alt+Enter opens a terminal, Ctrl+Alt+Backspace stops X and comes
-# back here. The X server's messages are in /tmp/Xfbdev.log.
+# Quitting fvwm95 (Start, Shut Down) or Ctrl+Alt+Backspace stops X and comes
+# back here. The X server's messages are in /tmp/Xfbdev.log, its programs'
+# in /tmp/startx.log.
 
 if ! [ -x /bin/Xfbdev ]; then
     echo "startx: no X server (build it with tools/ports/tinyx.sh)" >&2
@@ -41,11 +43,15 @@ while ! [ -S /tmp/.X11-unix/X0 ]; do
 done
 
 export DISPLAY=:0
+: >/tmp/startx.log
 if [ $# -gt 0 ]; then
-    "$@" &
+    "$@" >>/tmp/startx.log 2>&1 &
+elif command -v fvwm95 >/dev/null; then
+    # It opens a terminal itself. Quitting it ends the session.
+    (fvwm95 >>/tmp/startx.log 2>&1; kill $x 2>/dev/null) &
 else
-    evilwm &
-    rxvt &
+    evilwm >>/tmp/startx.log 2>&1 &
+    rxvt >>/tmp/startx.log 2>&1 &
 fi
 
 # Until the X server ends (Ctrl+Alt+Backspace); its programs quit with it

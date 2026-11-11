@@ -124,10 +124,12 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
         "graphics",
         "the X Window System",
         &[
-            ("startx", "X with a window manager and a terminal (Ctrl+Alt+Backspace: back)"),
+            ("startx", "X with fvwm95 and a terminal (Start > Shut Down, or Ctrl+Alt+Backspace: back)"),
+            ("fvwm95", "a window manager like Windows 95: a taskbar and a Start menu"),
             ("Xfbdev", "the X server, on the whole screen (Xfbdev &; X programs use DISPLAY=:0)"),
             ("evilwm", "a window manager (move: Alt+drag, resize: Alt+middle-drag, terminal: Ctrl+Alt+Enter)"),
             ("rxvt", "a terminal window (rxvt &, or rxvt -e PROGRAM)"),
+            ("xpmroot", "set the desktop's background to an XPM picture"),
         ],
     ),
     (
@@ -185,6 +187,16 @@ fn exists(path: &str) -> bool {
 fn is_busybox_link(name: &str) -> bool {
     let mut buf = [0u8; 64];
     readlink(&alloc::format!("/bin/{}", name), &mut buf).is_ok_and(|t| t == "/bin/busybox")
+}
+
+/// BusyBox's tools in /usr/bin: the links to it there (other programs on
+/// the system disk, like fvwm95, aren't).
+fn busybox_tools() -> Vec<String> {
+    let mut buf = [0u8; 64];
+    dir_names("/usr/bin")
+        .into_iter()
+        .filter(|t| readlink(&alloc::format!("/usr/bin/{}", t), &mut buf).is_ok_and(|l| l == "/bin/busybox"))
+        .collect()
 }
 
 /// The names in a directory (sorted).
@@ -246,7 +258,7 @@ fn index() {
         println!("  {:<12} programs not in a category", "other");
     }
     if exists("/usr/bin") {
-        println!("  {:<12} {} more tools: vi awk sed find tar ...", "busybox", dir_names("/usr/bin").len());
+        println!("  {:<12} {} more tools: vi awk sed find tar ...", "busybox", busybox_tools().len());
     }
     println!("  {:<12} shell commands: cd export jobs fg trap set ...", "builtins");
     println!("  {:<12} pipes, redirection, variables, if/for/while", "syntax");
@@ -311,7 +323,7 @@ fn keys() {
 }
 
 fn busybox() {
-    let tools = dir_names("/usr/bin");
+    let tools = busybox_tools();
     if tools.is_empty() {
         println!("BusyBox isn't installed (build it with tools/ports/busybox.sh).");
         return;

@@ -17,7 +17,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-ALL_PORTS="lua dash fastfetch tcc micropython busybox dropbear tinyx x11-clients"
+ALL_PORTS="lua dash fastfetch tcc micropython busybox dropbear tinyx x11-clients fvwm95"
 STAMPS=target/ports/stamps
 
 # What each port produces (relative to target/).
@@ -32,6 +32,7 @@ outputs() {
         dropbear) echo "ports/bin/dropbear ports/bin/dbclient ports/bin/dropbearkey ports/bin/scp" ;;
         tinyx) echo "ports/bin/Xfbdev ports/x11/lib/libX11.a" ;;
         x11-clients) echo "ports/bin/rxvt ports/bin/evilwm" ;;
+        fvwm95) echo "sysroot/bin/fvwm95 sysroot/bin/xpmroot sysroot/lib/X11/fvwm95/FvwmTaskBar" ;;
     esac
 }
 

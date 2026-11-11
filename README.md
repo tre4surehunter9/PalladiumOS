@@ -33,7 +33,7 @@
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
 * **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink, and an **SSH server** (Dropbear): log in from your own terminal with `ssh -p 2222 root@localhost`; a web server in PalladiumOS on port 80 (Apache, `busybox httpd`) is at `http://localhost:8080`
 * **Alpine Linux**: `alpine` sets up a real Alpine root filesystem on its own disk, where `apk add` installs Alpine's packages and they run on PalladiumOS: Python (including `multiprocessing`), Node.js, git, curl, vim, htop, and a web stack: Apache with PHP, SQLite and MariaDB
-* **The X Window System**, native: an X server (TinyX's `Xfbdev`) on the framebuffer, with the keyboard and a PS/2 mouse, a window manager (evilwm) and terminals (rxvt). See [X](#the-x-window-system)
+* **The X Window System**, native: an X server (TinyX's `Xfbdev`) on the framebuffer, with the keyboard and a PS/2 mouse, window managers (fvwm95, with a taskbar and a Start menu, and evilwm) and terminals (rxvt). See [X](#the-x-window-system)
 * **Terminals**: pseudo-terminals (`/dev/ptmx`, `/dev/pts/N`), sessions and controlling terminals, job control
 * **A userland**: a POSIX-style shell, about 50 of PalladiumOS's own tools, and ported software: BusyBox, Lua, dash, MicroPython, fastfetch and TinyCC (a C compiler that runs inside PalladiumOS)
 * **A Linux-style boot log** with `[  OK  ]` lines, and `dmesg`
@@ -272,6 +272,7 @@ Real-world programs are built from their original source by scripts in `tools/po
 * `tools/ports/dropbear.sh`: Dropbear SSH 2026.94 (GPG-signed release, checksum-pinned): `dropbear` (the server), `dbclient` (a client), `dropbearkey` and `scp`. See [SSH](#ssh).
 * `tools/ports/tinyx.sh`: the X server, TinyX's `Xfbdev`, and the X libraries it and X programs need (libX11 on libxcb, libXext, libXfont 1.5 without FreeType, zlib...), static, into `target/ports/x11`. See [X](#the-x-window-system).
 * `tools/ports/x11-clients.sh`: X programs built on those libraries: `rxvt` 2.7.10 (a terminal) and `evilwm` 1.5 (a window manager), patched for the X server's built-in fonts and its lack of XKB.
+* `tools/ports/fvwm95.sh`: fvwm95 2.0.43f, the window manager with the Windows 95 look, with libXpm 3.5.20 (and xbitmaps' headers), all on the system disk: `/usr/bin/fvwm95` and `xpmroot`, and in `/usr/lib/X11` its modules (FvwmTaskBar...), PalladiumOS's configuration (`tools/ports/fvwm95/system.fvwm95rc`) and its icons.
 
 The binaries are ordinary Linux static executables too, so they can be run on a Linux host to compare behaviour.
 
@@ -334,13 +335,14 @@ Programs live in `/bin` as ordinary files, installed at boot.
 PalladiumOS runs an X server natively, no Alpine needed: `Xfbdev` (TinyX, the small "kdrive" X server TinyCore Linux uses) draws on the framebuffer (`/dev/fb0`), takes the keyboard from the console and the mouse from `/dev/psaux`. From the console:
 
 ```sh
-startx              # the X server, the evilwm window manager and an rxvt terminal
-startx rxvt         # or the X server and the programs you name
+startx              # the X server, fvwm95 (a taskbar and a Start menu) and an rxvt terminal
+startx evilwm       # or the X server and the programs you name
 ```
 
-`startx` waits for the X server to be ready, then starts the programs, and comes back to the console when X stops. While X runs, it alone gets the keyboard (like the virtual terminal an X server switches to on Linux): the shell it was started from waits. Then:
-* **Ctrl+Alt+Enter** opens a terminal (rxvt), running the PalladiumOS shell. Its programs work as anywhere else (`rxvt -e busybox top` runs one in a window of its own).
-* The window under the mouse gets the keyboard. **Alt+drag** moves a window, **Alt+middle-drag** resizes it, **Alt+right-click** lowers it, **Ctrl+Alt+Esc** closes it.
+`startx` waits for the X server to be ready, then starts the programs, and comes back to the console when X stops (or fvwm95 quits). Their messages are in `/tmp/startx.log`. While X runs, it alone gets the keyboard (like the virtual terminal an X server switches to on Linux): the shell it was started from waits. Then:
+* **fvwm95**: the **Start** button's menu opens terminals and programs (top, fastfetch, edit, vi, MicroPython, Lua, Alpine), and **Shut Down** quits (back to the console). Windows have Windows 95's title bars (minimize, maximize, close); the taskbar shows each one. Clicking the desktop opens a menu too. Your own configuration goes in `~/.fvwm95rc` (start from `/usr/lib/X11/fvwm95/system.fvwm95rc`).
+* **evilwm** (`startx evilwm`): **Ctrl+Alt+Enter** opens a terminal. It draws only window borders, so with no windows open, nothing shows. The window under the mouse gets the keyboard. **Alt+drag** moves a window, **Alt+middle-drag** resizes it, **Alt+right-click** lowers it, **Ctrl+Alt+Esc** closes it.
+* rxvt runs the PalladiumOS shell. Its programs work as anywhere else (`rxvt -e busybox top` runs one in a window of its own).
 * **Ctrl+Alt+Backspace** stops the X server and gives the console back. X's messages are in `/tmp/Xfbdev.log`.
 
 What the kernel provides for it: `/dev/fb0` (the Linux framebuffer ioctls, and `mmap` of the screen itself), the console's VT and keyboard ioctls (graphics mode, medium-raw keycodes, the keymap), a PS/2 mouse (`/dev/input/mice`, `/dev/psaux`, with the IntelliMouse wheel protocol), `SIGIO` on input, and Unix-domain sockets for X's clients. The fonts are libXfont's two built-in ones (`fixed` and `cursor`). In QEMU, use the UEFI image with `-vga none -device VGA,edid=on,xres=1280,yres=720` for a 720p screen.
@@ -466,6 +468,8 @@ The release images include software by other people, under their own licences. P
 | [zlib](https://zlib.net) | 1.3.1 | Zlib | linked into `Xfbdev` | [zlib-1.3.1.tar.gz](https://zlib.net/fossils/zlib-1.3.1.tar.gz) |
 | [rxvt](https://rxvt.sourceforge.net) | 2.7.10 | GPL-2.0-or-later | `/bin/rxvt` | [rxvt-2.7.10.tar.gz](https://distfiles.macports.org/rxvt/rxvt-2.7.10.tar.gz) (MacPorts' copy; same checksums as MacPorts' and Arch's); PalladiumOS's changes are in `tools/ports/x11-clients.sh` |
 | [evilwm](https://www.6809.org.uk/evilwm/) | 1.5 | permissive (the aewm and 9wm licences; see its `README`) | `/bin/evilwm` | [evilwm-1.5.tar.gz](https://www.6809.org.uk/evilwm/evilwm-1.5.tar.gz); PalladiumOS's changes are in `tools/ports/x11-clients.sh` |
+| [fvwm95](https://sourceforge.net/projects/fvwm95/) | 2.0.43f | fvwm's licence (Robert Nation's: any use, keeping the copyright notices) for fvwm's own code, GPL-2.0-or-later for the rest (its `GPL`; see each file) | `/usr/bin/fvwm95`, `/usr/bin/xpmroot`, `/usr/lib/X11/fvwm95` (modules), `/usr/lib/X11/pixmaps` and `mini-icons` | [fvwm95-2.0.43f.tar.gz](https://downloads.sourceforge.net/project/fvwm95/fvwm95/2.0.43f/fvwm95-2.0.43f.tar.gz); PalladiumOS's changes and configuration are in `tools/ports/fvwm95.sh` and `tools/ports/fvwm95/` |
+| [libXpm](https://www.x.org), [xbitmaps](https://www.x.org) | 3.5.20, 1.1.4 | MIT/X11-style; see each one's `COPYING` | linked into fvwm95 (libXpm); headers only (xbitmaps) | [libXpm-3.5.20.tar.xz](https://www.x.org/releases/individual/lib/libXpm-3.5.20.tar.xz), [xbitmaps-1.1.4.tar.xz](https://www.x.org/releases/individual/data/xbitmaps-1.1.4.tar.xz) |
 | GCC runtime (`libgcc`, `crtbeginS.o`) | 16.2.1 | GPL-3.0 with the GCC Runtime Library Exception | linked into the C programs | [gcc.gnu.org](https://gcc.gnu.org) |
 | Rust crates ([smoltcp](https://github.com/smoltcp-rs/smoltcp), [x86_64](https://github.com/rust-osdev/x86_64), [bootloader](https://github.com/rust-osdev/bootloader), [spin](https://github.com/mvdnes/spin-rs), [pc-keyboard](https://github.com/rust-embedded-community/pc-keyboard)...) | see `Cargo.lock` | permissive: MIT and/or Apache-2.0 for most, 0BSD (smoltcp, managed), Unlicense-or-MIT (byteorder); `cargo metadata` lists each | the kernel | [crates.io](https://crates.io) |
 

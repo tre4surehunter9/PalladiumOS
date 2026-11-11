@@ -1,0 +1,202 @@
+# fvwm95's configuration on PalladiumOS: /usr/lib/X11/fvwm95/system.fvwm95rc
+# (used when there's no ~/.fvwm95rc). Made from fvwm95 2.0.43f's own
+# system.fvwm95rc (GPL, like fvwm95): its styles, window functions, window
+# menus, bindings and taskbar, with the X server's built-in "fixed" font
+# (the only one) and a Start menu of PalladiumOS's programs.
+
+#------------------------------------------------------------------------------
+# Fonts and colors
+#------------------------------------------------------------------------------
+
+WindowFont      fixed
+IconFont        fixed
+MenuFont        fixed
+
+DefaultColors   Black #c3c3c3 #c3c3c3 #828282
+HilightColors   White #000080
+StickyColors    #828282 #a6caf0
+
+#------------------------------------------------------------------------------
+# Windows
+#------------------------------------------------------------------------------
+
+Style "*" NoIcon
+Style "*" SloppyFocus
+Style "*" MWMFunctions
+Style "*" HintOverride
+Style "*" MWMDecor
+Style "*" OLDecor
+Style "*" RandomPlacement, SmartPlacement
+Style "*" BorderWidth 5, HandleWidth 5
+OpaqueMoveSize 10
+EdgeScroll 100 100
+EdgeResistance 800 100
+DeskTopSize 1x1
+
+Style "Fvwm*"        NoTitle, Sticky, WindowListSkip
+Style "FvwmBanner"   StaysOnTop
+Style "FvwmTaskBar"  NoTitle, BorderWidth 4, HandleWidth 4, Sticky, \
+                     StaysOnTop, WindowListSkip, CirculateSkip
+
+ModulePath /usr/lib/X11/fvwm95/
+PixmapPath /usr/lib/X11/pixmaps/
+IconPath   /usr/lib/X11/mini-icons/
+
+Style "*"     TitleIcon mini-x2.xpm
+Style "rxvt"  TitleIcon mini-term.xpm
+
+#------------------------------------------------------------------------------
+# At start
+#------------------------------------------------------------------------------
+
+DestroyFunc "InitFunction"
+AddToFunc "InitFunction"    "I" Exec xpmroot /usr/lib/X11/pixmaps/desktop.xpm
++                           "I" Module FvwmTaskBar
++                           "I" Module FvwmBanner
++                           "I" Exec rxvt
+
+DestroyFunc "RestartFunction"
+AddToFunc "RestartFunction" "I" Module FvwmTaskBar
+
+#------------------------------------------------------------------------------
+# Window functions (fvwm95's)
+#------------------------------------------------------------------------------
+
+DestroyFunc "Move-or-Raise"
+AddToFunc "Move-or-Raise" "M" Move
++                         "M" Raise
++                         "C" Raise
++                         "D" Maximize 0 100
+
+DestroyFunc "Move-or-Iconify"
+AddToFunc "Move-or-Iconify" "M" Move
++                           "D" Iconify
+
+DestroyFunc "Resize-or-Raise"
+AddToFunc "Resize-or-Raise" "M" Resize
++                           "M" Raise
++                           "C" Raise
++                           "D" RaiseLower
+
+DestroyFunc "window_ops_func"
+AddToFunc "window_ops_func" "C" PopUp Window-Ops2
++                           "M" PopUp Window-Ops2
++                           "D" Delete
+
+#------------------------------------------------------------------------------
+# The Start menu
+#------------------------------------------------------------------------------
+
+DestroyMenu "StartMenu"
+AddToMenu "StartMenu@fvwm-menu.xpm@^#808080^" \
+  "&Programs%programs.xpm%"         Popup Programs
++ "&Terminal%mini-term.xpm%"        Exec rxvt
++ ""                                Nop
++ "Sh&ut Down%shutdown.xpm%"        Popup Shutdown
+
+DestroyMenu "Programs"
+AddToMenu "Programs" \
+  "Terminal%mini-term.xpm%"         Exec rxvt
++ "Processes (top)%mini-run.xpm%"   Exec rxvt -T top -e busybox top
++ "System info%mini-bx2.xpm%"       Exec rxvt -T fastfetch -e sh -c "fastfetch; sh"
++ "Text editor%mini-edit.xpm%"      Exec rxvt -T edit -e edit
++ "vi%mini-edit.xpm%"               Exec rxvt -T vi -e vi
++ ""                                Nop
++ "Python%mini-run.xpm%"            Exec rxvt -T MicroPython -e micropython
++ "Lua%mini-run.xpm%"               Exec rxvt -T Lua -e lua
++ "Alpine Linux%mini-penguin.xpm%"  Exec rxvt -T Alpine -e alpine
+
+DestroyMenu "Shutdown"
+AddToMenu "Shutdown" \
+  "Restart fvwm95%mini-turn.xpm%"   Restart fvwm95
++ "Quit fvwm95%mini-exclam.xpm%"    Quit
+
+#------------------------------------------------------------------------------
+# The desktop and window menus (fvwm95's)
+#------------------------------------------------------------------------------
+
+DestroyMenu "Utilities"
+AddToMenu "Utilities" \
+  "Terminal%mini-term.xpm%"         Exec rxvt
++ "Processes (top)%mini-run.xpm%"   Exec rxvt -T top -e busybox top
++ ""                                Nop
++ "Restart fvwm95%mini-turn.xpm%"   Restart fvwm95
++ "Quit fvwm95%mini-exclam.xpm%"    Quit
+
+DestroyMenu "Window"
+AddToMenu "Window" "Window Ops" Title
++ "&Move%mini-move.xpm%"            Function Move-or-Raise
++ "&Resize%mini-resize.xpm%"        Function Resize-or-Raise
++ "R&aise%mini-raise.xpm%"          Raise
++ "&Lower%mini-lower.xpm%"          Lower
++ "(De)Iconify%mini-iconify.xpm%"   Iconify
++ "(Un)Maximize%mini-max1.xpm%"     Maximize 100 100
++ ""                                Nop
++ "Kill%mini-crosbone.xpm%"         Destroy
++ "&Close"                          Delete
++ ""                                Nop
++ "Switch to..."                    WindowList
++ "Refresh Screen%mini-ray.xpm%"    Refresh
+
+DestroyMenu "Window-Ops2"
+AddToMenu "Window-Ops2" "&Restore"  Iconify -1
++ "&Move"                           Move-or-Raise
++ "&Size"                           Resize-or-Raise
++ "Mi&nimize"                       Iconify 1
++ "Ma&ximize"                       Maximize 100 100
++ ""                                Nop
++ "&Kill"                           Destroy
++ "&Close	Alt+F4"                 Delete
+
+#------------------------------------------------------------------------------
+# Mouse and keys (fvwm95's)
+#------------------------------------------------------------------------------
+
+# On the desktop: left a menu, middle the window menu, right the windows.
+Mouse 1     R       A       Menu "Utilities" Nop
+Mouse 2     R       A       Menu "Window" Nop
+Mouse 3     R       A       WindowList
+
+# Title bar buttons: the menu, close, maximize, minimize.
+Mouse 0     1       A       Function "window_ops_func"
+Mouse 1     2       A       Delete
+Mouse 0     4       A       Maximize 100 100
+Mouse 0     6       A       Iconify
+
+Mouse 1     FS      A       Function "Resize-or-Raise"
+Mouse 1     T       A       Function "Move-or-Raise"
+Mouse 1     I       A       Function "Move-or-Iconify"
+Mouse 2     I       A       Iconify
+Mouse 2     FST     A       Function "window_ops_func"
+Mouse 3     TSIF    A       RaiseLower
+Mouse 3     W       M       RaiseLower
+
+Key F4      A       M       Delete
+Key Tab     A       M       Next [*] Focus
+
+#------------------------------------------------------------------------------
+# Modules
+#------------------------------------------------------------------------------
+
+*FvwmBannerTimeout 2
+
+*FvwmTaskBarGeometry +0-0
+*FvwmTaskBarFore Black
+*FvwmTaskBarBack #c0c0c0
+*FvwmTaskBarFont fixed
+*FvwmTaskBarSelFont fixed
+*FvwmTaskBarStatusFont fixed
+*FvwmTaskBarAction Click1 Iconify -1,Raise,Focus
+*FvwmTaskBarAction Click2 Iconify
+*FvwmTaskBarAction Click3 PopUp Window-Ops2
+*FvwmTaskBarUseSkipList
+*FvwmTaskBarAutoStick
+*FvwmTaskBarStartName Start
+*FvwmTaskBarStartMenu StartMenu
+*FvwmTaskBarStartIcon mini-penguin.xpm
+*FvwmTaskBarShowTips
+*FvwmTaskBarShowTransients
+*FvwmTaskBarHighlightFocus
+*FvwmTaskBarDeskOnly
+
+*FvwmIdentFont fixed
