@@ -290,6 +290,23 @@ fn run(kernel: &Path, extra: &[String], uefi: bool) {
         .args(if test { TEST_ARGS } else { RUN_ARGS })
         .args(test_extra_args(kernel, test))
         .args(extra);
+    // `cargo run`: CPU cores, as many as this machine has, up to 4 (unless
+    // the arguments say otherwise).
+    if !test && !extra.iter().any(|a| a == "-smp") {
+        let n = std::thread::available_parallelism().map_or(1, |n| n.get()).min(4);
+        if n > 1 {
+            qemu.arg("-smp").arg(n.to_string());
+        }
+    }
+    // PALLADIUM_SMP=N: test kernels get N CPU cores (the usermode tests
+    // then run on all of them).
+    if test {
+        if let Some(n) = std::env::var("PALLADIUM_SMP").ok().filter(|n| n.parse::<u32>().is_ok_and(|n| n > 1)) {
+            if !test_extra_args(kernel, test).contains(&"-smp") {
+                qemu.arg("-smp").arg(n);
+            }
+        }
+    }
 
     if !test {
         let status = qemu.status().unwrap_or_else(|e| {

@@ -29,14 +29,20 @@ fn tss() -> &'static TaskStateSegment {
     }
 }
 
-/// Set the stack the CPU switches to on interrupts/syscalls from ring 3.
+/// Set the stack this core switches to on interrupts/syscalls from ring 3:
+/// its TSS's RSP0 (interrupts) and its PerCpu (the `syscall` entry, which
+/// doesn't use the TSS).
 pub fn set_kernel_stack(top: VirtAddr) {
+    let cpu = crate::smp::cpu_index();
     unsafe {
+        let tss = match cpu {
+            0 => &raw mut TSS,
+            _ => crate::smp::PERCPU[cpu].tss.load(core::sync::atomic::Ordering::Relaxed) as *mut TaskStateSegment,
+        };
         // The TSS is packed, so this field isn't 8-byte aligned.
-        core::ptr::write_unaligned(&raw mut (*(&raw mut TSS)).privilege_stack_table[0], top);
-        // The `syscall` instruction doesn't use the TSS: it reads this.
-        crate::syscall::SYSCALL_KERNEL_RSP = top.as_u64();
+        core::ptr::write_unaligned(&raw mut (*tss).privilege_stack_table[0], top);
     }
+    crate::smp::PERCPU[cpu].kernel_rsp.store(top.as_u64(), core::sync::atomic::Ordering::Relaxed);
 }
 
 /// The current RSP0 (the kernel stack for entries from ring 3).
@@ -106,7 +112,7 @@ struct Selectors {
 /// Another CPU core's GDT and TSS: the same layout as the first core's (so
 /// the selectors are the same everywhere), with a TSS of its own (a TSS
 /// can't be loaded by two cores) and its own double-fault stack.
-pub fn init_ap() {
+pub fn init_ap(cpu: usize) {
     use alloc::boxed::Box;
     use x86_64::instructions::segmentation::{CS, DS, ES, SS, Segment};
     use x86_64::instructions::tables::load_tss;
@@ -116,6 +122,8 @@ pub fn init_ap() {
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = VirtAddr::from_ptr(df_stack.as_ptr()) + STACK_SIZE as u64;
     tss.privilege_stack_table[0] = VirtAddr::from_ptr(ring0_stack.as_ptr()) + STACK_SIZE as u64;
     let tss: &'static TaskStateSegment = tss;
+    crate::smp::PERCPU[cpu].tss.store(tss as *const _ as u64, core::sync::atomic::Ordering::SeqCst);
+    crate::smp::PERCPU[cpu].kernel_rsp.store(VirtAddr::from_ptr(ring0_stack.as_ptr()).as_u64() + STACK_SIZE as u64, core::sync::atomic::Ordering::SeqCst);
     let gdt: &'static mut GlobalDescriptorTable = Box::leak(Box::new(GlobalDescriptorTable::new()));
     let code = gdt.add_entry(Descriptor::kernel_code_segment());
     let data = gdt.add_entry(Descriptor::kernel_data_segment());
@@ -125,6 +133,8 @@ pub fn init_ap() {
     debug_assert!(code == GDT.1.code_selector && tss_sel == GDT.1.tss_selector);
     let gdt: &'static GlobalDescriptorTable = gdt;
     gdt.load();
+    // From now on this core knows which it is (smp::cpu_index).
+    crate::smp::PERCPU[cpu].gdt_base.store(x86_64::instructions::tables::sgdt().base.as_u64(), core::sync::atomic::Ordering::SeqCst);
     unsafe {
         CS::set_reg(code);
         SS::set_reg(data);

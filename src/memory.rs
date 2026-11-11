@@ -338,9 +338,19 @@ pub fn map_mmio(phys: u64, len: usize) -> *mut u8 {
 /// Map the page at physical address `phys` at the same virtual address in
 /// the kernel's address space (an identity mapping), for code that runs
 /// before paging is on, as a starting CPU core does. Or remove it again.
+///
+/// The kernel's lower half must stay empty (every address space copies the
+/// kernel's level-4 entries, and programs live in the lower half): turning
+/// the mapping off also frees the page tables turning it on made, if its
+/// level-4 entry was unused before.
 pub fn identity_map(phys: u64, on: bool) {
+    static SLOT_WAS_FREE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
     let mut alloc = FRAME_ALLOCATOR.lock();
     let frames = alloc.as_mut().expect("no frame allocator");
+    let slot = ((phys >> 39) & 511) as usize;
+    if on {
+        SLOT_WAS_FREE.store(table_at(kernel_p4())[slot].is_unused(), core::sync::atomic::Ordering::SeqCst);
+    }
     let mut mapper = mapper_for(kernel_p4());
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(phys));
     unsafe {
@@ -354,6 +364,29 @@ pub fn identity_map(phys: u64, on: bool) {
             }
         } else if let Ok((_, f)) = mapper.unmap(page) {
             f.flush();
+        }
+    }
+    if !on && SLOT_WAS_FREE.load(core::sync::atomic::Ordering::SeqCst) {
+        // Free the level-3, 2 and 1 tables made for it (nothing else is in
+        // them), and empty the level-4 entry again.
+        let p4 = table_at(kernel_p4());
+        if !p4[slot].is_unused() {
+            let p3f = PhysFrame::containing_address(p4[slot].addr());
+            let p3 = table_at(p3f);
+            let i3 = ((phys >> 30) & 511) as usize;
+            if !p3[i3].is_unused() {
+                let p2f = PhysFrame::containing_address(p3[i3].addr());
+                let p2 = table_at(p2f);
+                let i2 = ((phys >> 21) & 511) as usize;
+                if !p2[i2].is_unused() {
+                    let p1f = PhysFrame::containing_address(p2[i2].addr());
+                    unsafe { frames.deallocate_frame(p1f) };
+                }
+                unsafe { frames.deallocate_frame(p2f) };
+            }
+            unsafe { frames.deallocate_frame(p3f) };
+            p4[slot].set_unused();
+            x86_64::instructions::tlb::flush_all();
         }
     }
 }

@@ -215,8 +215,9 @@ impl Process {
 /// Boxed so each Process stays at a fixed address: context_switch saves the
 /// stack pointer straight into `kernel_rsp` after the table lock is released.
 static TABLE: Mutex<BTreeMap<u64, Box<Process>>> = Mutex::new(BTreeMap::new());
-static CURRENT: AtomicU64 = AtomicU64::new(0);
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+/// "No process": what a core runs in its idle loop (smp::idle_loop).
+pub const IDLE: u64 = u64::MAX;
 
 global_asm!(
     // context_switch(save_rsp: *mut u64, new_rsp: u64)
@@ -290,11 +291,26 @@ pub fn init() {
         deadline: 0,
         borrowed_vm: false,
     }));
-    CURRENT.store(0, Ordering::SeqCst);
+    drop(table);
+    crate::smp::PERCPU[0].current.store(0, Ordering::SeqCst);
+    // Core 0's idle context: a stack whose first switch "returns" into the
+    // idle loop (the way a new process's returns into syscall_return).
+    let stack: &'static mut [u8] = Box::leak(vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice());
+    let top = (stack.as_ptr() as u64 + stack.len() as u64) & !0xf;
+    let rsp = top - 8 * 8;
+    unsafe {
+        let words = rsp as *mut u64;
+        for i in 0..6 {
+            words.add(i).write(0);
+        }
+        words.add(6).write(crate::smp::idle_entry as *const () as u64);
+    }
+    crate::smp::PERCPU[0].idle_rsp.store(rsp, Ordering::SeqCst);
 }
 
+/// The process (thread) running on this core (IDLE in its idle loop).
 pub fn current_pid() -> u64 {
-    CURRENT.load(Ordering::SeqCst)
+    crate::smp::this().current.load(Ordering::SeqCst)
 }
 
 pub fn current_ppid() -> u64 {
@@ -417,8 +433,9 @@ pub fn schedule() {
             }
         }
     }
-    // Did we halt while waiting? Then the wait isn't CPU time.
-    let mut idled = false;
+    let cpu = crate::smp::cpu_index();
+    let here = &crate::smp::PERCPU[cpu];
+    let multi = crate::smp::cores() > 1;
     interrupts::without_interrupts(|| loop {
         let switch = {
             let mut table = TABLE.lock();
@@ -442,42 +459,67 @@ pub fn schedule() {
                     _ => {}
                 }
             }
-            let next = table
-                .range(cur + 1..)
-                .chain(table.range(..cur))
-                .find(|(_, p)| p.state == State::Ready)
-                .map(|(&pid, _)| pid);
+            // What this core may run: a ready process, not an address space
+            // another core is in (threads of one process take turns: no
+            // core ever has another's stale mappings), and the kernel task
+            // only on core 0 (it runs on the boot stack).
+            let busy: Vec<u64> = (0..crate::smp::MAX_CPUS)
+                .filter(|&c| c != cpu)
+                .map(|c| crate::smp::PERCPU[c].p4.load(Ordering::Relaxed))
+                .filter(|&p4| p4 != 0)
+                .collect();
+            let may_run = |p: &Process| {
+                p.state == State::Ready && (p.pid != 0 || cpu == 0) && !busy.contains(&p.p4.start_address().as_u64())
+            };
+            // Round-robin from after the current process, never the
+            // current process itself (switching to itself would load its
+            // stale saved stack pointer). From idle, after the last one
+            // picked here, which may be picked again.
+            let next = if cur == IDLE {
+                let last = here.last.load(Ordering::Relaxed);
+                table.range(last.saturating_add(1)..).chain(table.range(..=last)).find(|(_, p)| may_run(p))
+            } else {
+                table.range(cur + 1..).chain(table.range(..cur)).find(|(_, p)| may_run(p))
+            }
+            .map(|(&pid, _)| pid);
 
             match next {
                 None => {
                     // Nothing else to run. Keep going if the current task can
                     // (it may have just been woken: a sleep ended, a signal).
-                    if let Some(p) = table.get_mut(&cur) {
-                        if matches!(p.state, State::Running | State::Ready) {
-                            p.state = State::Running;
-                            if idled {
-                                p.running_since = now;
-                            }
-                            return;
-                        }
-                        if !idled {
-                            // About to halt: bill the time so far, not the wait.
-                            p.cpu_ticks += now.saturating_sub(p.running_since);
-                            idled = true;
-                        }
+                    if cur == IDLE {
+                        return; // the idle loop waits for an interrupt
                     }
-                    None
+                    let p = table.get_mut(&cur).expect("current process missing");
+                    if matches!(p.state, State::Running | State::Ready) {
+                        p.state = State::Running;
+                        return;
+                    }
+                    // It can't run: this core goes idle (it waits there, not on
+                    // this process's kernel stack, which another core may take
+                    // the process up on once it's woken).
+                    p.cpu_ticks += now.saturating_sub(p.running_since);
+                    let save: *mut u64 = &mut p.kernel_rsp;
+                    crate::fpu::save(&mut p.fpu);
+                    let (_, flags) = Cr3::read();
+                    unsafe { Cr3::write(memory::kernel_p4(), flags) };
+                    here.p4.store(0, Ordering::SeqCst);
+                    here.current.store(IDLE, Ordering::SeqCst);
+                    Some((save, here.idle_rsp.load(Ordering::SeqCst)))
                 }
                 Some(next) => {
-                    let current = table.get_mut(&cur).expect("current process missing");
-                    if current.state == State::Running {
-                        current.state = State::Ready;
-                    }
-                    if !idled {
+                    let save: *mut u64 = if cur == IDLE {
+                        here.idle_rsp.as_ptr()
+                    } else {
+                        let current = table.get_mut(&cur).expect("current process missing");
+                        if current.state == State::Running {
+                            current.state = State::Ready;
+                        }
                         current.cpu_ticks += now.saturating_sub(current.running_since);
-                    }
-                    let save: *mut u64 = &mut current.kernel_rsp;
-                    crate::fpu::save(&mut current.fpu);
+                        crate::fpu::save(&mut current.fpu);
+                        &mut current.kernel_rsp
+                    };
+                    here.last.store(next, Ordering::Relaxed);
 
                     let target = table.get_mut(&next).unwrap();
                     crate::fpu::restore(&target.fpu);
@@ -487,11 +529,14 @@ pub fn schedule() {
                     if let Some(top) = target.kernel_stack_top() {
                         crate::gdt::set_kernel_stack(VirtAddr::new(top));
                     }
+                    // (With more cores, always: this core's cached mappings of
+                    // this address space may be stale.)
                     let (active, flags) = Cr3::read();
-                    if active != target.p4 {
+                    if multi || active != target.p4 {
                         unsafe { Cr3::write(target.p4, flags) };
                     }
-                    CURRENT.store(next, Ordering::SeqCst);
+                    here.p4.store(target.p4.start_address().as_u64(), Ordering::SeqCst);
+                    here.current.store(next, Ordering::SeqCst);
                     Some((save, target.kernel_rsp))
                 }
             }
@@ -503,13 +548,7 @@ pub fn schedule() {
                 unsafe { context_switch(save, new_rsp) };
                 return;
             }
-            None => {
-                // Nothing to run: wait for an interrupt, then look again
-                // (letting the network stack handle packets that arrived).
-                interrupts::enable_and_hlt();
-                interrupts::disable();
-                crate::net::poll_if_due();
-            }
+            None => return,
         }
     })
 }

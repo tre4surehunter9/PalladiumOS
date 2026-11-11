@@ -39,6 +39,8 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     *memory::MAPPER.lock() = Some(mapper);
     *memory::FRAME_ALLOCATOR.lock() = Some(frame_allocator);
     palladiumos::process::init();
+    // More CPU cores, if QEMU has them (PALLADIUM_SMP=4 cargo test).
+    palladiumos::smp::init(boot_info.rsdp_addr.into_option());
     palladiumos::rtc::init(); // the real date, as at boot (CLOCK_REALTIME)
     palladiumos::net::init(); // loopback, and eth0 if QEMU has a card
     palladiumos::block::mount_system_disk(); // /usr: tcc's headers and libraries, if built

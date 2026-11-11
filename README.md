@@ -28,8 +28,9 @@
 
 ## Features
 * **Linux-compatible system calls** (the x86_64 ABI): ordinary Linux programs run unchanged, static or dynamically linked (with musl's or glibc's own dynamic linker), including C programs built with an unmodified [musl](https://musl.libc.org) libc
+* **More than one CPU core** (SMP): programs run on every core at once (`cargo run` gives QEMU up to 4). See [CPU Cores](#cpu-cores)
 * **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control, `epoll`, `eventfd`, `timerfd`, `signalfd` and `inotify`, shared memory (`MAP_SHARED`, `/dev/shm`, POSIX semaphores between processes), and memory on demand (programs can reserve gigabytes and only use what they touch; programs bigger than the kernel's heap load piece by piece)
-* **Hardware**: boots with BIOS or UEFI, a framebuffer console (1280x720 in QEMU), IDE and AHCI (SATA) disks, PS/2 and USB (xHCI) keyboards, a PS/2 mouse, the RTL8139 network card
+* **Hardware**: boots with BIOS or UEFI, starts every CPU core (ACPI, local APICs), a framebuffer console (1280x720 in QEMU), IDE and AHCI (SATA) disks, PS/2 and USB (xHCI) keyboards, a PS/2 mouse, the RTL8139 network card
 * **Users and permissions**: login, passwords, POSIX file permissions, setuid programs, `su`
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
 * **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink, and an **SSH server** (Dropbear): log in from your own terminal with `ssh -p 2222 root@localhost`; a web server in PalladiumOS on port 80 (Apache, `busybox httpd`) is at `http://localhost:8080`
@@ -147,7 +148,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 62 | kill | yes (pid, process group, or -1 for all; `EPERM` for other users' processes) |
 | 63 | uname | yes |
 | 72 | fcntl | `F_DUPFD`(`_CLOEXEC`), `F_GETFD`/`F_SETFD` (close-on-exec), `F_GETFL`/`F_SETFL` (`O_NONBLOCK`, `O_ASYNC`), `F_SETOWN`/`F_GETOWN` (who gets `SIGIO` when keyboard or mouse input arrives), record locks (`F_SETLK` & co.: always granted) |
-| 73 | flock | always granted (one user's programs on one CPU: nobody to wait for) |
+| 73 | flock | always granted (nobody is made to wait) |
 | 76 / 77 | truncate, ftruncate | yes |
 | 79 | getcwd | yes |
 | 80 | chdir | yes |
@@ -198,7 +199,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 200/234 | tkill, tgkill | yes |
 | 201 | time | yes |
 | 202 | futex | `WAIT`, `WAKE` (and `_BITSET`), `REQUEUE`, `CMP_REQUEUE`, timeouts |
-| 203 | sched_setaffinity | the one CPU (the mask must include CPU 0) |
+| 203 / 204 | sched_setaffinity, sched_getaffinity | every core (`nproc` counts them); setting is accepted, processes still run on any core |
 | 206 | io_setup | not supported (Linux native AIO: callers fall back) |
 | 213 / 291 | epoll_create, epoll_create1 | yes |
 | 217 | getdents64 | yes |
@@ -224,10 +225,10 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 293 | pipe2 | yes (`O_CLOEXEC`, `O_NONBLOCK`) |
 | 295 / 296 / 327 / 328 | preadv, pwritev, preadv2, pwritev2 | yes |
 | 306 | syncfs | a full sync |
-| 309 | getcpu | CPU 0 |
+| 309 | getcpu | the core it runs on |
 | 318 | getrandom | yes (RDRAND when available) |
 | 319 | memfd_create | an anonymous file in memory (up to 4 MiB) |
-| 324 | membarrier | yes (one CPU: every command is already satisfied) |
+| 324 | membarrier | yes (a process's threads never run at the same moment: every command is already satisfied) |
 | 326 | copy_file_range | yes |
 | 332 | statx | yes |
 | 436 | close_range | closing, or `CLOSE_RANGE_CLOEXEC` |
@@ -244,7 +245,16 @@ PalladiumOS has TCP/IP: a driver for the RTL8139 network card (what `cargo run` 
 * Not yet: IPv6, more than one card type.
 
 ## Threads
-Programs can have threads: musl's pthreads (mutexes, condition variables, semaphores, `pthread_join`, `pthread_kill`, thread-local storage) works unchanged, and MicroPython's `_thread` too. A thread shares its process's memory, open files, working directory and signal handlers; it has its own registers, stack, TLS, signal mask and pending signals. `kill` sends to a process (to a thread that isn't blocking the signal), `tgkill` to one thread. `exit` ends a thread, `exit_group` (or a fatal signal) the whole process; a process whose first thread called `pthread_exit` lives until its last thread ends. Limits: one CPU (threads take turns), and only a process's first thread may `execve`.
+Programs can have threads: musl's pthreads (mutexes, condition variables, semaphores, `pthread_join`, `pthread_kill`, thread-local storage) works unchanged, and MicroPython's `_thread` too. A thread shares its process's memory, open files, working directory and signal handlers; it has its own registers, stack, TLS, signal mask and pending signals. `kill` sends to a process (to a thread that isn't blocking the signal), `tgkill` to one thread. `exit` ends a thread, `exit_group` (or a fatal signal) the whole process; a process whose first thread called `pthread_exit` lives until its last thread ends. Limits: a process's threads take turns (they run one at a time, while separate programs run on every core: see [CPU Cores](#cpu-cores)), and only a process's first thread may `execve`.
+
+## CPU Cores
+PalladiumOS starts every CPU core the firmware lists (ACPI's MADT): the first one sends the others INIT and startup signals through its local APIC, and each runs a small trampoline below 1 MiB from 16-bit real mode into 64-bit mode, then takes processes from the same scheduler. `nproc`, `/proc/cpuinfo`, `/proc/stat`, htop and `getcpu` see them. `cargo run` gives QEMU as many cores as your machine has, up to 4 (`cargo run -- -smp 2` for another number); the release images boot with any number (`-smp 4` to QEMU).
+
+* Programs run on all cores at the same time: four CPU-bound programs take about as long as one (3.2 times faster than on one core in QEMU).
+* The kernel runs on one core at a time: a core takes the big kernel lock on its way into the kernel (a system call, an interrupt or fault from a program) and lets it go on its way back, so the kernel's code stays as simple as on one CPU. System-call-heavy work doesn't get faster yet.
+* A process's threads take turns: two threads of one address space never run at the same moment, so no core ever uses page mappings another core has changed (no TLB shootdowns needed yet).
+* The first core keeps the PIT timer and the devices' interrupts (through its APIC in virtual-wire mode); the others have their APIC's timer, for preemption.
+* `PALLADIUM_SMP=4 cargo test` runs the test suite's programs on 4 cores; `tests/smp.rs` checks starting them.
 
 ## C Programs (musl libc)
 C programs run on PalladiumOS with an unmodified [musl](https://musl.libc.org) libc: PalladiumOS speaks the Linux x86_64 syscall interface musl was written for, saves the SSE registers programs use, supports thread-local storage, `mmap`, and gives programs the aux vector libc's startup reads.

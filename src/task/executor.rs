@@ -117,7 +117,10 @@ impl Executor {
 
         interrupts::disable();
         if self.task_queue.is_empty() {
-            enable_and_hlt();
+            // Without holding the kernel: other cores may need it.
+            let _ = enable_and_hlt;
+            crate::smp::halt();
+            interrupts::enable();
         } else {
             interrupts::enable();
         }

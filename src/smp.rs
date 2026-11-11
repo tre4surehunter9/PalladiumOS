@@ -15,6 +15,14 @@
 //! The BSP keeps taking interrupts from the 8259 PICs, as before: its local
 //! APIC is switched on in "virtual wire" mode, which passes them through
 //! (LINT0 as ExtINT). With only one core, nothing here changes anything.
+//!
+//! Programs run on every core at once; the kernel runs on one at a time.
+//! A core takes the big kernel lock (BKL) on its way into the kernel (a
+//! system call, an interrupt or a fault from a program, or waking from idle)
+//! and lets it go on its way back to a program or into idle. So the
+//! kernel's code, written for one CPU, stays as it was. Two threads of one
+//! address space don't run at the same time (each core reloads its page
+//! tables when it switches), so no core ever has stale mappings cached.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -29,6 +37,170 @@ static LAPIC: AtomicU64 = AtomicU64::new(0);
 /// How many CPU cores run.
 pub fn cores() -> usize {
     ONLINE.load(Ordering::SeqCst)
+}
+
+/// Most cores the kernel uses.
+pub const MAX_CPUS: usize = 16;
+
+/// What each core keeps for itself. The `syscall` entry reaches it through
+/// the GS base (swapgs: KERNEL_GS_BASE points here), so the first two
+/// fields stay where they are.
+#[repr(C)]
+pub struct PerCpu {
+    /// Top of the running process's kernel stack (gs:[0]).
+    pub kernel_rsp: AtomicU64,
+    /// The program's stack pointer, for a moment at `syscall` (gs:[8]).
+    pub user_rsp: AtomicU64,
+    /// The process (thread) running here, or process::IDLE.
+    pub current: AtomicU64,
+    /// Where the idle loop stopped (context_switch saves it).
+    pub idle_rsp: AtomicU64,
+    /// The address space in use (its level-4 table), 0 when idle.
+    pub p4: AtomicU64,
+    /// The last process picked here (round-robin from the next one).
+    pub last: AtomicU64,
+    /// This core's GDT (how a core knows which one it is: sgdt).
+    pub gdt_base: AtomicU64,
+    /// This core's TSS (its RSP0 is the kernel stack for interrupts).
+    pub tss: AtomicU64,
+}
+
+impl PerCpu {
+    const fn new() -> PerCpu {
+        PerCpu {
+            kernel_rsp: AtomicU64::new(0),
+            user_rsp: AtomicU64::new(0),
+            current: AtomicU64::new(0),
+            idle_rsp: AtomicU64::new(0),
+            p4: AtomicU64::new(0),
+            last: AtomicU64::new(0),
+            gdt_base: AtomicU64::new(0),
+            tss: AtomicU64::new(0),
+        }
+    }
+}
+
+pub static PERCPU: [PerCpu; MAX_CPUS] = [const { PerCpu::new() }; MAX_CPUS];
+/// Set once other cores may run (before the first is started): until then
+/// every caller is core 0.
+static MULTI: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Which core this is (0 is the first).
+pub fn cpu_index() -> usize {
+    if !MULTI.load(Ordering::Relaxed) {
+        return 0;
+    }
+    let base = x86_64::instructions::tables::sgdt().base.as_u64();
+    PERCPU.iter().position(|c| c.gdt_base.load(Ordering::Relaxed) == base).unwrap_or(0)
+}
+
+/// This core's PerCpu.
+pub fn this() -> &'static PerCpu {
+    &PERCPU[cpu_index()]
+}
+
+/// The big kernel lock's holder: core index + 1, or 0 when free. Core 0
+/// holds it from boot.
+static BKL: AtomicUsize = AtomicUsize::new(1);
+
+/// Take the big kernel lock unless this core has it. Returns whether it
+/// took it now.
+pub fn lock_kernel() -> bool {
+    let me = cpu_index() + 1;
+    if BKL.load(Ordering::Acquire) == me {
+        return false;
+    }
+    while BKL.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        core::hint::spin_loop();
+    }
+    true
+}
+
+/// Let the big kernel lock go (if this core has it).
+pub fn unlock_kernel() {
+    let me = cpu_index() + 1;
+    let _ = BKL.compare_exchange(me, 0, Ordering::Release, Ordering::Relaxed);
+}
+
+/// Inside the kernel until dropped: for interrupt and fault handlers. It
+/// takes the lock if this core didn't have it (it interrupted a program,
+/// or idle), and gives it back when the handler returns.
+pub struct InKernel(bool);
+
+pub fn enter() -> InKernel {
+    InKernel(lock_kernel())
+}
+
+impl Drop for InKernel {
+    fn drop(&mut self) {
+        if self.0 {
+            unlock_kernel();
+        }
+    }
+}
+
+/// On the way back from the kernel (syscall_return, with the frame about
+/// to be restored): going back to a program lets the lock go.
+#[unsafe(no_mangle)]
+extern "C" fn smp_leaving_kernel(frame: &crate::syscall::SyscallFrame) {
+    if crate::usermode::from_user(frame.cs) {
+        unlock_kernel();
+    }
+}
+
+/// Wait for an interrupt without holding the kernel (others may use it
+/// meanwhile). Interrupts are off again afterwards.
+pub fn halt() {
+    let had = BKL.load(Ordering::Acquire) == cpu_index() + 1;
+    if had {
+        unlock_kernel();
+    }
+    x86_64::instructions::interrupts::enable_and_hlt();
+    x86_64::instructions::interrupts::disable();
+    if had {
+        lock_kernel();
+    }
+}
+
+/// A core with nothing to run: look for a process, else wait for an
+/// interrupt. Every core has one of these (process::schedule switches to
+/// it), so no core ever waits on a process's kernel stack.
+pub fn idle_loop() -> ! {
+    loop {
+        x86_64::instructions::interrupts::disable();
+        lock_kernel();
+        if cpu_index() == 0 {
+            crate::net::poll_if_due();
+        }
+        crate::process::schedule();
+        unlock_kernel();
+        x86_64::instructions::interrupts::enable_and_hlt();
+    }
+}
+
+/// Where core 0's idle context starts (the first switch to it returns
+/// here).
+pub extern "C" fn idle_entry() -> ! {
+    idle_loop()
+}
+
+/// The vector of the other cores' APIC timer (core 0 keeps the PIT).
+pub const AP_TIMER_VECTOR: u8 = 0x41;
+const LAPIC_EOI: usize = 0xB0;
+const LAPIC_TIMER_INIT: usize = 0x380;
+const LAPIC_TIMER_DIV: usize = 0x3E0;
+
+/// An interrupt from this core's local APIC is handled.
+pub fn lapic_eoi() {
+    lapic_write(LAPIC_EOI, 0);
+}
+
+/// This core's APIC timer, periodic, about as often as core 0's PIT
+/// (QEMU's APIC timer counts at 1 GHz: / 16, 3 million: 48 ms).
+fn start_ap_timer() {
+    lapic_write(LAPIC_TIMER_DIV, 0x3); // divide by 16
+    lapic_write(LAPIC_LVT_TIMER, (1 << 17) | AP_TIMER_VECTOR as u32); // periodic
+    lapic_write(LAPIC_TIMER_INIT, 3_000_000);
 }
 
 // Local APIC registers (offsets).
@@ -278,7 +450,9 @@ pub fn init(rsdp: Option<u64>) -> usize {
     crate::memory::identity_map(page, true);
 
     let dst = crate::memory::phys_to_virt(page) as *mut u8;
-    for (cpu, &id) in ids.iter().filter(|&&id| id != bsp).enumerate() {
+    PERCPU[0].gdt_base.store(x86_64::instructions::tables::sgdt().base.as_u64(), Ordering::SeqCst);
+    MULTI.store(true, Ordering::SeqCst);
+    for (cpu, &id) in ids.iter().filter(|&&id| id != bsp).enumerate().take(MAX_CPUS - 1) {
         let cpu = cpu + 1;
         let stack = alloc::boxed::Box::leak(alloc::vec![0u8; AP_STACK].into_boxed_slice());
         let top = (stack.as_ptr() as u64 + AP_STACK as u64) & !0xF;
@@ -313,14 +487,15 @@ pub fn init(rsdp: Option<u64>) -> usize {
 /// Where a started core comes, in 64-bit mode on its own stack, with the
 /// trampoline's temporary GDT.
 extern "C" fn ap_main(cpu: u64) -> ! {
-    crate::gdt::init_ap();
+    let cpu = cpu as usize;
+    crate::gdt::init_ap(cpu);
     crate::interrupts::load_idt();
+    crate::fpu::init();
+    crate::syscall::init_fast_syscalls();
+    PERCPU[cpu].current.store(crate::process::IDLE, Ordering::SeqCst);
     lapic_enable_here();
+    start_ap_timer();
     ONLINE.fetch_add(1, Ordering::SeqCst);
-    let _ = cpu;
-    // Nothing for it to do yet: it waits, with interrupts off.
-    loop {
-        x86_64::instructions::interrupts::disable();
-        x86_64::instructions::hlt();
-    }
+    // Its idle loop: it takes processes as they're ready.
+    idle_loop()
 }

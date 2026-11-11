@@ -229,8 +229,7 @@ pub fn wait_for_dhcp(ticks: u64) -> Option<IpConfig> {
         if let Some(c) = config() {
             return Some(c);
         }
-        x86_64::instructions::interrupts::enable_and_hlt();
-        x86_64::instructions::interrupts::disable();
+        crate::smp::halt();
     }
     None
 }

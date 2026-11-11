@@ -347,6 +347,10 @@ global_asm!(
     "mov rdi, rsp",          // arg0 = &mut SyscallFrame
     "call syscall_dispatch",
     "syscall_return:",
+    // Back to a program? Then the big kernel lock goes (smp.rs). The frame
+    // is 16-byte aligned here, as calls want.
+    "mov rdi, rsp",
+    "call smp_leaving_kernel",
     "pop r15",
     "pop r14",
     "pop r13",
@@ -369,15 +373,19 @@ global_asm!(
 // `int 0x80`). Unlike an interrupt, it doesn't switch stacks or save
 // anything but rip (in rcx) and rflags (in r11), so this builds the same
 // SyscallFrame by hand on the kernel stack, and returns with iretq like
-// the int 0x80 path. Interrupts stay off on entry (SFMASK clears IF), and
-// there's one CPU, so two statics hold the stack pointers.
+// the int 0x80 path. Interrupts stay off on entry (SFMASK clears IF). The
+// kernel stack is this core's: its PerCpu, reached for a moment through
+// the GS base (swapgs; KERNEL_GS_BASE points at it), holds it, and keeps
+// the program's stack pointer meanwhile.
 global_asm!(
     ".global syscall_fast_entry",
     "syscall_fast_entry:",
-    "mov [rip + SYSCALL_USER_RSP], rsp",
-    "mov rsp, [rip + SYSCALL_KERNEL_RSP]",
+    "swapgs",
+    "mov gs:[8], rsp",
+    "mov rsp, gs:[0]",
     "push qword ptr [rip + SYSCALL_USER_SS]",
-    "push qword ptr [rip + SYSCALL_USER_RSP]",
+    "push qword ptr gs:[8]",
+    "swapgs",
     "push r11",              // rflags
     "push qword ptr [rip + SYSCALL_USER_CS]",
     "push rcx",              // rip
@@ -402,12 +410,6 @@ global_asm!(
     "jmp syscall_return",
 );
 
-/// Top of the running process's kernel stack, for `syscall` (kept equal to
-/// the TSS's RSP0 by gdt::set_kernel_stack).
-#[unsafe(no_mangle)]
-pub static mut SYSCALL_KERNEL_RSP: u64 = 0;
-#[unsafe(no_mangle)]
-static mut SYSCALL_USER_RSP: u64 = 0;
 #[unsafe(no_mangle)]
 static mut SYSCALL_USER_CS: u64 = 0;
 #[unsafe(no_mangle)]
@@ -419,17 +421,21 @@ unsafe extern "C" {
     fn syscall_fast_entry();
 }
 
-/// Turn on the `syscall` instruction: EFER.SCE, its entry point (LSTAR),
-/// the kernel segments (STAR) and the flags to clear on entry (SFMASK).
+/// Turn on the `syscall` instruction on this core: EFER.SCE, its entry
+/// point (LSTAR), the kernel segments (STAR), the flags to clear on entry
+/// (SFMASK), and its PerCpu (KERNEL_GS_BASE, for the entry's swapgs).
 pub fn init_fast_syscalls() {
+    use core::sync::atomic::Ordering;
     use x86_64::registers::model_specific::Msr;
     let (code, data) = crate::gdt::user_selectors();
+    let cpu = crate::smp::this();
+    if cpu.kernel_rsp.load(Ordering::Relaxed) == 0 {
+        cpu.kernel_rsp.store(crate::gdt::kernel_stack_top(), Ordering::Relaxed);
+    }
     unsafe {
         SYSCALL_USER_CS = (code.0 | 3) as u64;
         SYSCALL_USER_SS = (data.0 | 3) as u64;
-        if SYSCALL_KERNEL_RSP == 0 {
-            SYSCALL_KERNEL_RSP = crate::gdt::kernel_stack_top();
-        }
+        Msr::new(0xC000_0102).write(cpu as *const _ as u64); // KERNEL_GS_BASE
         let mut efer = Msr::new(0xC000_0080);
         efer.write(efer.read() | 1); // SCE: syscall enable
         // STAR[47:32]: kernel CS (SS = CS + 8). The sysret half is unused
@@ -456,6 +462,8 @@ pub fn init_syscalls(idt: &mut InterruptDescriptorTable) {
 
 #[unsafe(no_mangle)]
 extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
+    // Into the kernel (syscall_return lets go on the way back).
+    crate::smp::lock_kernel();
     let (a1, a2, a3, a4, a5) = (frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8);
     const FDCWD: u64 = -100i64 as u64;
     let num = frame.rax;
@@ -633,18 +641,25 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         // No swap: memory never leaves RAM, so locking it is a no-op.
         SYS_MLOCK | SYS_MUNLOCK | SYS_MLOCKALL | SYS_MUNLOCKALL | SYS_MLOCK2 => 0,
         // One CPU: a mask must include CPU 0.
-        SYS_SCHED_SETAFFINITY => match unsafe { user_slice(a3, 1) } {
-            Some(b) if a2 >= 1 && b[0] & 1 != 0 => 0,
+        // Any mask with a core that exists is accepted (processes still run
+        // on any core).
+        SYS_SCHED_SETAFFINITY => match unsafe { user_slice(a3, 8u64.min(a2)) } {
+            Some(b) if !b.is_empty() => {
+                let mut m = [0u8; 8];
+                m[..b.len()].copy_from_slice(b);
+                if u64::from_le_bytes(m) & all_cores_mask() != 0 { 0 } else { -EINVAL }
+            }
             Some(_) => -EINVAL,
             None => -EFAULT,
         },
-        // CPU 0, NUMA node 0.
+        // This core, NUMA node 0.
         SYS_GETCPU => {
             let mut r = 0;
-            for p in [a1, a2] {
+            let cpu = crate::smp::cpu_index() as u32;
+            for (p, v) in [(a1, cpu), (a2, 0)] {
                 if p != 0 {
                     match unsafe { user_slice_mut(p, 4) } {
-                        Some(b) => b.fill(0),
+                        Some(b) => b.copy_from_slice(&v.to_le_bytes()),
                         None => r = -EFAULT,
                     }
                 }
@@ -1191,13 +1206,19 @@ fn sys_prlimit(resource: u64, _new: u64, old: u64) -> i64 {
     0
 }
 
-/// sched_getaffinity(pid, size, mask): one CPU.
+/// Every core, as an affinity mask.
+fn all_cores_mask() -> u64 {
+    let n = crate::smp::cores().min(64);
+    if n == 64 { u64::MAX } else { (1u64 << n) - 1 }
+}
+
+/// sched_getaffinity(pid, size, mask): every core (nproc counts them).
 fn sys_sched_getaffinity(size: u64, mask: u64) -> i64 {
     if size < 8 {
         return -EINVAL;
     }
     let Some(out) = (unsafe { user_slice_mut(mask, 8) }) else { return -EFAULT };
-    out.copy_from_slice(&1u64.to_le_bytes());
+    out.copy_from_slice(&all_cores_mask().to_le_bytes());
     8
 }
 

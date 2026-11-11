@@ -111,12 +111,19 @@ fn system_stat() -> String {
     let hundredths = |ticks: u64| ticks * process::TICK_NS / 10_000_000;
     let busy: u64 = process::snapshot(None).iter().filter(|p| !p.kernel).map(|p| p.cpu_ticks).sum();
     let up = process::ticks();
-    let (user, idle) = (hundredths(busy.min(up)), hundredths(up.saturating_sub(busy)));
+    // Every core's time: busy time shared out evenly (it isn't counted per
+    // core), the rest idle.
+    let n = crate::smp::cores() as u64;
+    let all = up * n;
+    let (user, idle) = (hundredths(busy.min(all)), hundredths(all.saturating_sub(busy)));
     let cpu = format!("{} 0 0 {} 0 0 0 0 0 0", user, idle);
+    let percpu: String = (0..n)
+        .map(|i| format!("cpu{} {} 0 0 {} 0 0 0 0 0 0\n", i, user / n, idle / n))
+        .collect();
     let uptime_s = up * process::TICK_NS / 1_000_000_000;
     let (total, ready) = process::counts();
     format!(
-        "cpu  {cpu}\ncpu0 {cpu}\nintr 0\nctxt 0\nbtime {}\nprocesses {}\nprocs_running {}\nprocs_blocked {}\n",
+        "cpu  {cpu}\n{percpu}intr 0\nctxt 0\nbtime {}\nprocesses {}\nprocs_running {}\nprocs_blocked {}\n",
         crate::rtc::now().saturating_sub(uptime_s),
         process::last_pid(),
         ready,
@@ -231,7 +238,16 @@ fn cpuinfo() -> String {
             "unknown".to_string()
         }
     };
-    format!("processor\t: 0\nvendor_id\t: {}\nmodel name\t: {}\ncpu cores\t: 1\n", vendor, model)
+    // One entry per core, as on Linux (nproc and htop count them).
+    let n = crate::smp::cores();
+    (0..n)
+        .map(|i| {
+            format!(
+                "processor\t: {}\nvendor_id\t: {}\nmodel name\t: {}\nphysical id\t: 0\nsiblings\t: {}\ncore id\t\t: {}\ncpu cores\t: {}\n\n",
+                i, vendor, model, n, i, n
+            )
+        })
+        .collect()
 }
 
 impl FileSystem for ProcFs {

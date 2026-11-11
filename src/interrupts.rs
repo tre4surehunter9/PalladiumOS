@@ -28,6 +28,10 @@ lazy_static! {
     idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
     idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
     idt[crate::smp::SPURIOUS_VECTOR as usize].set_handler_fn(spurious_interrupt);
+    unsafe {
+        idt[crate::smp::AP_TIMER_VECTOR as usize]
+            .set_handler_addr(x86_64::VirtAddr::new(ap_timer_entry as *const () as u64));
+    }
 
     crate::syscall::init_syscalls(&mut idt);
 
@@ -65,7 +69,11 @@ extern "C" fn timer_dispatch(frame: &mut crate::syscall::SyscallFrame) {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
+    // Time goes on even while another core has the kernel.
     crate::process::tick();
+    // The kernel: taken here, given back on the way out (syscall_return,
+    // when going back to a program; below otherwise).
+    let took = crate::smp::lock_kernel();
     crate::xhci::poll(); // USB keyboards
     // Preemptive multitasking: only when we interrupted a user program, never
     // in the middle of kernel code (which may hold locks). Signals (Ctrl-C,
@@ -74,6 +82,38 @@ extern "C" fn timer_dispatch(frame: &mut crate::syscall::SyscallFrame) {
         crate::net::poll_if_due();
         crate::process::preempt();
         crate::process::handle_signals(frame, None);
+    } else if took {
+        crate::smp::unlock_kernel(); // it interrupted the idle loop
+    }
+}
+
+// The other cores' timer (their local APIC's), like the PIT's for core 0:
+// the same frame, and back through syscall_return.
+core::arch::global_asm!(
+    ".global ap_timer_entry",
+    "ap_timer_entry:",
+    "push rax", "push rcx", "push rdx", "push rsi", "push rdi", "push r8", "push r9", "push r10",
+    "push r11", "push rbx", "push rbp", "push r12", "push r13", "push r14", "push r15",
+    "cld",
+    "mov rdi, rsp",
+    "call ap_timer_dispatch",
+    "jmp syscall_return",
+);
+
+unsafe extern "C" {
+    fn ap_timer_entry();
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn ap_timer_dispatch(frame: &mut crate::syscall::SyscallFrame) {
+    crate::smp::lapic_eoi();
+    let took = crate::smp::lock_kernel();
+    if crate::usermode::from_user(frame.cs) {
+        // A program ran its time: let another have this core.
+        crate::process::preempt();
+        crate::process::handle_signals(frame, None);
+    } else if took {
+        crate::smp::unlock_kernel();
     }
 }
 
@@ -81,6 +121,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     _stack_frame: InterruptStackFrame
 ) {
     use x86_64::instructions::port::Port;
+    let _k = crate::smp::enter();
 
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
@@ -125,6 +166,7 @@ pub fn let_in() {
 /// A PCI interrupt: if it's the network card's line, tell the network
 /// stack (which acknowledges the card); then end the interrupt.
 fn pci_irq(line: u8) {
+    let _k = crate::smp::enter();
     if crate::net::card_irq() == line {
         crate::net::interrupt();
     }
@@ -177,6 +219,7 @@ pub fn start_timer() {
 /// Let interrupt line `irq` through the PICs (and the cascade, for 8-15).
 /// The PS/2 mouse (IRQ 12): a byte from it.
 extern "x86-interrupt" fn mouse_irq12(_f: InterruptStackFrame) {
+    let _k = crate::smp::enter();
     let byte = unsafe { x86_64::instructions::port::Port::<u8>::new(0x60).read() };
     crate::mouse::interrupt(byte);
     unsafe { PICS.lock().notify_end_of_interrupt(PIC_1_OFFSET + 12) };
@@ -196,6 +239,7 @@ pub fn unmask_irq(irq: u8) {
 pub extern "x86-interrupt" fn breakpoint_handler(
     stack_frame: InterruptStackFrame)
 {
+    let _k = crate::smp::enter();
     println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
@@ -212,6 +256,7 @@ extern "x86-interrupt" fn page_fault_handler(
     use x86_64::registers::control::Cr2;
 
     let addr = Cr2::read().as_u64();
+    let _k = crate::smp::enter();
     // A write to a page shared copy-on-write after fork: copy it, retry.
     // (Also when the kernel writes for a program; it normally breaks the
     // sharing first, in is_user_range.)
@@ -237,6 +282,10 @@ extern "x86-interrupt" fn page_fault_handler(
         crate::process::kill_current(SIGSEGV);
     }
 
+    crate::serial_println!(
+        "EXCEPTION: PAGE FAULT at {:?}, {:?}, cpu {}, pid {}\n{:#?}",
+        Cr2::read(), error_code, crate::smp::cpu_index(), crate::process::current_pid(), stack_frame
+    );
     println!("EXCEPTION: PAGE FAULT");
     println!("Accessed Address: {:?}", Cr2::read());
     println!("Error Code: {:?}", error_code);
@@ -248,6 +297,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    let _k = crate::smp::enter();
     if crate::usermode::from_user(stack_frame.code_segment) {
         println!("General protection fault (rip {:?})", stack_frame.instruction_pointer);
         crate::process::kill_current(SIGSEGV);
@@ -256,6 +306,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    let _k = crate::smp::enter();
     if crate::usermode::from_user(stack_frame.code_segment) {
         println!("Illegal instruction (rip {:?})", stack_frame.instruction_pointer);
         crate::process::kill_current(SIGILL);

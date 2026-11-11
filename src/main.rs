@@ -119,7 +119,7 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         boot_ok!("Started the scheduler (preemptive, up to {} processes)", palladiumos::process::MAX_PROCESSES);
         let cores = palladiumos::smp::init(boot_info.rsdp_addr.into_option());
         if cores > 1 {
-            boot_ok!("Started {} CPU cores (the others wait: processes run on the first)", cores);
+            boot_ok!("Started {} CPU cores (programs run on all of them)", cores);
         }
         boot_ok!(
             "Kernel at {:#x} (higher half); lower half free for programs",
