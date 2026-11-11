@@ -42,8 +42,12 @@ ModulePath /usr/lib/X11/fvwm95/
 PixmapPath /usr/lib/X11/pixmaps/
 IconPath   /usr/lib/X11/mini-icons/
 
-Style "*"     TitleIcon mini-x2.xpm
-Style "rxvt"  TitleIcon mini-term.xpm
+Style "*"      TitleIcon mini-x2.xpm
+Style "rxvt"   TitleIcon mini-term.xpm
+Style "xclock" TitleIcon mini-clock.xpm
+Style "xcalc"  TitleIcon mini-calc.xpm
+Style "xeyes"  TitleIcon mini-eyes.xpm
+Style "xlogo"  TitleIcon mini-bx2.xpm
 
 #------------------------------------------------------------------------------
 # At start
@@ -96,7 +100,9 @@ AddToMenu "StartMenu@fvwm-menu.xpm@^#808080^" \
 
 DestroyMenu "Programs"
 AddToMenu "Programs" \
-  "Terminal%mini-term.xpm%"         Exec rxvt
+  "Accessories%mini-hammer.xpm%"    Popup Accessories
++ ""                                Nop
++ "Terminal%mini-term.xpm%"         Exec rxvt
 + "Processes (top)%mini-run.xpm%"   Exec rxvt -T top -e busybox top
 + "System info%mini-bx2.xpm%"       Exec rxvt -T fastfetch -e sh -c "fastfetch; sh"
 + "Text editor%mini-edit.xpm%"      Exec rxvt -T edit -e edit
@@ -105,6 +111,13 @@ AddToMenu "Programs" \
 + "Python%mini-run.xpm%"            Exec rxvt -T MicroPython -e micropython
 + "Lua%mini-run.xpm%"               Exec rxvt -T Lua -e lua
 + "Alpine Linux%mini-penguin.xpm%"  Exec rxvt -T Alpine -e alpine
+
+DestroyMenu "Accessories"
+AddToMenu "Accessories" \
+  "Calculator%mini-calc.xpm%"       Exec xcalc
++ "Clock%mini-clock.xpm%"           Exec xclock
++ "Eyes%mini-eyes.xpm%"             Exec xeyes
++ "X logo%mini-bx2.xpm%"            Exec xlogo
 
 DestroyMenu "Shutdown"
 AddToMenu "Shutdown" \
@@ -198,5 +211,15 @@ Key Tab     A       M       Next [*] Focus
 *FvwmTaskBarShowTransients
 *FvwmTaskBarHighlightFocus
 *FvwmTaskBarDeskOnly
+
+# The clock (and its date, as a tip), at the right of the taskbar. Its
+# goodies are built into FvwmTaskBar (the plugin directory names them).
+*FvwmTaskBarGoodyLoadablePlugins /usr/lib/X11/fvwm95/plugins
+*FvwmTaskBarGoodyLoadableQuiet
+*FvwmTaskBarGoodyLoadableSymbol ShowDateModuleSymbol
+*FvwmTaskBarGoodyLoadableId .DATE
+*FvwmTaskBarShowDateModuleTip.DATE Date
+*FvwmTaskBarShowDateModuleClockFormat.DATE %H:%M
+*FvwmTaskBarShowDateModuleCommand.DATE Exec xclock
 
 *FvwmIdentFont -adobe-helvetica-medium-r-normal--12-*-75-75-*-*-*-*

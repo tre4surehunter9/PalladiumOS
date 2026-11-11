@@ -1,8 +1,9 @@
 #!/bin/sh
 # Copyright (c) 2026 tre4surehunter9
-# X programs for PalladiumOS: tools/ports/x11-clients.sh -> /bin/rxvt (a
-# terminal) and /bin/evilwm (a window manager). Both need only libX11,
-# which tools/ports/tinyx.sh builds into target/ports/x11.
+# X programs for PalladiumOS: tools/ports/x11-clients.sh -> /usr/bin/rxvt (a
+# terminal) and /usr/bin/evilwm (a window manager), on the system disk.
+# Both need only libX11, which tools/ports/tinyx.sh builds into
+# target/ports/x11.
 . "$(dirname "$0")/common.sh"
 
 X="$PORTS/x11"
@@ -46,14 +47,16 @@ cp "${AM}config.sub" "${AM}config.guess" autoconf/
 # (Its make carries on past errors: check for the program.)
 make -j"$(nproc)" >make.log 2>&1
 [ -x src/rxvt ] || { grep -B2 -A6 "error" make.log | tail -30; exit 1; }
-install -m 755 -s src/rxvt "$BIN/rxvt"
+mkdir -p "$SYSROOT/bin"
+rm -f "$BIN/rxvt" "$BIN/evilwm" # (where an earlier version put them)
+install -m 755 -s src/rxvt "$SYSROOT/bin/rxvt"
 
 # evilwm 1.5, without Xrandr (not built here); with shaped windows
 # (libXext).
 fetch evilwm-1.5 https://www.6809.org.uk/evilwm/evilwm-1.5.tar.gz \
     6104852413e6d50669361dcadda5a25d39e2b2b0c95a6384022c905957a2740f
 sed -i '/^OPT_CPPFLAGS += -DRANDR/d; /^OPT_LDLIBS   += -lXrandr/d' Makefile
-# The only fonts are the X server's built-in ones: "fixed" by default.
+# Its font: "fixed" (always there: the X server has it built in too).
 sed -i 's/#define DEF_FONT        "variable"/#define DEF_FONT        "fixed"/' evilwm.h
 # Keys are looked up without XKB (TinyX has no XKB extension: with it, no
 # key binding ever matched).
@@ -63,5 +66,5 @@ grep -q 'XLookupKeysym(e, 0)' bind.c || { echo "evilwm: key lookup not patched" 
 sed -i 's/#define DEF_TERM        "x-terminal-emulator"/#define DEF_TERM        "rxvt"/; s/#define DEF_TERM        "xterm"/#define DEF_TERM        "rxvt"/' evilwm.h
 make CC="$PCC" CPPFLAGS="-I$X/include" LDFLAGS="-L$X/lib -static" LDLIBS="-lxcb -lXau -lXdmcp" >make.log 2>&1 ||
     { grep -B2 -A6 "error" make.log | tail -30; exit 1; }
-install -m 755 -s evilwm "$BIN/evilwm"
-echo "rxvt and evilwm installed in $BIN"
+install -m 755 -s evilwm "$SYSROOT/bin/evilwm"
+echo "rxvt and evilwm installed in $SYSROOT/bin"

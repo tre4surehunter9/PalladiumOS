@@ -87,9 +87,13 @@ find . -name Makefile -exec sed -i 's/-lX11\b/-lX11 -lxcb -lXau -lXdmcp/g' {} +
 # -Wimplicit-function-declaration to check).
 sed -i 's|^extern char \*Module;|extern char *Module;\nchar *safemalloc(int);|' modules/FvwmTaskBar/Mallocs.c
 grep -q '^char \*safemalloc(int);' modules/FvwmTaskBar/Mallocs.c || { echo "Mallocs.c not patched" >&2; exit 1; }
-# The taskbar's plugins are shared libraries, which a static program can't
-# load: not built.
+# The taskbar's plugins (the clock, icons that run commands) are shared
+# libraries, which a static program can't load: they're built into it
+# instead, found by builtin_plugins.c's stand-ins for dlopen and dlsym.
 sed -i '/^MODULES=/,/[^\\]$/d; s/^all: ${PROG} modules/all: ${PROG}/' modules/FvwmTaskBar/Makefile
+cp "$ROOT/tools/ports/fvwm95/builtin_plugins.c" modules/FvwmTaskBar/
+sed -i 's/^\tGoodyLoadable.o$/\tGoodyLoadable.o ShowDateModule.o GoodyModule.o builtin_plugins.o/; s/^EXTRA_DEFINES=\(.*\)$/EXTRA_DEFINES=\1 -Ddlopen=pal_dlopen -Ddlsym=pal_dlsym -Ddlerror=pal_dlerror -Ddlclose=pal_dlclose/' modules/FvwmTaskBar/Makefile
+grep -q 'builtin_plugins.o' modules/FvwmTaskBar/Makefile || { echo "FvwmTaskBar's Makefile not patched" >&2; exit 1; }
 make -j"$(nproc)" fvwm_icons=/usr/lib/X11/pixmaps >make.log 2>&1
 [ -x fvwm/fvwm95 ] && [ -x modules/FvwmTaskBar/FvwmTaskBar ] ||
     { grep -B2 -A6 "error" make.log | tail -40; exit 1; }
@@ -114,4 +118,6 @@ install -m 644 "$ROOT/tools/ports/fvwm95/system.fvwm95rc" "$FD/system.fvwm95rc"
 install -m 644 pixmaps/*.xpm "$SYSROOT/lib/X11/pixmaps/"
 install -m 644 mini-icons/*.xpm "$SYSROOT/lib/X11/mini-icons/"
 install -m 644 "$ROOT/tools/ports/fvwm95/desktop.xpm" "$SYSROOT/lib/X11/pixmaps/desktop.xpm"
+# The taskbar's plugin directory: it looks for *.so there (all built in).
+mkdir -p "$FD/plugins" && : > "$FD/plugins/builtin.so"
 echo "fvwm95 installed: $SYSROOT/bin/fvwm95, $FD ($(ls "$FD" | wc -l) files)"

@@ -10,7 +10,7 @@
 # back here. The X server's messages are in /tmp/Xfbdev.log, its programs'
 # in /tmp/startx.log.
 
-if ! [ -x /bin/Xfbdev ]; then
+if ! command -v Xfbdev >/dev/null; then
     echo "startx: no X server (build it with tools/ports/tinyx.sh)" >&2
     exit 1
 fi
@@ -43,6 +43,9 @@ while ! [ -S /tmp/.X11-unix/X0 ]; do
 done
 
 export DISPLAY=:0
+# A UTF-8 locale for X programs (the fonts are Unicode ones): one libX11
+# knows (it has no C.UTF-8; musl takes any UTF-8 locale as its own).
+export LANG="${LANG:-en_US.UTF-8}"
 : >/tmp/startx.log
 if [ $# -gt 0 ]; then
     "$@" >>/tmp/startx.log 2>&1 &

@@ -130,6 +130,10 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
             ("evilwm", "a window manager (move: Alt+drag, resize: Alt+middle-drag, terminal: Ctrl+Alt+Enter)"),
             ("rxvt", "a terminal window (rxvt &, or rxvt -e PROGRAM)"),
             ("xpmroot", "set the desktop's background to an XPM picture"),
+            ("xcalc", "a calculator"),
+            ("xclock", "a clock (xclock -digital for digits)"),
+            ("xeyes", "eyes that follow the mouse"),
+            ("xlogo", "the X Window System's logo"),
         ],
     ),
     (

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright (c) 2026 tre4surehunter9
-# An X server for PalladiumOS: tools/ports/tinyx.sh -> /bin/Xfbdev, TinyX's
+# An X server for PalladiumOS: tools/ports/tinyx.sh -> /usr/bin/Xfbdev, TinyX's
 # framebuffer X server (the small "kdrive" server, as TinyCore Linux uses).
 # It draws on /dev/fb0, takes the keyboard from the console (medium raw
 # mode) and the mouse from /dev/input/mice. Fonts: the ones on the system
@@ -113,5 +113,8 @@ TINYX_CFLAGS="-O2 -std=gnu17 -DKDRIVESERVER -DINITARGS=void -Wno-error=implicit-
     --with-vendor-name="PalladiumOS" >configure.log 2>&1 ||
     { tail -30 configure.log; exit 1; }
 make -j"$(nproc)" >make.log 2>&1 || { grep -B2 -A6 "error" make.log | tail -40; exit 1; }
-install -m 755 -s kdrive/fbdev/Xfbdev "$BIN/Xfbdev"
-echo "Xfbdev installed in $BIN"
+# On the system disk, with the rest of X (/bin is in the kernel's memory).
+mkdir -p "$SYSROOT/bin"
+rm -f "$BIN/Xfbdev" # (where an earlier version put it)
+install -m 755 -s kdrive/fbdev/Xfbdev "$SYSROOT/bin/Xfbdev"
+echo "Xfbdev installed in $SYSROOT/bin"
