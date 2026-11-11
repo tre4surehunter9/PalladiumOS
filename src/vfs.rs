@@ -129,6 +129,10 @@ struct Description {
     offset: usize,
     /// O_NONBLOCK, for pipes (sockets and terminals keep their own).
     nonblocking: bool,
+    /// For a directory: its entries as of the first getdents64 (or the
+    /// last rewind), so deleting entries while reading (rm -rf) can't make
+    /// later reads skip others.
+    dir_snapshot: Option<Vec<(String, u64, u8)>>,
 }
 
 impl Drop for Description {
@@ -175,7 +179,7 @@ fn handle(kind: Kind) -> Handle {
         Kind::Epoll(_) => "anon_inode:[eventpoll]".to_string(),
         Kind::TimerFd(_) => "anon_inode:[timerfd]".to_string(),
     };
-    Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0, nonblocking: false }) })
+    Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0, nonblocking: false, dir_snapshot: None }) })
 }
 
 #[derive(Clone)]
@@ -414,6 +418,7 @@ fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
                 if let Err(e) = mounts::with_fs(loc.mount, |fs| fs.truncate(loc.ino, 0)) {
                     return -e;
                 }
+                crate::mmap::file_truncated(loc.mount, loc.ino, 0);
             }
             Kind::File { loc, path: abs.to_string(), readable, writable, append: flags & O_APPEND != 0 }
         }
@@ -941,6 +946,7 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
             let offset = desc.offset as u64;
             match mounts::with_fs(loc.mount, |fs| fs.read(loc.ino, offset, buf)) {
                 Ok(n) => {
+                    crate::mmap::file_read_overlay(loc.mount, loc.ino, offset, &mut buf[..n]);
                     desc.offset += n;
                     n as i64
                 }
@@ -997,7 +1003,10 @@ pub fn sys_pread(fd: u64, buf: &mut [u8], offset: u64) -> i64 {
             }
             let loc = *loc;
             match mounts::with_fs(loc.mount, |fs| fs.read(loc.ino, offset, buf)) {
-                Ok(n) => n as i64,
+                Ok(n) => {
+                    crate::mmap::file_read_overlay(loc.mount, loc.ino, offset, &mut buf[..n]);
+                    n as i64
+                }
                 Err(e) => -e,
             }
         }
@@ -1032,7 +1041,10 @@ pub fn sys_pwrite(fd: u64, bytes: &[u8], offset: u64) -> i64 {
         return -EBADF;
     }
     match mounts::with_fs(loc.mount, |fs| fs.write(loc.ino, offset, bytes)) {
-        Ok(n) => n as i64,
+        Ok(n) => {
+            crate::mmap::file_written(loc.mount, loc.ino, offset, &bytes[..n]);
+            n as i64
+        }
         Err(e) => -e,
     }
 }
@@ -1077,6 +1089,7 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
             });
             match result {
                 Ok((offset, n)) => {
+                    crate::mmap::file_written(loc.mount, loc.ino, offset, &bytes[..n]);
                     desc.offset = offset as usize + n;
                     n as i64
                 }
@@ -1136,6 +1149,7 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
         // Only rewinding a directory is supported.
         Kind::Dir { .. } if whence == SEEK_SET && delta == 0 => {
             desc.offset = 0;
+            desc.dir_snapshot = None; // rewinddir: read the directory afresh
             0
         }
         Kind::Dir { .. } => -EINVAL,
@@ -1272,20 +1286,25 @@ pub fn sys_getdents64(fd: u64, out: &mut [u8]) -> i64 {
     };
     let pos = desc.offset;
 
-    let parent = mounts::resolve(&filesystem::normalize(&path, "..")).map(|l| l.ino).unwrap_or(loc.ino);
-    let mut entries: Vec<(String, u64, u8)> = vec![(".".into(), loc.ino, DT_DIR), ("..".into(), parent, DT_DIR)];
-    match mounts::with_fs(loc.mount, |fs| fs.readdir(loc.ino)) {
-        Ok(children) => entries.extend(children.into_iter().map(|(name, ino, kind)| {
-            let t = match kind {
-                FileType::Dir => DT_DIR,
-                FileType::File => DT_REG,
-                FileType::Symlink => DT_LNK,
-                FileType::CharDevice(_) => DT_CHR,
-            };
-            (name, ino, t)
-        })),
-        Err(e) => return -e,
+    // The entries as of the first read (see dir_snapshot).
+    if desc.dir_snapshot.is_none() || pos == 0 {
+        let parent = mounts::resolve(&filesystem::normalize(&path, "..")).map(|l| l.ino).unwrap_or(loc.ino);
+        let mut entries: Vec<(String, u64, u8)> = vec![(".".into(), loc.ino, DT_DIR), ("..".into(), parent, DT_DIR)];
+        match mounts::with_fs(loc.mount, |fs| fs.readdir(loc.ino)) {
+            Ok(children) => entries.extend(children.into_iter().map(|(name, ino, kind)| {
+                let t = match kind {
+                    FileType::Dir => DT_DIR,
+                    FileType::File => DT_REG,
+                    FileType::Symlink => DT_LNK,
+                    FileType::CharDevice(_) => DT_CHR,
+                };
+                (name, ino, t)
+            })),
+            Err(e) => return -e,
+        }
+        desc.dir_snapshot = Some(entries);
     }
+    let entries = desc.dir_snapshot.clone().unwrap_or_default();
 
     // struct linux_dirent64 { u64 d_ino; i64 d_off; u16 d_reclen; u8 d_type; char d_name[]; }
     let mut written = 0usize;
@@ -1908,7 +1927,10 @@ pub fn sys_ftruncate(fd: u64, len: u64) -> i64 {
         return -EINVAL;
     }
     match mounts::with_fs(loc.mount, |fs| fs.truncate(loc.ino, len)) {
-        Ok(()) => 0,
+        Ok(()) => {
+            crate::mmap::file_truncated(loc.mount, loc.ino, len);
+            0
+        }
         Err(e) => -e,
     }
 }

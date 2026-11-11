@@ -17,9 +17,11 @@
 //!   named semaphores). Pages come on first touch; a file's are read from
 //!   it, and written back on msync and when its last mapping goes away.
 //!   Their page table entries are marked memory::SHARED, so fork leaves
-//!   them writable in both processes instead of copy-on-write. (Reads and
-//!   writes of a mapped file through read()/write() see the file, not
-//!   unsaved changes in the mapping.)
+//!   them writable in both processes instead of copy-on-write. read() and
+//!   write() of a mapped file stay in step with the mapping: writes go to
+//!   the file and into the pages in memory, and reads see the pages (with
+//!   changes not written back yet) over the file (see file_read_overlay,
+//!   file_written, file_truncated).
 //!
 //! Without MAP_FIXED, addresses are picked from [MMAP_BASE, MMAP_END),
 //! between the brk heap and the stack.
@@ -175,6 +177,58 @@ impl Drop for SharedMem {
             }
             None => DEFERRED.lock().extend(pages.into_values()),
         }
+    }
+}
+
+/// The shared memory of a file, if something maps it right now.
+fn mapped_file(mount: usize, ino: crate::mounts::Ino) -> Option<Arc<SharedMem>> {
+    let files = SHARED_FILES.lock();
+    files.iter().find(|(k, _)| *k == (mount, ino)).and_then(|(_, w)| w.upgrade())
+}
+
+/// The pages of `mem` overlapping [offset, offset + len): (index, frame).
+fn pages_in(mem: &SharedMem, offset: u64, len: usize) -> Vec<(u64, PhysFrame)> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let (first, last) = (offset / 4096, (offset + len as u64 - 1) / 4096);
+    mem.pages.lock().range(first..=last).map(|(&i, &f)| (i, f)).collect()
+}
+
+/// read() of a file just put `buf` (from `offset`): if the file is mapped,
+/// the mapping's pages in memory are newer, so they go over it.
+pub fn file_read_overlay(mount: usize, ino: crate::mounts::Ino, offset: u64, buf: &mut [u8]) {
+    let Some(mem) = mapped_file(mount, ino) else { return };
+    for (index, frame) in pages_in(&mem, offset, buf.len()) {
+        let page_start = index * 4096;
+        let from = offset.max(page_start);
+        let to = (offset + buf.len() as u64).min(page_start + 4096);
+        let src = unsafe { core::slice::from_raw_parts(memory::phys_ptr(frame.start_address()), 4096) };
+        buf[(from - offset) as usize..(to - offset) as usize].copy_from_slice(&src[(from - page_start) as usize..(to - page_start) as usize]);
+    }
+}
+
+/// write() put `data` in a file at `offset`: a mapping of it sees it too.
+pub fn file_written(mount: usize, ino: crate::mounts::Ino, offset: u64, data: &[u8]) {
+    let Some(mem) = mapped_file(mount, ino) else { return };
+    for (index, frame) in pages_in(&mem, offset, data.len()) {
+        let page_start = index * 4096;
+        let from = offset.max(page_start);
+        let to = (offset + data.len() as u64).min(page_start + 4096);
+        let dst = unsafe { core::slice::from_raw_parts_mut(memory::phys_ptr(frame.start_address()), 4096) };
+        dst[(from - page_start) as usize..(to - page_start) as usize].copy_from_slice(&data[(from - offset) as usize..(to - offset) as usize]);
+    }
+}
+
+/// A file was truncated to `len`: what a mapping holds past the end is
+/// gone (zeros if the file grows again).
+pub fn file_truncated(mount: usize, ino: crate::mounts::Ino, len: u64) {
+    let Some(mem) = mapped_file(mount, ino) else { return };
+    for (&index, &frame) in mem.pages.lock().range(len / 4096..) {
+        let page_start = index * 4096;
+        let keep = len.saturating_sub(page_start).min(4096) as usize;
+        let page = unsafe { core::slice::from_raw_parts_mut(memory::phys_ptr(frame.start_address()), 4096) };
+        page[keep..].fill(0);
     }
 }
 

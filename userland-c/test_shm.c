@@ -102,6 +102,15 @@ static int files(void)
     CHECK(munmap(p, 4096) == 0);
     CHECK(pread(fd, buf, 1, 400) == 1 && buf[0] == 'Q');
     CHECK(fstat(fd, &st) == 0 && st.st_size == 4096); /* (not grown) */
+    /* read()/write() and the mapping stay in step, both ways. */
+    p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK(p != MAP_FAILED);
+    CHECK(pwrite(fd, "via pwrite", 10, 500) == 10 && memcmp(p + 500, "via pwrite", 10) == 0);
+    memcpy(p + 600, "via memory", 10); /* not written back yet */
+    CHECK(pread(fd, buf, 3, 600) == 3 && memcmp(buf, "via", 3) == 0);
+    CHECK(lseek(fd, 604, SEEK_SET) == 604 && read(fd, buf, 6) == 6 && memcmp(buf, "memory", 6) == 0);
+    CHECK(ftruncate(fd, 550) == 0 && p[600] == 0 && memcmp(p + 500, "via pwrite", 10) == 0);
+    CHECK(ftruncate(fd, 4096) == 0 && munmap(p, 4096) == 0);
     /* A read-only fd can't be mapped shared and writable. */
     int ro = open(path, O_RDONLY);
     CHECK(mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, ro, 0) == MAP_FAILED && errno == EACCES);

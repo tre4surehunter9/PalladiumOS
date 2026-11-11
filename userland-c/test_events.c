@@ -3,6 +3,7 @@
  * directory on a disk) running a program bigger than the kernel's heap.
  * Exits 0, or the line number of the first failed check. */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -405,6 +406,36 @@ static int sigwaits(void)
     return 0;
 }
 
+/* Delete every entry of a directory while reading it (what rm -rf does):
+ * nothing may be skipped, so rmdir works after. */
+static int remove_while_reading(const char *base)
+{
+    char dir[256], path[512];
+    snprintf(dir, sizeof dir, "%s/rmtest", base);
+    CHECK(mkdir(dir, 0755) == 0);
+    for (int i = 0; i < 300; i++) {
+        snprintf(path, sizeof path, "%s/file-number-%03d", dir, i);
+        int fd = open(path, O_CREAT | O_WRONLY, 0644);
+        CHECK(fd >= 0);
+        close(fd);
+    }
+    DIR *d = opendir(dir);
+    CHECK(d != NULL);
+    int removed = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        CHECK(unlink(path) == 0);
+        removed++;
+    }
+    closedir(d);
+    CHECK(removed == 300);
+    CHECK(rmdir(dir) == 0);
+    return 0;
+}
+
 static int timerfds(void)
 {
     uint64_t n;
@@ -464,10 +495,10 @@ static int timerfds(void)
 int main(int argc, char **argv)
 {
     int r;
-    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()) || (r = sigwaits()))
+    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()) || (r = sigwaits()) || (r = remove_while_reading("/tmp")))
         return r;
     /* The big program needs a directory on a disk (argv[1]). */
-    if (argc > 1 && (r = big_program(argv[1])))
+    if (argc > 1 && ((r = big_program(argv[1])) || (r = remove_while_reading(argv[1]))))
         return r;
     printf("test_events: all checks passed\n");
     return 0;
