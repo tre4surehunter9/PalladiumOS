@@ -106,6 +106,8 @@ enum Kind {
     Epoll(Arc<Mutex<Vec<EpollEntry>>>),
     /// timerfd: readable when its timer has expired.
     TimerFd(Arc<Mutex<TimerFd>>),
+    /// signalfd: the signals in its mask are read from it.
+    SignalFd(Arc<Mutex<u64>>),
 }
 
 struct EventFd {
@@ -178,6 +180,7 @@ fn handle(kind: Kind) -> Handle {
         Kind::EventFd(_) => "anon_inode:[eventfd]".to_string(),
         Kind::Epoll(_) => "anon_inode:[eventpoll]".to_string(),
         Kind::TimerFd(_) => "anon_inode:[timerfd]".to_string(),
+        Kind::SignalFd(_) => "anon_inode:[signalfd]".to_string(),
     };
     Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0, nonblocking: false, dir_snapshot: None }) })
 }
@@ -883,7 +886,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                     Kind::PipeWrite(_) => (O_WRONLY | nb) as i64,
                     Kind::PipeRead(_) => (O_RDONLY | nb) as i64,
                     Kind::Dir { .. } => O_RDONLY as i64,
-                    Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) => (O_RDWR | nb) as i64,
+                    Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) => (O_RDWR | nb) as i64,
                 }
             }
             // Record locks: granted (see sys_flock). F_GETLK reports
@@ -984,6 +987,12 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
             let nonblocking = desc.nonblocking;
             drop(desc);
             timerfd_read(&t, nonblocking, buf)
+        }
+        Kind::SignalFd(m) => {
+            let mask = *m.lock();
+            let nonblocking = desc.nonblocking;
+            drop(desc);
+            signalfd_read(mask, nonblocking, buf)
         }
     }
 }
@@ -1113,7 +1122,7 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
             drop(desc);
             eventfd_write(&e, nonblocking, bytes)
         }
-        Kind::Epoll(_) | Kind::TimerFd(_) => -EINVAL,
+        Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) => -EINVAL,
     }
 }
 
@@ -1154,7 +1163,7 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
         }
         Kind::Dir { .. } => -EINVAL,
         Kind::Null | Kind::Zero | Kind::Random => 0,
-        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } | Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) => -ESPIPE,
+        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } | Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) => -ESPIPE,
     }
 }
 
@@ -1234,7 +1243,7 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
             fill_stat(out, 0, 0, S_IFIFO | 0o600, 1, 0, 0);
             0
         }
-        Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) => {
+        Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) => {
             fill_stat(out, 0, 0, 0o600, 1, 0, 0); // an anonymous inode
             0
         }
@@ -1896,6 +1905,9 @@ pub fn poll_ready(fd: i32, events: i16) -> i16 {
             let mut t = t.lock();
             t.update(crate::process::ticks());
             if t.expired > 0 { POLLIN } else { 0 }
+        }
+        Kind::SignalFd(m) => {
+            if crate::process::signal_waiting(*m.lock()) { POLLIN } else { 0 }
         }
         Kind::Epoll(list) => {
             // Readable when something it watches is ready (epolls inside
@@ -2939,4 +2951,133 @@ fn timerfd_read(t: &Arc<Mutex<TimerFd>>, nonblocking: bool, buf: &mut [u8]) -> i
             None => crate::process::block_on(crate::process::POLL_KEY), // disarmed: until settime
         }
     }
+}
+
+// ---------------------------------------------------------------- signalfd
+
+/// signalfd4(fd, mask, sizemask, flags: SFD_CLOEXEC, SFD_NONBLOCK): a new
+/// signalfd (fd -1), or a new mask for an existing one. (SIGKILL and
+/// SIGSTOP can't be read this way.)
+pub fn sys_signalfd4(fd: u64, mask: u64, size: u64, flags: u64) -> i64 {
+    if size != 8 || flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
+        return -EINVAL;
+    }
+    let Some(m) = (unsafe { user_slice(mask, 8) }) else { return -EFAULT };
+    let unblockable = (1u64 << 8) | (1u64 << 18); // SIGKILL, SIGSTOP
+    let mask = u64::from_le_bytes(m.try_into().unwrap()) & !unblockable;
+    if fd as i64 != -1 {
+        return match &get(fd).map(|h| h.lock().kind_signalfd()) {
+            Ok(Some(m)) => {
+                *m.lock() = mask;
+                fd as i64
+            }
+            Ok(None) => -EINVAL,
+            Err(e) => -e,
+        };
+    }
+    let h = handle(Kind::SignalFd(Arc::new(Mutex::new(mask))));
+    h.lock().nonblocking = flags & O_NONBLOCK != 0;
+    match with_process(|p| alloc_fd(p, h, flags & O_CLOEXEC != 0)) {
+        Ok(fd) => fd as i64,
+        Err(e) => -e,
+    }
+}
+
+impl Description {
+    fn kind_signalfd(&self) -> Option<Arc<Mutex<u64>>> {
+        match &self.kind {
+            Kind::SignalFd(m) => Some(m.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// read: one signalfd_siginfo (128 bytes) per signal taken, waiting for
+/// the first unless non-blocking.
+fn signalfd_read(mask: u64, nonblocking: bool, buf: &mut [u8]) -> i64 {
+    const SIZE: usize = 128;
+    if buf.len() < SIZE {
+        return -EINVAL;
+    }
+    let mut n = 0;
+    while n + SIZE <= buf.len() {
+        let Some(sig) = crate::process::take_signal(mask) else {
+            if n > 0 {
+                break;
+            }
+            if nonblocking {
+                return -EAGAIN;
+            }
+            if !crate::process::wait_for_signal(mask) {
+                return -EINTR;
+            }
+            continue;
+        };
+        let info = &mut buf[n..n + SIZE];
+        info.fill(0);
+        info[0..4].copy_from_slice(&(sig as u32).to_le_bytes()); // ssi_signo (ssi_code 0: SI_USER)
+        n += SIZE;
+    }
+    n as i64
+}
+
+// ---------------------------------------------------------------- splice
+
+/// splice(in, off_in, out, off_out, len, flags): move up to `len` bytes
+/// between a pipe and another fd in the kernel: what one read gives (as
+/// on Linux, it doesn't wait for all of `len`). Offsets are for the end
+/// that isn't a pipe (NULL: its position). The flags are hints.
+pub fn sys_splice(fd_in: u64, off_in: u64, fd_out: u64, off_out: u64, len: u64) -> i64 {
+    let is_pipe = |fd: u64| get(fd).map(|h| matches!(h.lock().kind, Kind::PipeRead(_) | Kind::PipeWrite(_)));
+    let (pin, pout) = match (is_pipe(fd_in), is_pipe(fd_out)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return -e,
+    };
+    if !pin && !pout {
+        return -EINVAL;
+    }
+    if (pin && off_in != 0) || (pout && off_out != 0) {
+        return -ESPIPE;
+    }
+    let read_off = |p: u64| -> Result<Option<u64>, i64> {
+        if p == 0 {
+            return Ok(None);
+        }
+        let b = unsafe { user_slice(p, 8) }.ok_or(EFAULT)?;
+        Ok(Some(u64::from_le_bytes(b.try_into().unwrap())))
+    };
+    let (oi, oo) = match (read_off(off_in), read_off(off_out)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return -e,
+    };
+    let mut buf = vec![0u8; (len as usize).min(64 * 1024)];
+    let n = match oi {
+        Some(o) => sys_pread(fd_in, &mut buf, o),
+        None => sys_read(fd_in, &mut buf),
+    };
+    if n <= 0 {
+        return n;
+    }
+    let mut done = 0usize;
+    while done < n as usize {
+        let w = match oo {
+            Some(o) => sys_pwrite(fd_out, &buf[done..n as usize], o + done as u64),
+            None => sys_write(fd_out, &buf[done..n as usize]),
+        };
+        if w <= 0 {
+            if done == 0 {
+                return if w < 0 { w } else { -EIO };
+            }
+            break;
+        }
+        done += w as usize;
+    }
+    for (ptr, off) in [(off_in, oi), (off_out, oo)] {
+        if let Some(o) = off {
+            if let Some(b) = unsafe { user_slice_mut(ptr, 8) } {
+                b.copy_from_slice(&(o + done as u64).to_le_bytes());
+            }
+        }
+    }
+    done as i64
 }

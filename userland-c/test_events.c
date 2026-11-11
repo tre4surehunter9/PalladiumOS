@@ -23,6 +23,7 @@
 #include <sys/utsname.h>
 #include <sys/personality.h>
 #include <sys/uio.h>
+#include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
@@ -469,6 +470,68 @@ static int waitids(void)
     return 0;
 }
 
+static void *signal_later(void *arg)
+{
+    (void)arg;
+    usleep(150 * 1000);
+    kill(getpid(), SIGUSR2);
+    return NULL;
+}
+
+static int signalfds(void)
+{
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGUSR2);
+    sigaddset(&s, SIGURG);
+    CHECK(pthread_sigmask(SIG_BLOCK, &s, NULL) == 0);
+    int sfd = signalfd(-1, &s, SFD_NONBLOCK | SFD_CLOEXEC);
+    CHECK(sfd >= 0);
+    struct signalfd_siginfo ssi[2];
+    CHECK(read(sfd, ssi, sizeof ssi[0]) == -1 && errno == EAGAIN);
+    struct pollfd p = { .fd = sfd, .events = POLLIN };
+    CHECK(poll(&p, 1, 0) == 0);
+    CHECK(kill(getpid(), SIGUSR2) == 0);
+    CHECK(poll(&p, 1, 1000) == 1 && (p.revents & POLLIN));
+    CHECK(read(sfd, ssi, sizeof ssi[0]) == sizeof ssi[0] && ssi[0].ssi_signo == SIGUSR2);
+    /* Two at once. */
+    CHECK(kill(getpid(), SIGUSR2) == 0 && kill(getpid(), SIGURG) == 0);
+    CHECK(read(sfd, ssi, sizeof ssi) == 2 * sizeof ssi[0]);
+    /* poll with no timeout, woken by a signal another thread sends. */
+    pthread_t th;
+    CHECK(pthread_create(&th, NULL, signal_later, NULL) == 0);
+    CHECK(poll(&p, 1, 5000) == 1);
+    pthread_join(th, NULL);
+    CHECK(read(sfd, ssi, sizeof ssi[0]) == sizeof ssi[0] && ssi[0].ssi_signo == SIGUSR2);
+    close(sfd);
+    CHECK(pthread_sigmask(SIG_UNBLOCK, &s, NULL) == 0);
+    return 0;
+}
+
+static int splices(void)
+{
+    int p[2];
+    CHECK(pipe(p) == 0);
+    int f = open("/tmp/test_events.splice", O_CREAT | O_TRUNC | O_RDWR, 0644);
+    CHECK(f >= 0);
+    /* pipe -> file */
+    CHECK(write(p[1], "spliced!", 8) == 8);
+    CHECK(splice(p[0], NULL, f, NULL, 100, 0) == 8);
+    char b[16] = {0};
+    CHECK(pread(f, b, 8, 0) == 8 && memcmp(b, "spliced!", 8) == 0);
+    /* file -> pipe, at an offset (updated; the fd's position isn't) */
+    loff_t off = 1;
+    CHECK(splice(f, &off, p[1], NULL, 4, 0) == 4 && off == 5);
+    CHECK(read(p[0], b, sizeof b) == 4 && memcmp(b, "plic", 4) == 0);
+    /* Neither end a pipe: EINVAL. */
+    CHECK(splice(f, NULL, f, NULL, 4, 0) == -1 && errno == EINVAL);
+    close(f);
+    close(p[0]);
+    close(p[1]);
+    unlink("/tmp/test_events.splice");
+    return 0;
+}
+
 static int timerfds(void)
 {
     uint64_t n;
@@ -528,7 +591,7 @@ static int timerfds(void)
 int main(int argc, char **argv)
 {
     int r;
-    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()) || (r = sigwaits()) || (r = waitids()) || (r = remove_while_reading("/tmp")))
+    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()) || (r = sigwaits()) || (r = waitids()) || (r = signalfds()) || (r = splices()) || (r = remove_while_reading("/tmp")))
         return r;
     /* The big program needs a directory on a disk (argv[1]). */
     if (argc > 1 && ((r = big_program(argv[1])) || (r = remove_while_reading(argv[1]))))

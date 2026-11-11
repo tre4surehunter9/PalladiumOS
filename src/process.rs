@@ -1624,7 +1624,12 @@ fn orphaned_locked(table: &BTreeMap<u64, Box<Process>>, pgid: u64) -> bool {
 /// Would delivering `sig` to `p` do nothing (so it may as well be dropped)?
 fn discarded(p: &Process, sig: i32) -> bool {
     let act = p.actions[(sig - 1) as usize];
+    // A blocked signal is kept, as on Linux (its handling may change before
+    // it's unblocked, or a signalfd/sigwait takes it); signal_pending drops
+    // it later if it's still ignored.
     sig != SIGKILL
+        && p.blocked & bit(sig) == 0
+        && p.sigwait & bit(sig) == 0
         && (act.handler == SIG_IGN
             || (act.handler == SIG_DFL && matches!(default_action(sig), DefaultAction::Ignore | DefaultAction::Continue)))
 }
@@ -1691,10 +1696,17 @@ fn signal_locked(table: &mut BTreeMap<u64, Box<Process>>, pid: u64, sig: i32) ->
             if wake && matches!(p.state, State::Waiting | State::Sleeping | State::Blocked(_)) {
                 p.state = State::Ready; // so it notices
             }
+
             if sig == SIGKILL && p.state == State::Stopped {
                 p.state = State::Ready;
             }
         }
+    }
+    // Threads of the process in poll/epoll recheck their fds (a signalfd
+    // may be readable now).
+    let tgid = table[&pid].tgid;
+    for t in table.values_mut().filter(|t| t.tgid == tgid && t.state == State::Blocked(POLL_KEY)) {
+        t.state = State::Ready;
     }
     if continued {
         notify_parent_locked(table, pid, true);
@@ -2260,6 +2272,39 @@ pub fn sys_rt_sigtimedwait(set: u64, info: u64, timeout: u64) -> i64 {
             None => block_on(SIGNAL_ONLY),
         }
     }
+}
+
+/// Take a pending signal in `set`: the thread's own, or one sent to its
+/// process (signalfd's read).
+pub fn take_signal(set: u64) -> Option<i32> {
+    let mut table = TABLE.lock();
+    let cur = current_pid();
+    let tgid = table[&cur].tgid;
+    let from = [cur, tgid].into_iter().find(|t| table.get(t).is_some_and(|p| p.pending & set != 0))?;
+    let p = table.get_mut(&from).unwrap();
+    let sig = lowest(p.pending & set);
+    p.pending &= !bit(sig);
+    Some(sig)
+}
+
+/// Is a signal in `set` pending for this thread or its process?
+pub fn signal_waiting(set: u64) -> bool {
+    let table = TABLE.lock();
+    let cur = current_pid();
+    let tgid = table[&cur].tgid;
+    [cur, tgid].iter().any(|t| table.get(t).is_some_and(|p| p.pending & set != 0))
+}
+
+/// Sleep until a signal in `set` (or one that interrupts) arrives. False
+/// if one that interrupts is there (EINTR).
+pub fn wait_for_signal(set: u64) -> bool {
+    with_current(|p| p.sigwait = set);
+    let interrupted = signal_pending();
+    if !interrupted {
+        block_on(SIGNAL_ONLY);
+    }
+    with_current(|p| p.sigwait = 0);
+    !interrupted
 }
 
 /// Never woken by wake(): sigsuspend and pause wait for a signal only.
