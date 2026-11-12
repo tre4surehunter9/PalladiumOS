@@ -11,6 +11,7 @@ use crate::lex::{lex, LexError, Part, Redir, RedirKind, Word};
 use crate::parse::{parse, AndOr, Cmd, Compound, Connector, List, ParseError, Pipeline, Simple};
 use crate::shell_status;
 
+#[derive(Clone)]
 pub struct Var {
     pub value: String,
     pub exported: bool,
@@ -113,6 +114,9 @@ pub struct Shell {
     pub xtrace: bool,
     /// > 0 while running a condition (if/while, && ||, !), where -e is ignored.
     pub in_condition: usize,
+    /// `local` variables of the running functions, innermost last: each
+    /// variable's value before the function, restored when it returns.
+    pub locals: Vec<Vec<(String, Option<Var>)>>,
 }
 
 impl Shell {
@@ -130,6 +134,7 @@ impl Shell {
             vars,
             params,
             functions: BTreeMap::new(),
+            locals: Vec::new(),
             status: 0,
             interactive,
             jobs: Vec::new(),
@@ -293,13 +298,35 @@ impl Shell {
     // ------------------------------------------------------------ running
 
     /// Parse and run text (a script, `sh -c`, `.`, `eval`, $(...)).
+    /// Run a script, one complete command at a time (as POSIX shells
+    /// read them), so an alias defined on one line applies to the next.
+    /// A syntax error ends the script.
     pub fn run_text(&mut self, text: &str) {
-        match parse_text(text) {
-            Ok(list) => self.run_list(&list),
-            Err(e) => {
-                eprintln!("sh: {}", e);
-                self.status = 2;
+        let mut pending = String::new();
+        for line in text.split_inclusive('\n') {
+            pending.push_str(line);
+            if !pending.ends_with('\n') {
+                pending.push('\n'); // the last line, without its newline
             }
+            match parse_or_incomplete(&pending) {
+                Ok(None) => continue,
+                Ok(Some(list)) => {
+                    pending.clear();
+                    self.run_list(&list);
+                    if self.stopping() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("sh: {}", e);
+                    self.status = 2;
+                    return;
+                }
+            }
+        }
+        if !pending.trim().is_empty() {
+            eprintln!("sh: syntax error: unexpected end of file");
+            self.status = 2;
         }
     }
 
@@ -609,8 +636,22 @@ impl Shell {
 
     fn expand_words(&mut self, words: &[crate::lex::Word]) -> Vec<String> {
         let mut out = Vec::new();
-        for w in words {
+        // export and local take NAME=value words like assignments: the
+        // value isn't split into words (local x=$y keeps spaces).
+        let mut declaring = false;
+        for (i, w) in words.iter().enumerate() {
+            if declaring {
+                if let Some(Part::Lit(s)) = w.first() {
+                    if s.split_once('=').is_some_and(|(n, _)| crate::lex::is_name(n)) {
+                        out.push(self.expand_str(w));
+                        continue;
+                    }
+                }
+            }
             out.extend(self.expand_fields(w));
+            if i == 0 {
+                declaring = matches!(out.first().map(String::as_str), Some("export" | "local"));
+            }
         }
         out
     }
@@ -890,7 +931,15 @@ impl Shell {
         let saved_params = core::mem::replace(&mut self.params, params);
         let saved_loops = core::mem::replace(&mut self.loop_depth, 0);
         self.function_depth += 1;
+        self.locals.push(Vec::new());
         self.run_compound(body);
+        // Its local variables get their values back.
+        for (name, saved) in self.locals.pop().unwrap_or_default().into_iter().rev() {
+            match saved {
+                Some(var) => self.vars.insert(name, var),
+                None => self.vars.remove(&name),
+            };
+        }
         self.function_depth -= 1;
         self.loop_depth = saved_loops;
         self.params = saved_params;
@@ -910,6 +959,17 @@ impl Shell {
                         return Err(());
                     }
                     target as isize
+                }
+                RedirKind::HereDoc { .. } => {
+                    let text = self.expand_str(&r.target);
+                    match heredoc_fd(text.as_bytes()) {
+                        Ok(fd) => fd,
+                        Err(e) => {
+                            eprintln!("sh: here-document: {}", strerror(-e));
+                            crate::restore_fds(saved);
+                            return Err(());
+                        }
+                    }
                 }
                 kind => {
                     let file = self.expand_str(&r.target);
@@ -947,18 +1007,53 @@ impl Shell {
     }
 }
 
-/// Parse shell text. Errors are human-readable messages.
-pub fn parse_text(text: &str) -> Result<List, String> {
-    match parse_or_incomplete(text) {
-        Ok(Some(list)) => Ok(list),
-        Ok(None) => Err("syntax error: unexpected end of file".to_string()),
-        Err(e) => Err(e),
+/// A file descriptor to read a here-document's text from: a pipe holding
+/// it when it fits in the pipe, else a deleted file in /tmp.
+fn heredoc_fd(text: &[u8]) -> Result<isize, isize> {
+    if text.len() <= 4096 {
+        let (r, w) = pipe()?;
+        let n = write(w, text);
+        close(w);
+        if n < 0 {
+            close(r);
+            return Err(n);
+        }
+        return Ok(r as isize);
+    }
+    static COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    loop {
+        let n = COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let path = format!("/tmp/.sh-heredoc-{}-{}", getpid(), n);
+        let fd = open(&path, O_RDWR | O_CREAT | O_EXCL);
+        if fd == -17 {
+            continue; // EEXIST
+        }
+        if fd < 0 {
+            return Err(fd);
+        }
+        unlink(&path);
+        let mut done = 0;
+        while done < text.len() {
+            let n = write(fd as i32, &text[done..]);
+            if n <= 0 {
+                close(fd as i32);
+                return Err(if n < 0 { n } else { -5 });
+            }
+            done += n as usize;
+        }
+        lseek(fd as i32, 0, SEEK_SET);
+        return Ok(fd);
     }
 }
 
 /// Parse shell text; Ok(None) means it's incomplete (an unclosed quote or
 /// `if` ...), so an interactive shell should read another line.
 pub fn parse_or_incomplete(text: &str) -> Result<Option<List>, String> {
+    // A line ending with \ continues on the next.
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    if body.chars().rev().take_while(|&c| c == '\\').count() % 2 == 1 {
+        return Ok(None);
+    }
     let toks = match lex(text) {
         Ok(t) => t,
         Err(LexError::Incomplete) => return Ok(None),

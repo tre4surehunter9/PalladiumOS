@@ -11,7 +11,23 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::lex::{is_name, Op, Part, Redir, RedirKind, Tok, Word};
+use crate::lex::{is_name, lex, LexError, Op, Part, Redir, RedirKind, Tok, Word};
+
+/// The shell's aliases (`alias ll='ls -l'`), used when commands are parsed.
+/// (The shell runs one thread.)
+pub struct Aliases(core::cell::UnsafeCell<alloc::collections::BTreeMap<String, String>>);
+unsafe impl Sync for Aliases {}
+pub static ALIASES: Aliases = Aliases(core::cell::UnsafeCell::new(alloc::collections::BTreeMap::new()));
+
+impl Aliases {
+    pub fn with<R>(&self, f: impl FnOnce(&mut alloc::collections::BTreeMap<String, String>) -> R) -> R {
+        // SAFETY: one thread, and `f` can't reach ALIASES again.
+        unsafe { f(&mut *self.0.get()) }
+    }
+    fn get(&self, name: &str) -> Option<String> {
+        self.with(|a| a.get(name).cloned())
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct List(pub Vec<(AndOr, bool)>); // (command, run in background)
@@ -71,7 +87,7 @@ const RESERVED: &[&str] = &[
 ];
 
 pub fn parse(toks: Vec<Tok>) -> Result<List, ParseError> {
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser { toks, pos: 0, alias_guards: Vec::new(), alias_next: None };
     let list = p.list(&[])?;
     p.skip_newlines();
     match p.peek() {
@@ -112,9 +128,48 @@ pub fn plain_text(w: &Word) -> Option<String> {
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// Aliases being expanded: the name and where its text ends (an alias
+    /// isn't expanded again inside its own text: alias ls='ls -F').
+    alias_guards: Vec<(String, usize)>,
+    /// Where the next word may be an alias too (after an alias whose text
+    /// ends with a blank).
+    alias_next: Option<usize>,
 }
 
 impl Parser {
+    /// If the word here is an alias, replace it with the alias's tokens.
+    fn expand_alias(&mut self) -> Result<bool, ParseError> {
+        let Some(Tok::Word(w)) = self.peek() else { return Ok(false) };
+        let Some(name) = plain_text(w) else { return Ok(false) };
+        if RESERVED.contains(&name.as_str()) || self.peek_at(1) == Some(&Tok::Op(Op::LParen)) {
+            return Ok(false); // (and not `name() { ...; }`)
+        }
+        if self.alias_guards.iter().any(|(n, end)| *n == name && *end > self.pos) {
+            return Ok(false);
+        }
+        let Some(value) = ALIASES.get(&name) else { return Ok(false) };
+        let toks = match lex(&value) {
+            Ok(t) => t,
+            Err(LexError::Incomplete) => {
+                return Err(ParseError::Syntax(format!("alias {}: unfinished quote in its text", name)))
+            }
+            Err(LexError::Syntax(e)) => return Err(ParseError::Syntax(format!("alias {}: {}", name, e))),
+        };
+        let n = toks.len();
+        let pos = self.pos;
+        self.toks.splice(pos..pos + 1, toks);
+        for (_, end) in self.alias_guards.iter_mut() {
+            if *end > pos {
+                *end = *end + n - 1;
+            }
+        }
+        self.alias_guards.push((name, pos + n));
+        if value.ends_with(|c: char| c == ' ' || c == '\t') {
+            self.alias_next = Some(pos + n);
+        }
+        Ok(true)
+    }
+
     fn peek(&self) -> Option<&Tok> {
         self.toks.get(self.pos)
     }
@@ -246,6 +301,7 @@ impl Parser {
     }
 
     fn command(&mut self) -> Result<Cmd, ParseError> {
+        while self.expand_alias()? {}
         if let Some(r) = self.reserved() {
             let compound = match r {
                 "{" | "if" | "while" | "until" | "for" | "case" => self.compound()?,
@@ -415,7 +471,7 @@ impl Parser {
     }
 
     fn redirect(&mut self, mut r: Redir) -> Result<Redir, ParseError> {
-        if !matches!(r.kind, RedirKind::ToFd(_)) {
+        if !matches!(r.kind, RedirKind::ToFd(_) | RedirKind::HereDoc { .. }) {
             match self.next() {
                 Some(Tok::Word(w)) => r.target = w,
                 None => return Err(ParseError::Syntax("syntax error: missing file name after redirection".into())),
@@ -437,6 +493,20 @@ impl Parser {
     fn simple(&mut self) -> Result<Cmd, ParseError> {
         let mut cmd = Simple::default();
         loop {
+            // An alias: the command name (also after NAME=value), or the
+            // word after an alias ending with a blank.
+            if matches!(self.peek(), Some(Tok::Word(_))) {
+                let first = cmd.words.is_empty()
+                    && !matches!(self.peek(), Some(Tok::Word(w)) if as_assignment(w).is_some());
+                if first || self.alias_next == Some(self.pos) {
+                    if self.alias_next == Some(self.pos) {
+                        self.alias_next = None;
+                    }
+                    if self.expand_alias()? {
+                        continue;
+                    }
+                }
+            }
             match self.peek().cloned() {
                 Some(Tok::Word(w)) => {
                     self.pos += 1;

@@ -14,12 +14,13 @@
 //!   > >> < 2> 2>&1 (also on compound commands: `while ...; done > file`)
 //!   if/then/elif/else/fi, while/until/do/done, for NAME [in WORDS]; do/done,
 //!   case WORD in PATTERN|PATTERN) ... ;; esac, { list; }, ( subshell ),
-//!   functions: name() { ...; } with $1.. and return
+//!   functions: name() { ...; } with $1.., return and `local` variables
+//!   here-documents: <<EOF, <<-EOF (tabs stripped), <<'EOF' (no expansions)
+//!   aliases: alias ll='ls -l', unalias (expanded as commands are read)
 //!   builtins: see BUILTINS (cd exit export read test [ break continue ...)
 //!   interactive line editing: arrows, Home/End, history (Up/Down), Tab
 //!   completion, Ctrl-A/E/U/K/L/C; incomplete commands continue with "> "
 //!   options: -e (exit on failure), -x (print commands), also via `set`
-//! Not yet: here-documents (<<), aliases, `local`.
 #![no_std]
 #![no_main]
 

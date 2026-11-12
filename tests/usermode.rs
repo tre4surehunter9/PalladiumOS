@@ -744,7 +744,8 @@ fn type_line(text: &str) {
             'y' => (false, 0x15), 'z' => (false, 0x2c),
             '1'..='9' => (false, 0x02 + (c as u8 - b'1')), '0' => (false, 0x0b),
             ' ' => (false, 0x39), '/' => (false, 0x35), '.' => (false, 0x34),
-            '|' => (true, 0x2b), '>' => (true, 0x34),
+            '|' => (true, 0x2b), '>' => (true, 0x34), '<' => (true, 0x33), '=' => (false, 0x0d),
+            'E' => (true, 0x12), 'F' => (true, 0x21),
             '-' => (false, 0x0c), '\'' => (false, 0x28), ';' => (false, 0x27), '%' => (true, 0x06),
             '$' => (true, 0x05), '?' => (true, 0x35), '&' => (true, 0x08), 'S' => (true, 0x1f),
             'T' => (true, 0x14), 'O' => (true, 0x18), 'P' => (true, 0x19),
@@ -1184,6 +1185,83 @@ fn sh_functions() {
 }
 
 #[test_case]
+fn sh_here_documents() {
+    let out = script_output(
+        "x=world\n\
+         cat <<EOF > /out.txt\n\
+         hello $x\n\
+         sum $((1+2)) `echo bt` \\$x 'quotes kept'\n\
+         EOF\n\
+         cat <<'EOF' >> /out.txt\n\
+         literal $x `no`\n\
+         EOF\n\
+         cat <<-END >> /out.txt\n\
+         \tindented\n\
+         \tEND\n\
+         read a b <<EOF\n\
+         two one\n\
+         EOF\n\
+         echo \"$b $a\" >> /out.txt\n\
+         cat <<A >> /out.txt; cat <<B >> /out.txt\n\
+         first\n\
+         A\n\
+         second\n\
+         B\n\
+         f() { cat <<EOF\n\
+         in f: $1\n\
+         EOF\n\
+         }\n\
+         f arg >> /out.txt\n\
+         cat <<EOF | grep -c line >> /out.txt\n\
+         $(i=0; while [ $i -lt 1000 ]; do echo line$i; i=$((i+1)); done)\n\
+         EOF\n",
+    );
+    assert_eq!(
+        out,
+        "hello world\nsum 3 bt $x 'quotes kept'\nliteral $x `no`\nindented\none two\nfirst\nsecond\nin f: arg\n1000\n"
+    );
+    assert_eq!(sh("cat <<EOF\nno end"), 2, "a here-document without its delimiter");
+    assert_eq!(script_output("echo a \\\n  b > /out.txt\n"), "a b\n", "a line ending with \\ continues");
+}
+
+#[test_case]
+fn sh_local_variables() {
+    let out = script_output(
+        "x=outer\n\
+         f() { local x=inner y; y=set; echo \"in $x\"; g; }\n\
+         g() { echo \"g sees $x\"; }\n\
+         h() { local v=\"a  b\" w=$x; echo \"$v|$w\"; local v=again; }\n\
+         { f; echo \"out $x [$y]\"; h; echo \"[$v]\"; } > /out.txt\n",
+    );
+    assert_eq!(out, "in inner\ng sees inner\nout outer []\na  b|outer\n[]\n");
+    assert_eq!(sh("local x=1"), 1, "local outside a function");
+}
+
+#[test_case]
+fn sh_aliases() {
+    let out = script_output(
+        "alias say='echo said'\n\
+         say hi > /out.txt\n\
+         alias echo='echo x'\n\
+         echo y >> /out.txt\n\
+         unalias echo\n\
+         alias e='echo ' w=world\n\
+         e w >> /out.txt\n\
+         type say >> /out.txt\n\
+         alias say >> /out.txt\n\
+         V=1 say with assignment >> /out.txt\n\
+         unalias say\n\
+         say 2>/dev/null || echo gone >> /out.txt\n\
+         alias q=\"echo it's\"; alias q >> /out.txt\n",
+    );
+    assert_eq!(
+        out,
+        "said hi\nx y\nworld\nsay is an alias for echo said\nalias say='echo said'\nsaid with assignment\ngone\nalias q='echo it'\\''s'\n"
+    );
+    assert_eq!(sh("unalias nothing"), 1);
+}
+
+#[test_case]
 fn sh_command_substitution() {
     assert_eq!(script_output("x=$(echo hello); echo \"[$x]\" > /out.txt\n"), "[hello]\n");
     assert_eq!(script_output("echo \"$(echo a; echo b)\" > /out.txt\n"), "a\nb\n", "inner newlines kept, trailing removed");
@@ -1281,9 +1359,15 @@ fn sh_interactive_multiline() {
     type_line("then");
     type_line("echo multi > /ml.txt");
     type_line("fi");
+    // A here-document, and an alias defined on one line used on the next.
+    type_line("cat <<EOF >> /ml.txt");
+    type_line("doc line");
+    type_line("EOF");
+    type_line("alias app='echo aliased >> /ml.txt'");
+    type_line("app");
     type_line("exit 0");
     assert_eq!(run(prog("sh"), &["sh"]), Ok(0));
-    assert_eq!(file("/ml.txt"), "multi\n");
+    assert_eq!(file("/ml.txt"), "multi\ndoc line\naliased\n");
 }
 
 #[test_case]

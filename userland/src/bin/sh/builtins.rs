@@ -10,8 +10,9 @@ use crate::shell::{Shell, Var};
 use crate::{print_wrapped, shell_status};
 
 pub const BUILTINS: &[&str] = &[
-    ".", ":", "[", "bg", "break", "cd", "continue", "eval", "exit", "export", "false", "fg", "help", "jobs", "kill",
-    "pwd", "read", "return", "run", "script", "set", "shift", "source", "test", "trap", "true", "type", "unset", "wait",
+    ".", ":", "[", "alias", "bg", "break", "cd", "continue", "eval", "exit", "export", "false", "fg", "help", "jobs",
+    "kill", "local", "pwd", "read", "return", "run", "script", "set", "shift", "source", "test", "trap", "true", "type",
+    "unalias", "unset", "wait",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -96,6 +97,86 @@ impl Shell {
                 }
                 self.params.drain(1..1 + n);
                 0
+            }
+            "alias" => {
+                // 'text' with ' written as '\''
+                let quote = |v: &str| alloc::format!("'{}'", v.replace('\'', "'\\''"));
+                if args.len() == 1 {
+                    crate::parse::ALIASES.with(|a| {
+                        for (k, v) in a.iter() {
+                            println!("alias {}={}", k, quote(v));
+                        }
+                    });
+                    return 0;
+                }
+                let mut status = 0;
+                for a in &args[1..] {
+                    match a.split_once('=') {
+                        Some((name, value)) => {
+                            if name.is_empty() || name.contains(|c: char| matches!(c, '/' | '$' | '`' | '\'' | '"' | '\\') || c.is_whitespace()) {
+                                eprintln!("sh: alias: {}: invalid alias name", name);
+                                status = 1;
+                                continue;
+                            }
+                            crate::parse::ALIASES.with(|t| t.insert(name.to_string(), value.to_string()));
+                        }
+                        None => match crate::parse::ALIASES.with(|t| t.get(a.as_str()).cloned()) {
+                            Some(v) => println!("alias {}={}", a, quote(&v)),
+                            None => {
+                                eprintln!("sh: alias: {}: not found", a);
+                                status = 1;
+                            }
+                        },
+                    }
+                }
+                status
+            }
+            "unalias" => {
+                if arg(1) == Some("-a") {
+                    crate::parse::ALIASES.with(|t| t.clear());
+                    return 0;
+                }
+                if args.len() == 1 {
+                    eprintln!("sh: unalias: usage: unalias NAME... or unalias -a");
+                    return 2;
+                }
+                let mut status = 0;
+                for a in &args[1..] {
+                    if crate::parse::ALIASES.with(|t| t.remove(a.as_str())).is_none() {
+                        eprintln!("sh: unalias: {}: not found", a);
+                        status = 1;
+                    }
+                }
+                status
+            }
+            "local" => {
+                if self.locals.is_empty() {
+                    eprintln!("sh: local: can only be used in a function");
+                    return 1;
+                }
+                let mut status = 0;
+                for a in &args[1..] {
+                    let (name, value) = match a.split_once('=') {
+                        Some((n, v)) => (n, Some(v.to_string())),
+                        None => (a.as_str(), None),
+                    };
+                    if !crate::lex::is_name(name) {
+                        eprintln!("sh: local: '{}': not a valid name", name);
+                        status = 1;
+                        continue;
+                    }
+                    // Its value outside, kept once per call; without a
+                    // value it keeps the current one (like dash).
+                    let saved = self.vars.get(name).cloned();
+                    let frame = self.locals.last_mut().unwrap();
+                    if !frame.iter().any(|(n, _)| n == name) {
+                        frame.push((name.to_string(), saved));
+                    }
+                    if let Some(v) = value {
+                        self.set(name, v);
+                    }
+                }
+                status
             }
             "export" => {
                 if args.len() == 1 {
@@ -200,7 +281,9 @@ impl Shell {
             "type" => {
                 let mut status = 0;
                 for name in &args[1..] {
-                    if self.functions.contains_key(name.as_str()) {
+                    if let Some(v) = crate::parse::ALIASES.with(|t| t.get(name.as_str()).cloned()) {
+                        println!("{} is an alias for {}", name, v);
+                    } else if self.functions.contains_key(name.as_str()) {
                         println!("{} is a function", name);
                     } else if is_builtin(name) {
                         println!("{} is a shell builtin", name);

@@ -174,6 +174,8 @@ const BUILTIN_HELP: &[(&str, &str)] = &[
     ("exit", "leave the shell (exit N: with status N)"),
     ("export", "export NAME=value to programs"),
     ("unset", "remove a variable or function"),
+    ("local", "local NAME[=value]: a variable for this function call"),
+    ("alias", "alias ll='ls -l': a short name for a command (unalias removes)"),
     ("set", "shell options: set -e (stop on errors), set -x (trace)"),
     ("read", "read a line into variables"),
     ("test", "check files and values ([ is the same)"),
@@ -317,6 +319,8 @@ fn syntax() {
     println!("  cmd &                run in the background (see jobs, fg, bg)");
     println!("  > file  >> file      write / append output (2> for errors, 2>&1 both)");
     println!("  < file               read input from a file");
+    println!("  cat <<EOF ... EOF    a here-document: the lines up to EOF as input");
+    println!("                       (<<'EOF': no $ expansion; <<-EOF: tabs removed)");
     println!("  'text'  \"$VAR text\"  quoting; \\ escapes one character");
     println!("  $VAR ${{VAR:-default}} variables (NAME=value sets one)");
     println!("  $(cmd)  $((1 + 2))   command output, arithmetic");
@@ -325,6 +329,8 @@ fn syntax() {
     println!("  while cmd; do ...; done      for x in a b c; do ...; done");
     println!("  case $x in a*) ...;; *) ...;; esac");
     println!("  name() {{ ... }}       define a function ($1, $2..., $#, $@)");
+    println!("  local x=1            a variable for this function call only");
+    println!("  alias ll='ls -l'     a short name for a command (unalias ll)");
     println!("Scripts: sh script.sh args, or chmod +x it (with a #!/bin/sh line).");
 }
 

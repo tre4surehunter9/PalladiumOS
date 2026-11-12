@@ -47,6 +47,10 @@ pub enum RedirKind {
     Append,    // >>
     In,        // <
     ToFd(i32), // >&N  <&N
+    /// <<WORD or <<-WORD (`strip`: leading tabs removed): the target is
+    /// the document's text, filled in by the lexer from the lines after
+    /// the command.
+    HereDoc { strip: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +100,16 @@ pub fn is_name(s: &str) -> bool {
 struct Lexer {
     chars: Vec<char>,
     i: usize,
+}
+
+/// A here-document whose text comes after the next newline: its token's
+/// index, the delimiter, whether the delimiter was quoted (then the text is
+/// taken literally), and whether to strip leading tabs.
+struct PendingHereDoc {
+    tok: usize,
+    delim: String,
+    quoted: bool,
+    strip: bool,
 }
 
 impl Lexer {
@@ -385,6 +399,7 @@ fn is_delimiter(c: char) -> bool {
 pub fn lex(src: &str) -> Result<Vec<Tok>, LexError> {
     let mut lx = Lexer { chars: src.chars().collect(), i: 0 };
     let mut toks = Vec::new();
+    let mut heredocs: Vec<PendingHereDoc> = Vec::new();
 
     while let Some(c) = lx.peek() {
         match c {
@@ -393,6 +408,18 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, LexError> {
             '\n' => {
                 toks.push(Tok::Newline);
                 lx.i += 1;
+                // The here-documents of this line follow it, in order.
+                for h in heredocs.drain(..) {
+                    let body = read_heredoc(&mut lx, &h)?;
+                    if let Some(Tok::Redir(r)) = toks.get_mut(h.tok) {
+                        r.target = body;
+                    }
+                }
+            }
+            '<' if lx.at(1) == Some('<') => {
+                let (tok, h) = lex_heredoc_op(&mut lx, toks.len(), 0)?;
+                heredocs.push(h);
+                toks.push(tok);
             }
             '#' => {
                 while lx.peek().is_some_and(|c| c != '\n') {
@@ -439,6 +466,12 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, LexError> {
                 if let ([Part::Lit(digits)], Some('<' | '>')) = (word.as_slice(), lx.peek()) {
                     if digits.chars().all(|d| d.is_ascii_digit()) {
                         let fd = digits.parse().map_err(|_| LexError::Syntax("bad file descriptor".into()))?;
+                        if lx.peek() == Some('<') && lx.at(1) == Some('<') {
+                            let (tok, h) = lex_heredoc_op(&mut lx, toks.len(), fd)?; // 3<<EOF
+                            heredocs.push(h);
+                            toks.push(tok);
+                            continue;
+                        }
                         toks.push(lex_redir(&mut lx, fd)?);
                         continue;
                     }
@@ -447,7 +480,107 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, LexError> {
             }
         }
     }
+    if !heredocs.is_empty() {
+        // The text ended before a here-document's lines.
+        return Err(LexError::Incomplete);
+    }
     Ok(toks)
+}
+
+/// << or <<- and its delimiter word, at lx.i, for fd `fd`; the token goes
+/// at index `tok` and its text is read after the line ends.
+fn lex_heredoc_op(lx: &mut Lexer, tok: usize, fd: i32) -> Result<(Tok, PendingHereDoc), LexError> {
+    lx.i += 2;
+    let strip = lx.peek() == Some('-');
+    if strip {
+        lx.i += 1;
+    }
+    while matches!(lx.peek(), Some(' ' | '\t')) {
+        lx.i += 1;
+    }
+    // The delimiter: a word; any quoting in it means the text is taken
+    // literally.
+    let start = lx.i;
+    let mut word: Word = Vec::new();
+    while let Some(c) = lx.peek() {
+        if is_delimiter(c) {
+            break;
+        }
+        lex_word_piece(lx, &mut word, false)?;
+    }
+    if word.is_empty() {
+        return Err(LexError::Syntax("syntax error: missing word after <<".into()));
+    }
+    let quoted = lx.chars[start..lx.i].iter().any(|&c| matches!(c, '\'' | '"' | '\\'));
+    let delim: String = if word.iter().all(|p| matches!(p, Part::Lit(_) | Part::Quoted(_))) {
+        word.iter().map(|p| match p { Part::Lit(s) | Part::Quoted(s) => s.as_str(), _ => "" }).collect()
+    } else {
+        lx.chars[start..lx.i].iter().collect() // $ in a delimiter: taken as written
+    };
+    let h = PendingHereDoc { tok, delim, quoted, strip };
+    Ok((Tok::Redir(Redir { fd, kind: RedirKind::HereDoc { strip }, target: Vec::new() }), h))
+}
+
+/// The lines of a here-document, at lx.i (just after a newline), up to its
+/// delimiter line, as a word: literal if the delimiter was quoted, else
+/// with $ expansions, `commands` and \ before $ ` \ or a newline.
+fn read_heredoc(lx: &mut Lexer, h: &PendingHereDoc) -> Result<Word, LexError> {
+    let mut text = String::new();
+    loop {
+        if lx.i >= lx.chars.len() {
+            return Err(LexError::Incomplete);
+        }
+        let end = lx.chars[lx.i..].iter().position(|&c| c == '\n').map(|p| lx.i + p);
+        let Some(end) = end else {
+            return Err(LexError::Incomplete); // (the delimiter line needs its newline)
+        };
+        let mut line: String = lx.chars[lx.i..end].iter().collect();
+        lx.i = end + 1;
+        if h.strip {
+            line = line.trim_start_matches('\t').to_string();
+        }
+        if line == h.delim {
+            break;
+        }
+        text.push_str(&line);
+        text.push('\n');
+    }
+    if h.quoted {
+        return Ok(alloc::vec![Part::Quoted(text)]);
+    }
+    let mut body = Lexer { chars: text.chars().collect(), i: 0 };
+    let mut word: Word = alloc::vec![Part::Quoted(String::new())];
+    while let Some(c) = body.peek() {
+        match c {
+            '\\' => match body.at(1) {
+                Some('\n') => body.i += 2,
+                Some(n @ ('$' | '`' | '\\')) => {
+                    push_text(&mut word, true, n);
+                    body.i += 2;
+                }
+                _ => {
+                    push_text(&mut word, true, '\\');
+                    body.i += 1;
+                }
+            },
+            '$' => match body.dollar(true)? {
+                Some(part) => word.push(part),
+                None => {
+                    push_text(&mut word, true, '$');
+                    body.i += 1;
+                }
+            },
+            '`' => {
+                let part = body.backtick(true)?;
+                word.push(part);
+            }
+            c => {
+                push_text(&mut word, true, c);
+                body.i += 1;
+            }
+        }
+    }
+    Ok(word)
 }
 
 /// A redirection operator at lx.i (< or >), applying to `fd`.

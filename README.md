@@ -456,16 +456,17 @@ After you log in, you get `/bin/sh`, a POSIX-style shell that runs in userland a
 * Pipelines: `ls /bin | grep ^s | wc -l` (Ctrl-C stops the whole pipeline)
 * Lists: `cmd1; cmd2`, `cmd1 && cmd2`, `cmd1 || cmd2`, background jobs with `cmd &`
 * Redirection: `> file`, `>> file`, `< file`, `2> file`, `2>&1`
+* Here-documents: `cat <<EOF` ... `EOF` (with `$VARS` and `$(commands)`), `<<'EOF'` (taken literally), `<<-EOF` (leading tabs removed)
+* Functions: `name() { ...; }` with `$1`..., `return`, and `local NAME=value` variables that go back to their old values when the function returns
+* Aliases: `alias ll='ls -l'`, `alias` (list), `unalias ll` / `unalias -a`; an alias applies from the next line on (scripts are read one command at a time, like other POSIX shells)
 * Scripts: `sh script.sh args...`, `sh -c 'commands'`, `. file` / `source file`
 * Scripts can be run directly: `chmod +x script.sh; ./script.sh` (with a `#!/bin/sh` line, or without one)
 * Options: `sh -e` / `set -e` (stop at the first failing command), `sh -x` / `set -x` (print commands as they run)
 * Job control: Ctrl-Z stops the running command; `jobs` lists jobs, `fg [%N]` and `bg [%N]` continue them
 * Traps: `trap 'commands' INT TERM ...`, `trap '' SIG` (ignore), `trap - SIG` (default), `trap '...' EXIT`
 * `help` lists topics (files, text, processes, system, users, network, graphics, programming, busybox, builtins, syntax, keys); `help TOPIC` shows one, `help NAME` describes a command
-* Builtins: `cd`, `pwd`, `exit`, `export`, `unset`, `set`, `wait`, `jobs`, `fg`, `bg`, `trap`, `kill` (understands `%1`), `.`, `source`, `help`, `true`, `false`, and `run`/`script` like the kernel shell
+* Builtins: `cd`, `pwd`, `exit`, `export`, `unset`, `local`, `alias`, `unalias`, `type`, `read`, `eval`, `set`, `wait`, `jobs`, `fg`, `bg`, `trap`, `kill` (understands `%1`), `.`, `source`, `help`, `true`, `false`, and `run`/`script` like the kernel shell
 * Keys: Up/Down for history, Left/Right/Home/End to edit the line, Tab completes commands and file names, Ctrl-C interrupts the running program (or clears the line), Ctrl-Z stops it, Ctrl-D exits, Ctrl-L clears the screen
-
-Not yet: here-documents (`<<EOF`), aliases, `local`.
 
 ### Kernel Shell
 The built-in kernel shell is kept as a fallback: press Ctrl-D at the login prompt to open it (it runs as root, so it asks for root's password once root has one). `run login` goes back to the login prompt, and `run sh` starts a shell. Kernel shell commands:
