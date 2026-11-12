@@ -4,7 +4,7 @@
 # window): doomgeneric (id Software's DOOM source, GPL, made portable; its
 # Xlib driver) with Freedoom's game data (Freedoom: Phase 1, free levels,
 # graphics and sounds compatible with Ultimate DOOM), in
-# /usr/share/games/doom. No sound.
+# /usr/share/games/doom. Sound effects and music through /dev/dsp.
 . "$(dirname "$0")/common.sh"
 
 X="$PORTS/x11"
@@ -20,7 +20,14 @@ fetch_git doomgeneric https://github.com/ozkl/doomgeneric e257a09527062bfb986b6e
 cd doomgeneric
 # Keys on an X server without XKB (Tinyx): tools/ports/doom/xlib-input.py.
 python3 "$ROOT/tools/ports/doom/xlib-input.py" doomgeneric_xlib.c
-make -j"$(nproc)" CC="$PCC" CFLAGS="-O2 -DNORMALUNIX -DLINUX -D_DEFAULT_SOURCE -I$X/include" \
+# Sound and music through /dev/dsp (tools/ports/doom/i_osssound.c) instead
+# of SDL_mixer: built with FEATURE_SOUND, without SDL's header, with
+# mus2mid (DOOM's MUS music to MIDI).
+cp "$ROOT/tools/ports/doom/i_osssound.c" .
+sed -i '/#include <SDL_mixer.h>/d' i_sound.c
+grep -q 'i_osssound.o' Makefile || sed -i 's/doomgeneric_xlib.o$/doomgeneric_xlib.o i_osssound.o mus2mid.o/' Makefile
+grep -q 'i_osssound.o' Makefile
+make -j"$(nproc)" CC="$PCC" CFLAGS="-O2 -DNORMALUNIX -DLINUX -D_DEFAULT_SOURCE -DFEATURE_SOUND -I$X/include" \
     LDFLAGS="-L$X/lib -static" LIBS="-lm $(pkg-config --static --libs x11)" >make.log 2>&1 ||
     { grep -B2 -A6 "error" make.log | tail -30; exit 1; }
 mkdir -p "$SYSROOT/bin" "$SYSROOT/share/games/doom"

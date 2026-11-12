@@ -245,6 +245,34 @@ pub fn present() -> bool {
     SOUND.lock().card.is_some()
 }
 
+/// /proc/sound: the card, the program's format, and where the ring is.
+pub fn status() -> alloc::string::String {
+    let s = SOUND.lock();
+    let Some(card) = s.card.as_ref() else { return "No sound card\n".into() };
+    alloc::format!(
+        "AC'97 audio{}\nopen: {}\nformat: {} Hz, {} channel(s), {}\ncard rate: {} Hz\nfragment: {} bytes, {} queued at most\n\
+         ring: tail {} fill {} queued {} running {}\ncard: civ {} lvi {} sr {:#06x} picb {} cr {:#04x}\nplayed: {} bytes\n",
+        if card.vra { " (any rate)" } else { " (48 kHz)" },
+        s.open,
+        s.rate,
+        s.channels,
+        match s.format { AFMT_S16_LE => "16-bit", AFMT_S8 => "signed 8-bit", _ => "unsigned 8-bit" },
+        s.dev_rate,
+        s.frag(),
+        s.max_queued(),
+        s.tail,
+        s.fill,
+        s.queued(),
+        s.running,
+        card.in8(PO_CIV),
+        card.in8(PO_LVI),
+        card.in16(PO_SR),
+        card.in16(PO_PICB),
+        card.in8(PO_CR),
+        s.submitted,
+    )
+}
+
 /// /dev/dsp is open and the card has sound queued.
 pub fn playing() -> bool {
     let s = SOUND.lock();

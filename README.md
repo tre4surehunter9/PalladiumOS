@@ -31,7 +31,7 @@
 * **Linux-compatible system calls** (the x86_64 ABI): ordinary Linux programs run unchanged, static or dynamically linked (with musl's or glibc's own dynamic linker), including C programs built with an unmodified [musl](https://musl.libc.org) libc
 * **More than one CPU core** (SMP): programs run on every core at once (`cargo run` gives QEMU up to 4). See [CPU Cores](#cpu-cores)
 * **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control, POSIX timers, `epoll`, `eventfd`, `timerfd`, `signalfd` and `inotify`, shared memory (`MAP_SHARED`, `/dev/shm`, POSIX semaphores between processes), and memory on demand (programs can reserve gigabytes and only use what they touch; programs bigger than the kernel's heap load piece by piece)
-* **Hardware**: boots with BIOS or UEFI, starts every CPU core (ACPI, local APICs), a framebuffer console (1280x720 in QEMU), IDE and AHCI (SATA) disks, PS/2 and USB (xHCI) keyboards, a PS/2 mouse, the RTL8139 network card
+* **Hardware**: boots with BIOS or UEFI, starts every CPU core (ACPI, local APICs), a framebuffer console (1280x720 in QEMU), IDE and AHCI (SATA) disks, PS/2 and USB (xHCI) keyboards, a PS/2 mouse, the RTL8139 network card, an AC'97 sound card (OSS: `/dev/dsp`, `/dev/mixer`; see [Sound](#sound))
 * **Users and permissions**: login, passwords, POSIX file permissions, setuid programs, `su`
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
 * **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink, and an **SSH server** (Dropbear): log in from your own terminal with `ssh -p 2222 root@localhost`; a web server in PalladiumOS on port 80 (Apache, `busybox httpd`) is at `http://localhost:8080`
@@ -122,7 +122,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 13 | rt_sigaction | yes (handlers, `SA_RESTART`, `SA_NODEFER`, `SA_RESETHAND`, `SA_NOCLDSTOP`, `sa_mask`) |
 | 14 | rt_sigprocmask | yes |
 | 15 | rt_sigreturn | yes |
-| 16 | ioctl | terminals: `TCGETS`/`TCSETS` (raw and cooked mode), `TIOCGWINSZ`/`TIOCSWINSZ`, `TIOCGPGRP`/`TIOCSPGRP`, `TIOCSCTTY`/`TIOCNOTTY`, `TIOCGSID`, `TCFLSH`, and for pseudo-terminals `TIOCGPTN`/`TIOCSPTLCK`; the console's virtual terminal and keyboard ioctls (`VT_GETSTATE`, `VT_OPENQRY`, `VT_SETMODE`, `VT_ACTIVATE`..., `KDSETMODE` for graphics mode, `KDSKBMODE` for raw keycodes, `KDGKBENT` for the keymap, the LEDs and the bell); the framebuffer `/dev/fb0` (`FBIOGET_VSCREENINFO`, `FBIOGET_FSCREENINFO`, `FBIOPUT_VSCREENINFO`, `FBIOGETCMAP`/`FBIOPUTCMAP`, `FBIOPAN_DISPLAY`, `FBIOBLANK`); pipes and sockets: `FIONBIO`, `FIONREAD`; sockets: the interface queries (`SIOCGIFNAME`, `SIOCGIFADDR`...) |
+| 16 | ioctl | terminals: `TCGETS`/`TCSETS` (raw and cooked mode), `TIOCGWINSZ`/`TIOCSWINSZ`, `TIOCGPGRP`/`TIOCSPGRP`, `TIOCSCTTY`/`TIOCNOTTY`, `TIOCGSID`, `TCFLSH`, and for pseudo-terminals `TIOCGPTN`/`TIOCSPTLCK`; the console's virtual terminal and keyboard ioctls (`VT_GETSTATE`, `VT_OPENQRY`, `VT_SETMODE`, `VT_ACTIVATE`..., `KDSETMODE` for graphics mode, `KDSKBMODE` for raw keycodes, `KDGKBENT` for the keymap, the LEDs and the bell); the framebuffer `/dev/fb0` (`FBIOGET_VSCREENINFO`, `FBIOGET_FSCREENINFO`, `FBIOPUT_VSCREENINFO`, `FBIOGETCMAP`/`FBIOPUTCMAP`, `FBIOPAN_DISPLAY`, `FBIOBLANK`); sound: OSS's `SNDCTL_DSP_*` on `/dev/dsp` and `SOUND_MIXER_*` on `/dev/mixer` (see [Sound](#sound)); pipes and sockets: `FIONBIO`, `FIONREAD`; sockets: the interface queries (`SIOCGIFNAME`, `SIOCGIFADDR`...) |
 | 17 / 18 | pread64, pwrite64 | yes |
 | 19 / 20 | readv, writev | yes |
 | 21 | access | yes |
@@ -293,7 +293,7 @@ Real-world programs are built from their original source by scripts in `tools/po
 * `tools/ports/vim.sh`: Vim 9.2 (terminal), on ncurses, its runtime in `/usr/share/vim` (without the documentation, spelling and translations).
 * `tools/ports/xfm.sh`: xfm 1.5.4, the X File Manager, on libXaw3d 1.6.6 (the 3-D Athena widgets); PalladiumOS's applications window in `tools/ports/xfm/`.
 * `tools/ports/games.sh`: XBoard 4.6.2 (the last on the Athena widgets alone) with the Fairy-Max 5.0b engine, xjewel 1.6, xsnow 1.42 and xroach 4.0.
-* `tools/ports/doom.sh`: doomgeneric (git e257a09, its Xlib driver) and Freedoom 0.13.0's `freedoom1.wad` in `/usr/share/games/doom` (28 MB); `/usr/bin/doom` starts it.
+* `tools/ports/doom.sh`: doomgeneric (git e257a09, its Xlib driver) and Freedoom 0.13.0's `freedoom1.wad` in `/usr/share/games/doom` (28 MB); `/usr/bin/doom` starts it. Sound effects and music through `/dev/dsp` (`tools/ports/doom/i_osssound.c`: a 16-channel mixer, and a small synthesizer for the MIDI music), and keys on an X server without XKB (`tools/ports/doom/xlib-input.py`).
 * `tools/ports/links.sh`: Links 2.30 with graphics (the X driver) and HTTPS: OpenSSL 3.5.9, libpng 1.6.59 and libjpeg 10, static; the build machine's CA certificates in `/usr/share/ssl/cert.pem`.
 * `tools/ports/fvwm95.sh`: fvwm95 2.0.43f, the window manager with the Windows 95 look, with libXpm 3.5.20 (and xbitmaps' headers), all on the system disk: `/usr/bin/fvwm95` and `xpmroot`, and in `/usr/lib/X11` its modules (FvwmTaskBar...), PalladiumOS's configuration (`tools/ports/fvwm95/system.fvwm95rc`) and its icons.
 
@@ -380,6 +380,16 @@ startx evilwm       # or the X server and the programs you name
 * **Ctrl+Alt+Backspace** stops the X server and gives the console back. X's messages are in `/tmp/Xfbdev.log`.
 
 What the kernel provides for it: `/dev/fb0` (the Linux framebuffer ioctls, and `mmap` of the screen itself), the console's VT and keyboard ioctls (graphics mode, medium-raw keycodes, the keymap), a PS/2 mouse (`/dev/input/mice`, `/dev/psaux`, with the IntelliMouse wheel protocol), `SIGIO` on input, and Unix-domain sockets for X's clients. Fonts: X.Org's classic bitmap fonts in `/usr/share/fonts/X11` (`misc`: `fixed`, `6x13`, `7x14`, `9x15`...; `75dpi`: Adobe's Helvetica, Courier, Times, New Century Schoolbook), Unicode-encoded, which fvwm95 uses (Helvetica) and any X program can ask for (`rxvt -fn 9x15`), then libXfont's built-in `fixed` and `cursor`. `cargo run` gives the screen 1280x720; with the release images, add `-vga none -device VGA,edid=on,xres=1280,yres=720` to QEMU. X needs QEMU's window: click into it for the mouse, and Ctrl+Alt+G lets the mouse go again.
+
+## Sound
+PalladiumOS plays sound through an AC'97 sound card (Intel's ICH audio, QEMU's `-device AC97`; `cargo run` adds one, played through your computer's sound system), with the interface Linux programs used before ALSA, OSS:
+* `/dev/dsp`: write samples to play them: 8-bit (unsigned or signed) or 16-bit, mono or stereo, 8000 to 48000 Hz (the card plays any rate). The usual ioctls: `SNDCTL_DSP_SPEED`, `SETFMT`, `CHANNELS`, `SETFRAGMENT` (how much is buffered: latency), `GETOSPACE`, `GETODELAY`, `GETOPTR`, `SYNC`, `RESET`, `NONBLOCK`... A write waits while the card's buffers are full (or says `EAGAIN`, non-blocking), and `poll` says when there's room. One program at a time.
+* `/dev/mixer`: the master and PCM volumes (`SOUND_MIXER_READ_VOLUME`, `WRITE_VOLUME`, `PCM`...).
+* `/proc/sound`: the card and what it's playing.
+* `play song.wav` plays WAV files (uncompressed 8- or 16-bit), `play -t 440 1` a tone; `volume` shows the volume and `volume 70` sets it.
+* DOOM (Freedoom) has its sound effects and music.
+
+The kernel's timer ticks 100 times a second (10 ms), so a program waiting for room in the card's buffers is woken in time. Not yet: recording, Intel HD Audio (the sound hardware of PCs since 2004), ALSA (`/dev/snd`, which most programs in Alpine use).
 
 ## Alpine Linux
 PalladiumOS can run [Alpine Linux](https://alpinelinux.org)'s userland, its package manager and its packages, unchanged: Alpine builds everything against musl, dynamically linked, which is what PalladiumOS runs.
