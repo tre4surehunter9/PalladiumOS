@@ -18,6 +18,8 @@ export PKG_CONFIG_LIBDIR
 # doomgeneric at a fixed commit (git checks it).
 fetch_git doomgeneric https://github.com/ozkl/doomgeneric e257a09527062bfb986b6e5e0780839b6cbd5b71
 cd doomgeneric
+# Keys on an X server without XKB (Tinyx): tools/ports/doom/xlib-input.py.
+python3 "$ROOT/tools/ports/doom/xlib-input.py" doomgeneric_xlib.c
 make -j"$(nproc)" CC="$PCC" CFLAGS="-O2 -DNORMALUNIX -DLINUX -D_DEFAULT_SOURCE -I$X/include" \
     LDFLAGS="-L$X/lib -static" LIBS="-lm $(pkg-config --static --libs x11)" >make.log 2>&1 ||
     { grep -B2 -A6 "error" make.log | tail -30; exit 1; }
