@@ -1638,8 +1638,9 @@ static FOREGROUND: AtomicU64 = AtomicU64::new(0);
 static TTY_SIGNALS: AtomicU64 = AtomicU64::new(0);
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Length of a timer tick: the PIT's default rate is 1193182 Hz / 65536.
-pub const TICK_NS: u64 = 54_925_439;
+/// Length of a timer tick: 11932 / 1193182 Hz (interrupts::PIT_DIVISOR),
+/// about 10 ms.
+pub const TICK_NS: u64 = 10_000_151;
 
 pub fn foreground() -> u64 {
     FOREGROUND.load(Ordering::SeqCst)
@@ -2460,7 +2461,7 @@ pub fn sys_alarm(secs: u64) -> i64 {
     let mut table = TABLE.lock();
     let p = table.get_mut(&current_pid()).unwrap();
     let ((s, us), _) = alarm_left(p);
-    // Rounded to the nearest second (ticks are ~55 ms), but at least 1.
+    // Rounded to the nearest second, but at least 1.
     let old = if p.alarm_at == 0 { 0 } else { (s + (us >= 500_000) as u64).max(1) };
     p.alarm_at = if secs == 0 { 0 } else { ticks() + ticks_from(secs, 0) };
     p.alarm_every = 0;

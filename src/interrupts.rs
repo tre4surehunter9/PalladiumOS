@@ -204,15 +204,19 @@ pub fn disable_local_apic() {
     }
 }
 
+/// The PIT's divisor: 1193182 Hz / 11932 = 100 Hz, a tick every 10 ms
+/// (process::TICK_NS), fine enough for sound and sleeps.
+pub const PIT_DIVISOR: u16 = 11932;
+
 /// Program the PIT's channel 0 for the timer interrupt: a square wave at
-/// 1193182 Hz / 65536 = 18.2 Hz (process::TICK_NS). A BIOS leaves it like
-/// that; UEFI firmware may not have it running at all.
+/// 100 Hz (PIT_DIVISOR). (A BIOS leaves it at 18.2 Hz; UEFI firmware may not
+/// have it running at all.)
 pub fn start_timer() {
     use x86_64::instructions::port::Port;
     unsafe {
         Port::<u8>::new(0x43).write(0x36); // channel 0, low then high byte, mode 3
-        Port::<u8>::new(0x40).write(0); // divisor 0 = 65536
-        Port::<u8>::new(0x40).write(0);
+        Port::<u8>::new(0x40).write(PIT_DIVISOR as u8);
+        Port::<u8>::new(0x40).write((PIT_DIVISOR >> 8) as u8);
     }
 }
 

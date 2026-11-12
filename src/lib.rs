@@ -132,7 +132,7 @@ pub fn init() {
         pics.write_masks(0b1111_1000, 0b1111_1111);
     }
     x86_64::instructions::interrupts::enable();
-    boot_ok!("Started interrupts (PIC remapped, timer at 18.2 Hz)");
+    boot_ok!("Started interrupts (PIC remapped, timer at 100 Hz)");
 }
 
 pub fn hlt_loop() -> ! {

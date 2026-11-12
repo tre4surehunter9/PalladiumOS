@@ -65,7 +65,7 @@ os.remove("/tmp/lua-wc")
 assert(os.time() > 1700000000)
 assert(os.date("!%Y", 0) == "1970")
 assert(os.time({year = 2000, month = 1, day = 1, hour = 0}) > 0)
--- CPU time advances in timer ticks (55 ms): spin until it does.
+-- CPU time advances in timer ticks (10 ms): spin until it does.
 local c, n = os.clock(), 0
 repeat n = n + 1 until os.clock() > c or n > 100000000
 assert(os.clock() > c)

@@ -203,11 +203,11 @@ pub fn lapic_eoi() {
 }
 
 /// This core's APIC timer, periodic, about as often as core 0's PIT
-/// (QEMU's APIC timer counts at 1 GHz: / 16, 3 million: 48 ms).
+/// (QEMU's APIC timer counts at 1 GHz: / 16, 625000: 10 ms).
 fn start_ap_timer() {
     lapic_write(LAPIC_TIMER_DIV, 0x3); // divide by 16
     lapic_write(LAPIC_LVT_TIMER, (1 << 17) | AP_TIMER_VECTOR as u32); // periodic
-    lapic_write(LAPIC_TIMER_INIT, 3_000_000);
+    lapic_write(LAPIC_TIMER_INIT, 625_000);
 }
 
 // Local APIC registers (offsets).

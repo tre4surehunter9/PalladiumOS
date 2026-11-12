@@ -732,8 +732,11 @@ pub fn reap(net: &mut Net) {
         let (which, h) = net.closing[i];
         let done = with_set(net, which, |_, set| {
             let s = set.get_mut::<tcp::Socket>(h);
-            if s.recv_queue() > 0 {
+            if s.recv_queue() > 0 && s.state() != tcp::State::Closed {
+                // Reset it, and keep it until the next pass: the reset
+                // goes out when the interface is polled after this.
                 s.abort();
+                return false;
             }
             matches!(s.state(), tcp::State::Closed | tcp::State::TimeWait)
         })

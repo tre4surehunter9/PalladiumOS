@@ -82,7 +82,7 @@ fn emit(line: &Line) {
     }
 }
 
-/// Seconds since boot, as "    1.234" (timer ticks, so 55 ms steps).
+/// Seconds since boot, as "    1.234" (timer ticks, so 10 ms steps).
 fn timestamp(line: &mut Line) {
     let ms = crate::process::ticks() * crate::process::TICK_NS / 1_000_000;
     let _ = write!(line, "[{:>5}.{:03}] ", ms / 1000, ms % 1000);
