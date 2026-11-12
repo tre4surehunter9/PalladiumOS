@@ -46,6 +46,8 @@ Style "*"      TitleIcon mini-x2.xpm
 Style "rxvt"   TitleIcon mini-term.xpm
 Style "xterm"  TitleIcon mini-term.xpm
 Style "Links*" TitleIcon mini-nscape.xpm
+Style "Xfm"    TitleIcon mini-filemgr.xpm
+Style "*.xfm"  TitleIcon mini-filemgr.xpm
 Style "xclock" TitleIcon mini-clock.xpm
 Style "xcalc"  TitleIcon mini-calc.xpm
 Style "xeyes"  TitleIcon mini-eyes.xpm
@@ -116,10 +118,12 @@ AddToMenu "Programs" \
 + "Terminal%mini-term.xpm%"         Exec rxvt
 + "XTerm%mini-term.xpm%"            Exec xterm
 + "Web browser (Links)%mini-nscape.xpm%" Exec links -g https://example.com/
++ "File manager (xfm)%mini-filemgr.xpm%" Exec xfm
 + "Processes (top)%mini-run.xpm%"   Exec rxvt -T top -e busybox top
 + "System info%mini-bx2.xpm%"       Exec rxvt -T fastfetch -e sh -c "fastfetch; sh"
 + "Text editor%mini-edit.xpm%"      Exec rxvt -T edit -e edit
 + "vi%mini-edit.xpm%"               Exec rxvt -T vi -e vi
++ "Vim%mini-edit.xpm%"              Exec xterm -T Vim -e vim
 + ""                                Nop
 + "Python%mini-run.xpm%"            Exec rxvt -T MicroPython -e micropython
 + "Lua%mini-run.xpm%"               Exec rxvt -T Lua -e lua

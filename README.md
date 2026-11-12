@@ -218,6 +218,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 277 | sync_file_range | accepted |
 | 280 | utimensat | modification time |
 | 282 / 289 | signalfd, signalfd4 | yes (readable in poll/epoll) |
+| 222-226 | timer_create, timer_settime, timer_gettime, timer_getoverrun, timer_delete | POSIX timers: one-shot and repeating, relative or absolute, on CLOCK_REALTIME/MONOTONIC; a signal to the process or a thread (`SIGEV_SIGNAL`, `SIGEV_THREAD_ID`, so musl's `SIGEV_THREAD` works), `SIGEV_NONE`; `sigwaitinfo` reports `SI_TIMER` with the timer's value (55 ms resolution) |
 | 283 / 286 / 287 | timerfd_create, timerfd_settime, timerfd_gettime | one-shot and repeating, relative or absolute (55 ms resolution) |
 | 284 / 290 | eventfd, eventfd2 | yes (`EFD_SEMAPHORE`, `EFD_NONBLOCK`) |
 | 285 | fallocate | growing a file |
@@ -288,6 +289,8 @@ Real-world programs are built from their original source by scripts in `tools/po
 * `tools/ports/x11-apps.sh`: the X Toolkit and Athena widgets (libICE 1.1.2, libSM 1.2.6, libXt 1.3.1, libXmu 1.3.1, libXaw 1.0.16, with libXfixes 6.0.2, libXi 1.8.4, libXtst 1.2.6, libXrender 0.9.13, libXrandr 1.5.5 and libXcursor 1.2.3), and on them X.Org's programs: xclock, xeyes, xcalc, xlogo, xedit, xmessage, xload, oclock, xmag, xfontsel, bitmap, ico, xwd, xwud, xev, xprop, xwininfo, xdpyinfo, xkill and xsetroot, in `/usr/bin` with their resource files in `/usr/share/X11/app-defaults`; and libX11's locales, error messages and colour names in `/usr/share/X11`.
 * `tools/ports/xterm.sh`: ncurses 6.6 (static, wide characters; in `target/ports/x11`) with a terminfo database in `/usr/share/terminfo` (compiled by the build machine's `tic`), and xterm 412.
 * `tools/ports/tcltk.sh`: Tcl and Tk 8.6.18, static (no loadable extensions): `tclsh` and `wish` in `/usr/bin`, their script libraries and Tk's demos in `/usr/lib`.
+* `tools/ports/vim.sh`: Vim 9.2 (terminal), on ncurses, its runtime in `/usr/share/vim` (without the documentation, spelling and translations).
+* `tools/ports/xfm.sh`: xfm 1.5.4, the X File Manager, on libXaw3d 1.6.6 (the 3-D Athena widgets); PalladiumOS's applications window in `tools/ports/xfm/`.
 * `tools/ports/links.sh`: Links 2.30 with graphics (the X driver) and HTTPS: OpenSSL 3.5.9, libpng 1.6.59 and libjpeg 10, static; the build machine's CA certificates in `/usr/share/ssl/cert.pem`.
 * `tools/ports/fvwm95.sh`: fvwm95 2.0.43f, the window manager with the Windows 95 look, with libXpm 3.5.20 (and xbitmaps' headers), all on the system disk: `/usr/bin/fvwm95` and `xpmroot`, and in `/usr/lib/X11` its modules (FvwmTaskBar...), PalladiumOS's configuration (`tools/ports/fvwm95/system.fvwm95rc`) and its icons.
 
@@ -366,6 +369,8 @@ startx evilwm       # or the X server and the programs you name
   * tools: `xwd` and `xwud` (screenshots), `xev` (events), `xwininfo`, `xprop`, `xdpyinfo`, `xkill` (click a window to close it), `xsetroot`
 * `links -g URL`: a web browser in an X window (HTTPS, pictures); `links URL` in a terminal, `links -dump URL` for a page's text.
 * `wish`: Tcl/Tk 8.6, for programs with windows (`wish /usr/lib/tk8.6/demos/widget` is Tk's tour of what it can do); `tclsh` for Tcl alone.
+* `xfm`: a file manager (folder windows with icons, drag and drop, an applications window).
+* `vim`: Vim 9.2 with syntax colouring, in a terminal (no GUI: Vim dropped its Athena one).
 * `xterm`, X's own terminal (with a terminfo database for full-screen programs), besides rxvt.
 * rxvt runs the PalladiumOS shell. Its programs work as anywhere else (`rxvt -e busybox top` runs one in a window of its own).
 * **Ctrl+Alt+Backspace** stops the X server and gives the console back. X's messages are in `/tmp/Xfbdev.log`.
@@ -503,6 +508,9 @@ The release images include software by other people, under their own licences. P
 | [ncurses](https://invisible-island.net/ncurses/) | 6.6 | MIT-style (X11) | linked into xterm; terminfo in `/usr/share/terminfo` | [ncurses-6.6.tar.gz](https://ftp.gnu.org/gnu/ncurses/ncurses-6.6.tar.gz) |
 | [xterm](https://invisible-island.net/xterm/) | 412 | MIT-style (X11) | `/usr/bin/xterm` | [xterm-412.tgz](https://invisible-mirror.net/archives/xterm/xterm-412.tgz) |
 | [Tcl/Tk](https://www.tcl-lang.org) | 8.6.18 | BSD-style (the Tcl/Tk licence) | `/usr/bin/tclsh`, `wish`, `/usr/lib/tcl8.6`, `tcl8`, `tk8.6` | [tcl8.6.18-src.tar.gz](https://downloads.sourceforge.net/project/tcl/Tcl/8.6.18/tcl8.6.18-src.tar.gz), [tk8.6.18-src.tar.gz](https://downloads.sourceforge.net/project/tcl/Tcl/8.6.18/tk8.6.18-src.tar.gz) |
+| [Vim](https://www.vim.org) | 9.2.1310 | the Vim licence (charityware, GPL-compatible) | `/usr/bin/vim`, `/usr/share/vim` | [vim-9.2.1310.tar.gz](https://github.com/vim/vim/archive/v9.2.1310/vim-9.2.1310.tar.gz) |
+| [xfm](https://musikinformatik.uni-mainz.de/ag/xfm) | 1.5.4 | GPL-2.0-or-later | `/usr/bin/xfm`, `/usr/share/xfm`, `/usr/lib/X11/xfm` | [xfm_1.5.4.orig.tar.gz](https://ports.ubuntu.com/ubuntu-ports/pool/universe/x/xfm/xfm_1.5.4.orig.tar.gz) (Debian's and Ubuntu's copy) |
+| [libXaw3d](https://www.x.org) | 1.6.6 | MIT/X11-style | linked into xfm | [libXaw3d-1.6.6.tar.xz](https://www.x.org/releases/individual/lib/libXaw3d-1.6.6.tar.xz) |
 | [Links](http://links.twibright.com) | 2.30 | GPL-2.0-or-later (with an OpenSSL exception) | `/usr/bin/links` | [links-2.30.tar.bz2](http://links.twibright.com/download/links-2.30.tar.bz2) |
 | [OpenSSL](https://www.openssl.org) | 3.5.9 | Apache-2.0 | linked into links | [openssl-3.5.9.tar.gz](https://www.openssl.org/source/openssl-3.5.9.tar.gz) |
 | [libpng](http://www.libpng.org) | 1.6.59 | the libpng licence (permissive) | linked into links | [libpng-1.6.59.tar.xz](https://download.sourceforge.net/libpng/libpng-1.6.59.tar.xz) |

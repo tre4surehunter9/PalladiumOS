@@ -131,6 +131,7 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
             ("rxvt", "a terminal window (rxvt &, or rxvt -e PROGRAM)"),
             ("xterm", "X's own terminal (xterm &, or xterm -e PROGRAM)"),
             ("links", "a web browser: links -g URL in X (pictures too), links URL in a terminal"),
+            ("xfm", "a file manager: folder windows, drag and drop"),
             ("xpmroot", "set the desktop's background to an XPM picture"),
             ("xcalc", "a calculator"),
             ("xclock", "a clock (xclock -digital for digits)"),
@@ -147,6 +148,7 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
         "compilers, languages and other shells",
         &[
             ("tcc", "C compiler: tcc hi.c -o hi, or tcc -run hi.c"),
+            ("vim", "Vim, the editor (vi is BusyBox's)"),
             ("tclsh", "Tcl 8.6"),
             ("wish", "Tcl with Tk, for windows in X (try wish /usr/lib/tk8.6/demos/widget)"),
             ("lua", "Lua 5.4"),

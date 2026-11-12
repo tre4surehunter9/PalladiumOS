@@ -360,7 +360,7 @@ pub fn list() -> Vec<(u64, u64, String, State)> {
 /// it for them even while a busy process has the CPU.
 pub fn others_ready() -> bool {
     let cur = current_pid();
-    if !WAKE_QUEUE.lock().is_empty() {
+    if !WAKE_QUEUE.lock().is_empty() || ptimer_due() {
         return true;
     }
     let now = ticks();
@@ -442,6 +442,7 @@ pub fn schedule() {
             let cur = current_pid();
             deliver_tty_signals(&mut table);
             fire_alarms_locked(&mut table);
+            fire_posix_timers_locked(&mut table);
             let now = ticks();
             let mut woken = core::mem::take(&mut *WAKE_QUEUE.lock());
             let arrived = crate::task::keyboard::arrivals();
@@ -704,6 +705,7 @@ pub fn exit_thread(code: i32) -> ! {
         }
     };
     if alone {
+        drop_posix_timers(current_tgid());
         exit_current(ExitReason::Exited(code));
     }
     schedule();
@@ -714,6 +716,7 @@ pub fn exit_thread(code: i32) -> ! {
 pub fn exit_group(reason: ExitReason) -> ! {
     // A program that had the screen (an X server) gives it back.
     crate::vga_buffer::process_exited(current_tgid());
+    drop_posix_timers(current_tgid());
     drop_files_of_current();
     let (leader_alive_elsewhere, their_files) = {
         let mut table = TABLE.lock();
@@ -1141,6 +1144,8 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
     };
 
     // Point of no return: switch to the new address space, free the old one.
+    // A new program has no timers.
+    drop_posix_timers(current_tgid());
     // (Files closed here are dropped after the table is unlocked: see
     // drop_files_of_current.)
     let mut closed_files = Vec::new();
@@ -1893,6 +1898,7 @@ pub fn signal_pending() -> bool {
             let mut table = TABLE.lock();
             deliver_tty_signals(&mut table);
             fire_alarms_locked(&mut table);
+            fire_posix_timers_locked(&mut table);
             let cur = current_pid();
             if cur == 0 {
                 return false;
@@ -2328,7 +2334,7 @@ pub fn sys_rt_sigtimedwait(set: u64, info: u64, timeout: u64) -> i64 {
                     let sig = lowest(p.pending & set);
                     p.pending &= !bit(sig);
                     table.get_mut(&cur).unwrap().sigwait = 0;
-                    Some(sig)
+                    Some((sig, take_ptimer_signal(&[cur, t], sig)))
                 }
                 None => {
                     table.get_mut(&cur).unwrap().sigwait = set;
@@ -2336,11 +2342,17 @@ pub fn sys_rt_sigtimedwait(set: u64, info: u64, timeout: u64) -> i64 {
                 }
             }
         };
-        if let Some(sig) = taken {
+        if let Some((sig, timer)) = taken {
             if info != 0 {
                 let Some(out) = (unsafe { user_slice_mut(info, 128) }) else { return -EFAULT };
                 out.fill(0);
                 out[0..4].copy_from_slice(&sig.to_le_bytes()); // si_signo (si_code 0: SI_USER)
+                if let Some((id, value, overrun)) = timer {
+                    out[8..12].copy_from_slice(&(-2i32).to_le_bytes()); // si_code: SI_TIMER
+                    out[16..20].copy_from_slice(&id.to_le_bytes()); // si_timerid
+                    out[20..24].copy_from_slice(&overrun.to_le_bytes()); // si_overrun
+                    out[24..32].copy_from_slice(&value.to_le_bytes()); // si_value
+                }
             }
             return sig as i64;
         }
@@ -2569,6 +2581,201 @@ pub fn sys_clock_gettime(clock: u64, tp: u64) -> i64 {
     out[0..8].copy_from_slice(&((ns / 1_000_000_000) as i64).to_le_bytes());
     out[8..16].copy_from_slice(&((ns % 1_000_000_000) as i64).to_le_bytes());
     0
+}
+
+// ---- POSIX timers (timer_create, timer_settime...) ----
+
+/// A timer of a process (timer_create): when it expires it sends a signal
+/// to the process, or to one of its threads (SIGEV_THREAD_ID: how musl
+/// runs SIGEV_THREAD timers, with a thread waiting in sigwaitinfo).
+struct PosixTimer {
+    tgid: u64,
+    id: i32,
+    /// SIGEV_SIGNAL (0), SIGEV_NONE (1), SIGEV_THREAD_ID (4).
+    notify: i32,
+    signo: i32,
+    tid: u64,
+    /// sigev_value, given back in the siginfo.
+    value: u64,
+    realtime: bool,
+    /// When it expires next (ticks), 0 if disarmed; then every `interval`.
+    next: u64,
+    interval: u64,
+    /// Expirations missed meanwhile (timer_getoverrun).
+    overrun: i32,
+}
+
+static PTIMERS: Mutex<Vec<PosixTimer>> = Mutex::new(Vec::new());
+/// Timer signals not taken yet, for their siginfo (si_code SI_TIMER):
+/// (thread or process, signal, timer id, value, overrun).
+static PTIMER_SIGNALS: Mutex<Vec<(u64, i32, i32, u64, i32)>> = Mutex::new(Vec::new());
+
+const SIGEV_SIGNAL: i32 = 0;
+const SIGEV_NONE: i32 = 1;
+const SIGEV_THREAD_ID: i32 = 4;
+
+/// Is a timer due (so the scheduler should run)?
+fn ptimer_due() -> bool {
+    let now = ticks();
+    PTIMERS.try_lock().is_some_and(|t| t.iter().any(|t| t.next != 0 && now >= t.next))
+}
+
+/// Send the signals of the timers that expired (called with the table).
+fn fire_posix_timers_locked(table: &mut BTreeMap<u64, Box<Process>>) {
+    let now = ticks();
+    let Some(mut timers) = PTIMERS.try_lock() else { return };
+    timers.retain(|t| table.contains_key(&t.tgid));
+    for t in timers.iter_mut().filter(|t| t.next != 0 && now >= t.next) {
+        let missed = if t.interval > 0 { ((now - t.next) / t.interval) as i32 } else { 0 };
+        t.next = if t.interval > 0 { t.next + (missed as u64 + 1) * t.interval } else { 0 };
+        if t.notify == SIGEV_NONE {
+            continue;
+        }
+        let target = if t.notify == SIGEV_THREAD_ID { t.tid } else { t.tgid };
+        let pending = table.get(&target).is_some_and(|p| p.pending & bit(t.signo) != 0);
+        if pending {
+            // Not taken yet: it counts as overrun, as POSIX says.
+            t.overrun = t.overrun.saturating_add(1 + missed);
+            continue;
+        }
+        t.overrun = missed;
+        if let Some(mut sigs) = PTIMER_SIGNALS.try_lock() {
+            sigs.retain(|s| !(s.0 == target && s.1 == t.signo));
+            sigs.push((target, t.signo, t.id, t.value, missed));
+        }
+        if t.notify == SIGEV_THREAD_ID {
+            signal_locked(table, target, t.signo);
+        } else {
+            signal_process_locked(table, target, t.signo);
+        }
+    }
+}
+
+/// The siginfo details of a timer's signal just taken, if it was one:
+/// (timer id, value, overrun).
+fn take_ptimer_signal(pids: &[u64], sig: i32) -> Option<(i32, u64, i32)> {
+    let mut sigs = PTIMER_SIGNALS.lock();
+    let i = sigs.iter().position(|s| pids.contains(&s.0) && s.1 == sig)?;
+    let s = sigs.remove(i);
+    Some((s.2, s.3, s.4))
+}
+
+/// A process's timers go when it ends or runs another program.
+pub fn drop_posix_timers(tgid: u64) {
+    PTIMERS.lock().retain(|t| t.tgid != tgid);
+}
+
+fn ns_to_ticks(ns: u64) -> u64 {
+    if ns == 0 { 0 } else { ns.div_ceil(TICK_NS).max(1) }
+}
+
+fn read_timespec(b: &[u8]) -> Result<u64, i64> {
+    let sec = i64::from_le_bytes(b[0..8].try_into().unwrap());
+    let nsec = i64::from_le_bytes(b[8..16].try_into().unwrap());
+    if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+        return Err(EINVAL);
+    }
+    Ok((sec as u64).saturating_mul(1_000_000_000).saturating_add(nsec as u64))
+}
+
+fn write_timespec(b: &mut [u8], ns: u64) {
+    b[0..8].copy_from_slice(&((ns / 1_000_000_000) as i64).to_le_bytes());
+    b[8..16].copy_from_slice(&((ns % 1_000_000_000) as i64).to_le_bytes());
+}
+
+/// timer_create(clock, sigevent, timerid)
+pub fn sys_timer_create(clock: u64, sev: u64, idp: u64) -> i64 {
+    let realtime = match clock {
+        0 | 5 => true,
+        1 | 4 | 6 | 7 => false,
+        _ => return -EINVAL,
+    };
+    let (cur, tgid) = (current_pid(), current_tgid());
+    // No sigevent: SIGALRM to the process, with the timer's id as value.
+    let (value, signo, notify, tid) = if sev == 0 {
+        (u64::MAX, SIGALRM, SIGEV_SIGNAL, 0)
+    } else {
+        let Some(b) = (unsafe { user_slice(sev, 20) }) else { return -EFAULT };
+        (
+            u64::from_le_bytes(b[0..8].try_into().unwrap()),
+            i32::from_le_bytes(b[8..12].try_into().unwrap()),
+            i32::from_le_bytes(b[12..16].try_into().unwrap()),
+            i32::from_le_bytes(b[16..20].try_into().unwrap()) as u64,
+        )
+    };
+    match notify {
+        SIGEV_NONE => {}
+        SIGEV_SIGNAL | SIGEV_THREAD_ID if (1..=MAX_SIGNAL as i32).contains(&signo) => {}
+        _ => return -EINVAL,
+    }
+    if notify == SIGEV_THREAD_ID && !TABLE.lock().get(&tid).is_some_and(|t| t.tgid == tgid) {
+        return -EINVAL;
+    }
+    let _ = cur;
+    let mut timers = PTIMERS.lock();
+    let id = (0..).find(|i| !timers.iter().any(|t| t.tgid == tgid && t.id == *i)).unwrap();
+    let Some(out) = (unsafe { user_slice_mut(idp, 4) }) else { return -EFAULT };
+    out.copy_from_slice(&id.to_le_bytes());
+    let value = if value == u64::MAX && sev == 0 { id as u64 } else { value };
+    timers.push(PosixTimer { tgid, id, notify, signo, tid, value, realtime, next: 0, interval: 0, overrun: 0 });
+    0
+}
+
+/// timer_settime(timerid, flags, new itimerspec, old itimerspec)
+pub fn sys_timer_settime(id: u64, flags: u64, new: u64, old: u64) -> i64 {
+    const TIMER_ABSTIME: u64 = 1;
+    let Some(b) = (unsafe { user_slice(new, 32) }) else { return -EFAULT };
+    let (interval, value) = match (read_timespec(&b[0..16]), read_timespec(&b[16..32])) {
+        (Ok(i), Ok(v)) => (i, v),
+        _ => return -EINVAL,
+    };
+    let tgid = current_tgid();
+    let now = ticks();
+    let mut timers = PTIMERS.lock();
+    let Some(t) = timers.iter_mut().find(|t| t.tgid == tgid && t.id == id as i32) else { return -EINVAL };
+    if old != 0 {
+        let Some(o) = (unsafe { user_slice_mut(old, 32) }) else { return -EFAULT };
+        write_timespec(&mut o[0..16], t.interval * TICK_NS);
+        write_timespec(&mut o[16..32], if t.next == 0 { 0 } else { t.next.saturating_sub(now).max(1) * TICK_NS });
+    }
+    t.interval = ns_to_ticks(interval);
+    t.next = if value == 0 {
+        0
+    } else if flags & TIMER_ABSTIME != 0 {
+        let now_ns = if t.realtime { crate::rtc::now_ns() } else { now * TICK_NS };
+        now + ns_to_ticks(value.saturating_sub(now_ns)).max(1)
+    } else {
+        now + ns_to_ticks(value)
+    };
+    t.overrun = 0;
+    0
+}
+
+/// timer_gettime(timerid, itimerspec)
+pub fn sys_timer_gettime(id: u64, curr: u64) -> i64 {
+    let tgid = current_tgid();
+    let now = ticks();
+    let timers = PTIMERS.lock();
+    let Some(t) = timers.iter().find(|t| t.tgid == tgid && t.id == id as i32) else { return -EINVAL };
+    let Some(o) = (unsafe { user_slice_mut(curr, 32) }) else { return -EFAULT };
+    write_timespec(&mut o[0..16], t.interval * TICK_NS);
+    write_timespec(&mut o[16..32], if t.next == 0 { 0 } else { t.next.saturating_sub(now).max(1) * TICK_NS });
+    0
+}
+
+/// timer_getoverrun(timerid)
+pub fn sys_timer_getoverrun(id: u64) -> i64 {
+    let tgid = current_tgid();
+    PTIMERS.lock().iter().find(|t| t.tgid == tgid && t.id == id as i32).map_or(-EINVAL, |t| t.overrun as i64)
+}
+
+/// timer_delete(timerid)
+pub fn sys_timer_delete(id: u64) -> i64 {
+    let tgid = current_tgid();
+    let mut timers = PTIMERS.lock();
+    let before = timers.len();
+    timers.retain(|t| !(t.tgid == tgid && t.id == id as i32));
+    if timers.len() == before { -EINVAL } else { 0 }
 }
 
 // ---- blocking on events ----

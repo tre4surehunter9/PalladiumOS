@@ -1,0 +1,2 @@
+# xfm's mountable devices on PalladiumOS: none (disks are mounted at boot,
+# and musl has no getfsent for /etc/fstab).

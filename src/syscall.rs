@@ -133,6 +133,11 @@ pub const SYS_INOTIFY_ADD_WATCH: u64 = 254;
 pub const SYS_INOTIFY_RM_WATCH: u64 = 255;
 pub const SYS_INOTIFY_INIT1: u64 = 294;
 pub const SYS_IO_SETUP: u64 = 206;
+pub const SYS_TIMER_CREATE: u64 = 222;
+pub const SYS_TIMER_SETTIME: u64 = 223;
+pub const SYS_TIMER_GETTIME: u64 = 224;
+pub const SYS_TIMER_GETOVERRUN: u64 = 225;
+pub const SYS_TIMER_DELETE: u64 = 226;
 pub const SYS_TIMERFD_CREATE: u64 = 283;
 pub const SYS_TIMERFD_SETTIME: u64 = 286;
 pub const SYS_TIMERFD_GETTIME: u64 = 287;
@@ -710,6 +715,11 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
             o if o < 0 => -EINVAL,
             o => sys_iov_at(a1, a2, a3, num == SYS_PWRITEV2, Some(o as u64)),
         },
+        SYS_TIMER_CREATE => process::sys_timer_create(a1, a2, a3),
+        SYS_TIMER_SETTIME => process::sys_timer_settime(a1, a2, a3, a4),
+        SYS_TIMER_GETTIME => process::sys_timer_gettime(a1, a2),
+        SYS_TIMER_GETOVERRUN => process::sys_timer_getoverrun(a1),
+        SYS_TIMER_DELETE => process::sys_timer_delete(a1),
         SYS_TIMERFD_CREATE => vfs::sys_timerfd_create(a1, a2),
         SYS_TIMERFD_SETTIME => vfs::sys_timerfd_settime(a1, a2, a3, a4),
         SYS_TIMERFD_GETTIME => vfs::sys_timerfd_gettime(a1, a2),

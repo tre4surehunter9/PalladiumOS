@@ -672,10 +672,70 @@ static int timerfds(void)
     return 0;
 }
 
+/* POSIX timers: timer_create & co. A repeating timer's signal to a
+ * handler, its siginfo (SI_TIMER) for sigwaitinfo, and a SIGEV_THREAD
+ * timer (musl: a thread waiting for the signal; what vim uses). */
+static volatile sig_atomic_t timer_ticks;
+static void on_timer(int s) { (void)s; timer_ticks++; }
+static volatile int thread_fired;
+static void timer_thread(union sigval v) { thread_fired = v.sival_int; }
+
+static int posix_timers(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_timer;
+    CHECK(sigaction(SIGUSR1, &sa, NULL) == 0);
+    struct sigevent sev;
+    memset(&sev, 0, sizeof sev);
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGUSR1;
+    timer_t t;
+    CHECK(timer_create(CLOCK_MONOTONIC, &sev, &t) == 0);
+    struct itimerspec its = { .it_interval = { 0, 60000000 }, .it_value = { 0, 60000000 } };
+    CHECK(timer_settime(t, 0, &its, NULL) == 0);
+    struct itimerspec cur;
+    CHECK(timer_gettime(t, &cur) == 0 && cur.it_interval.tv_nsec > 0);
+    for (int i = 0; i < 100 && timer_ticks < 3; i++)
+        usleep(20000);
+    CHECK(timer_ticks >= 3);
+    CHECK(timer_delete(t) == 0);
+    CHECK(timer_delete(t) != 0); /* (musl returns -EINVAL itself) */
+
+    /* sigwaitinfo: si_code SI_TIMER, with the timer's value. */
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR2);
+    CHECK(sigprocmask(SIG_BLOCK, &set, NULL) == 0);
+    sev.sigev_signo = SIGUSR2;
+    sev.sigev_value.sival_int = 4242;
+    CHECK(timer_create(CLOCK_REALTIME, &sev, &t) == 0);
+    struct itimerspec once = { .it_interval = { 0, 0 }, .it_value = { 0, 50000000 } };
+    CHECK(timer_settime(t, 0, &once, NULL) == 0);
+    siginfo_t si;
+    CHECK(sigwaitinfo(&set, &si) == SIGUSR2);
+    CHECK(si.si_code == SI_TIMER && si.si_value.sival_int == 4242);
+    CHECK(timer_delete(t) == 0);
+    CHECK(sigprocmask(SIG_UNBLOCK, &set, NULL) == 0);
+
+    /* SIGEV_THREAD: the function runs in a thread of its own. */
+    memset(&sev, 0, sizeof sev);
+    sev.sigev_notify = SIGEV_THREAD;
+    sev.sigev_notify_function = timer_thread;
+    sev.sigev_value.sival_int = 7;
+    CHECK(timer_create(CLOCK_MONOTONIC, &sev, &t) == 0);
+    CHECK(timer_settime(t, 0, &once, NULL) == 0);
+    for (int i = 0; i < 100 && !thread_fired; i++)
+        usleep(20000);
+    CHECK(thread_fired == 7);
+    CHECK(timer_delete(t) == 0);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int r;
-    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()) || (r = sigwaits()) || (r = waitids()) || (r = signalfds()) || (r = splices()) || (r = inotifies()) || (r = remove_while_reading("/tmp")))
+    if ((r = eventfds()) || (r = epolls()) || (r = misc()) || (r = timerfds()) || (r = sigwaits()) || (r = waitids()) || (r = signalfds()) || (r = splices()) || (r = inotifies()) || (r = posix_timers()) || (r = remove_while_reading("/tmp")))
         return r;
     /* The big program needs a directory on a disk (argv[1]). */
     if (argc > 1 && ((r = big_program(argv[1])) || (r = remove_while_reading(argv[1]))))

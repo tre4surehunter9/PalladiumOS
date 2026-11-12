@@ -1,0 +1,8 @@
+#XFM
+Terminal:::term.xpm:exec xterm:exec xterm -e vim "$@"
+Editor:::writings.xpm:exec xedit:exec xedit "$@"
+Vim:::readme.xpm:exec xterm -T vim -e vim:exec xterm -T vim -e vim "$@"
+Calculator:::calc.xpm:exec xcalc:
+Web browser:::news.xpm:exec links -g example.com:exec links -g "$@"
+Magnifier:::mag_glass.xpm:exec xmag:
+Home:::home.xpm:OPEN:
