@@ -135,6 +135,7 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
             ("doom", "DOOM, with Freedoom's levels (arrows, Ctrl fires, Space opens)"),
             ("xboard", "chess against Fairy-Max"),
             ("xjewel", "falling jewels: line up three"),
+            ("xmahjongg", "mahjongg solitaire: take matching free tiles"),
             ("xsnow", "snow on the desktop (xroach: roaches under the windows)"),
             ("xpmroot", "set the desktop's background to an XPM picture"),
             ("xcalc", "a calculator"),

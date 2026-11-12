@@ -49,6 +49,9 @@ make -j"$(nproc)"
 make install
 fi
 
+# (Both specs replace gcc's link line, so they add what it had that's needed:
+# --eh-frame-hdr, the table C++ exceptions and stack walks use to find a
+# function's unwind information.)
 # palladium-cc: gcc with musl, producing static position-independent
 # executables (PalladiumOS loads them at its user address and they
 # relocate themselves with musl's rcrt1.o). musl-gcc's own specs file
@@ -75,7 +78,7 @@ $PREFIX/lib/rcrt1.o $PREFIX/lib/crti.o crtbeginS.o%s
 crtendS.o%s $PREFIX/lib/crtn.o
 
 *link:
--nostdlib %{!r:%{!shared:-static -pie --no-dynamic-linker -z text}}
+-nostdlib --eh-frame-hdr %{!r:%{!shared:-static -pie --no-dynamic-linker -z text}}
 SPECS
 cat > "$PREFIX/bin/palladium-cc" <<WRAPPER
 #!/bin/sh
@@ -109,7 +112,7 @@ libgcc.a%s %:if-exists(libgcc_eh.a%s)
 crtendS.o%s $PREFIX/lib/crtn.o
 
 *link:
--nostdlib %{shared:-shared} %{!shared:-pie} -dynamic-linker /lib/ld-musl-x86_64.so.1
+-nostdlib --eh-frame-hdr %{shared:-shared} %{!shared:-pie} -dynamic-linker /lib/ld-musl-x86_64.so.1
 SPECS
 cat > "$PREFIX/bin/palladium-cc-dyn" <<WRAPPER
 #!/bin/sh

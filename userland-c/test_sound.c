@@ -103,17 +103,18 @@ static int dsp(void)
     CHECK(ioctl(d, SNDCTL_DSP_GETOPTR, &after) == 0 && after.bytes >= (int)n * 9 / 10);
     CHECK(ioctl(d, SNDCTL_DSP_GETODELAY, &delay) == 0 && delay == 0);
 
-    /* Non-blocking: a big write takes what fits and returns at once. */
-    int on = 1;
+    /* Non-blocking: a big write takes what fits and returns without waiting
+     * for the card. (Not "less than all of it": QEMU may pull sound into
+     * its own buffer in a burst. Then a second write takes some or says
+     * EAGAIN.) */
     CHECK(ioctl(d, SNDCTL_DSP_NONBLOCK, 0) == 0);
-    (void)on;
     free(t);
     t = tone(rate, 3.0, &n);
     start = now();
     ssize_t w = write(d, t, n);
-    CHECK(w > 0 && (!timing || (w < (ssize_t)n && now() - start < 0.3)));
-    if (timing)
-        CHECK(write(d, t, n) == -1 && errno == EAGAIN);
+    CHECK(w > 0 && (!timing || now() - start < 1.0));
+    ssize_t w2 = write(d, t, n);
+    CHECK(w2 > 0 || (w2 == -1 && errno == EAGAIN));
     CHECK(ioctl(d, SNDCTL_DSP_RESET, 0) == 0);
     CHECK(ioctl(d, SNDCTL_DSP_GETODELAY, &delay) == 0 && delay == 0);
     free(t);

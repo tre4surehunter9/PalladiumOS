@@ -2116,6 +2116,17 @@ fn siginfo_fault_handlers_and_altstack() {
 }
 
 #[test_case]
+fn cxx_programs_run() {
+    // C++ (palladium-c++, libstdc++ for musl): exceptions, RTTI, threads...
+    let Some(_) = c_program("test_cxx") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let status = sh("test_cxx > /tmp/cxx.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/cxx.out"));
+    assert!(file("/tmp/cxx.out").contains("c++ ok"), "{}", file("/tmp/cxx.out"));
+    assert!(only_kernel_left());
+}
+
+#[test_case]
 fn sound_card_plays() {
     let Some(_) = c_program("test_sound") else { return };
     let _ = filesystem::make_dir("/tmp");

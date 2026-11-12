@@ -154,6 +154,7 @@ AddToMenu "Games" \
   "DOOM (Freedoom)%mini-happy.xpm%" Exec doom
 + "Chess (XBoard)%mini-slon.xpm%"   Exec xboard
 + "Jewels%mini-bball.xpm%"          Exec xjewel
++ "Mahjongg%mini-happy.xpm%"        Exec xmahjongg
 + ""                                Nop
 + "Let it snow (xsnow)%mini-xsnow.xpm%" Exec xsnow
 + "Roaches (xroach)%mini-roach.xpm%" Exec xroach

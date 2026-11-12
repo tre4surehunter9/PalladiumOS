@@ -84,4 +84,25 @@ fetch xroach-4.0 https://snapshot.debian.org/archive/debian/20200101T000000Z/poo
     1cbbfee918c9c3d4316b1cff0467082391786d72e460baa034a54817a1a6f10e
 cc xroach xroach.c
 
-echo "games installed in $SYSROOT/bin: xboard fairymax xjewel xsnow xroach"
+GAMES=""
+# xmahjongg 3.7 (Debian's copy, matching its archive): mahjongg solitaire,
+# in C++ (palladium-c++, tools/ports/cxx.sh). Its tiles and layouts in
+# /usr/share/xmahjongg.
+if [ -x "$ROOT/target/musl/bin/palladium-c++" ]; then
+    fetch xmahjongg-3.7 https://snapshot.debian.org/archive/debian/20200101T000000Z/pool/main/x/xmahjongg/xmahjongg_3.7.orig.tar.gz \
+        243d63681cc25b97b30fee76aac98f1923f4734e772c57335b911f4c8647ffcf
+    AM=$(ls -d /usr/share/automake-*/ | tail -1)
+    cp "${AM}config.sub" "${AM}config.guess" .
+    CC="$OLDC" CXX="$ROOT/target/musl/bin/palladium-c++ -fpermissive -Wno-error" CPPFLAGS="-I$X/include" \
+        LDFLAGS="-L$X/lib -static" LIBS="$XLIBS" \
+        ./configure --host=x86_64-linux-musl --prefix=/usr --with-x --x-includes="$X/include" --x-libraries="$X/lib" \
+        >configure.log 2>&1 || { tail -20 configure.log; exit 1; }
+    make -j"$(nproc)" >make.log 2>&1 || { grep -B2 -A6 "error" make.log | tail -30; exit 1; }
+    install -m 755 -s src/xmahjongg "$SYSROOT/bin/xmahjongg"
+    rm -rf "$SYSROOT/share/xmahjongg"
+    mkdir -p "$SYSROOT/share/xmahjongg"
+    cp -a share/* "$SYSROOT/share/xmahjongg/"
+    GAMES="$GAMES xmahjongg"
+fi
+
+echo "games installed in $SYSROOT/bin: xboard fairymax xjewel xsnow xroach$GAMES"

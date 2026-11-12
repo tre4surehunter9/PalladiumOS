@@ -196,7 +196,14 @@ fn build_c_programs(root: &std::path::Path) -> Vec<(String, PathBuf)> {
     println!("cargo:rerun-if-changed=userland-c");
     println!("cargo:rerun-if-changed=target/musl/lib/libc.a");
     let Ok(entries) = fs::read_dir(&src) else { return Vec::new() };
-    let mut files: Vec<PathBuf> = entries.filter_map(|e| Some(e.ok()?.path())).filter(|p| p.extension().is_some_and(|x| x == "c")).collect();
+    // (C++ programs too, NAME.cpp, if tools/ports/cxx.sh has made
+    // palladium-c++.)
+    let cxx = root.join("target/musl/bin/palladium-c++");
+    println!("cargo:rerun-if-changed=target/musl/lib/libstdc++.a");
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| Some(e.ok()?.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "c" || (x == "cpp" && cxx.exists())))
+        .collect();
     files.sort();
     if files.is_empty() {
         return Vec::new();
@@ -211,8 +218,11 @@ fn build_c_programs(root: &std::path::Path) -> Vec<(String, PathBuf)> {
     for file in files {
         let name = file.file_stem().unwrap().to_str().unwrap().to_string();
         let exe = out.join(&name);
-        let status = Command::new(&musl_gcc)
-            .args(["-O2", "-Wall", "-o"])
+        let is_cxx = file.extension().is_some_and(|x| x == "cpp");
+        // (C++ programs are stripped: libstdc++ makes them big, and /bin is
+        // in the kernel's memory.)
+        let status = Command::new(if is_cxx { &cxx } else { &musl_gcc })
+            .args(if is_cxx { &["-std=c++23", "-O2", "-Wall", "-s", "-o"][..] } else { &["-O2", "-Wall", "-o"][..] })
             .arg(&exe)
             .arg(&file)
             .arg("-lm")
