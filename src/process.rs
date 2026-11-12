@@ -97,6 +97,8 @@ impl Mm {
 
 pub struct Process {
     pub pid: u64,
+    /// The cores it may run on (sched_setaffinity; bit N: core N).
+    pub affinity: u64,
     pub ppid: u64,
     pub name: String,
     pub state: State,
@@ -280,6 +282,7 @@ pub fn init() {
         argv: vec!["kernel".to_string()],
         exe: String::new(),
         start_tick: 0,
+        affinity: u64::MAX,
         cpu_ticks: 0,
         running_since: 0,
         cred: Cred::ROOT,
@@ -341,6 +344,34 @@ pub fn try_with_current_mm<T>(f: impl FnOnce(&mut Mm) -> T) -> Option<T> {
     let mm = TABLE.try_lock()?.get(&current_pid())?.mm.clone();
     let mut guard = mm.try_lock()?;
     Some(f(&mut guard))
+}
+
+fn current_affinity() -> u64 {
+    TABLE.lock().get(&current_pid()).map_or(u64::MAX, |p| p.affinity)
+}
+
+/// sched_getaffinity: a process's cores (0: the caller), or None if
+/// there's no such process.
+pub fn affinity(pid: u64) -> Option<u64> {
+    let pid = if pid == 0 { current_pid() } else { pid };
+    TABLE.lock().get(&pid).map(|p| p.affinity)
+}
+
+/// sched_setaffinity: the cores a process may run on (0: the caller). The
+/// caller, if its core isn't one of them, moves before this returns (as
+/// on Linux). False if there's no such process.
+pub fn set_affinity(pid: u64, mask: u64) -> bool {
+    let me = current_pid();
+    let pid = if pid == 0 { me } else { pid };
+    {
+        let mut table = TABLE.lock();
+        let Some(p) = table.get_mut(&pid) else { return false };
+        p.affinity = mask;
+    }
+    if pid == me && mask & (1 << crate::smp::cpu_index()) == 0 {
+        schedule();
+    }
+    true
 }
 
 pub fn with_current_mm<T>(f: impl FnOnce(&mut Mm) -> T) -> T {
@@ -470,7 +501,10 @@ pub fn schedule() {
                 .filter(|&p4| p4 != 0)
                 .collect();
             let may_run = |p: &Process| {
-                p.state == State::Ready && (p.pid != 0 || cpu == 0) && !busy.contains(&p.p4.start_address().as_u64())
+                p.state == State::Ready
+                    && (p.pid != 0 || cpu == 0)
+                    && p.affinity & (1 << cpu) != 0
+                    && !busy.contains(&p.p4.start_address().as_u64())
             };
             // Round-robin from after the current process, never the
             // current process itself (switching to itself would load its
@@ -492,9 +526,14 @@ pub fn schedule() {
                         return; // the idle loop waits for an interrupt
                     }
                     let p = table.get_mut(&cur).expect("current process missing");
-                    if matches!(p.state, State::Running | State::Ready) {
+                    if matches!(p.state, State::Running | State::Ready) && p.affinity & (1 << cpu) != 0 {
                         p.state = State::Running;
                         return;
+                    }
+                    if p.state == State::Running {
+                        // Ready to run, but not here (its affinity): this
+                        // core goes idle and leaves it to one it may use.
+                        p.state = State::Ready;
                     }
                     // It can't run: this core goes idle (it waits there, not on
                     // this process's kernel stack, which another core may take
@@ -988,6 +1027,7 @@ fn fork_with(frame: &SyscallFrame, kind: CloneKind, stack: u64) -> i64 {
         argv,
         exe,
         start_tick: ticks(),
+        affinity: current_affinity(), // (inherited, as on Linux)
         cpu_ticks: 0,
         running_since: 0,
         cred,
@@ -1184,6 +1224,10 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
     apply_exec_ids(setuid, setgid);
     let (_, flags) = Cr3::read();
     unsafe { Cr3::write(image.p4, flags) };
+    // This core is in the new address space now: say so (the scheduler
+    // keeps other cores out of an address space one is in, by this; the
+    // old one's frame is freed below and may become another process's).
+    crate::smp::PERCPU[crate::smp::cpu_index()].p4.store(image.p4.start_address().as_u64(), Ordering::SeqCst);
     crate::fpu::reset();
     set_fs_gs(0, 0);
     if borrowed {
@@ -1430,6 +1474,7 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         argv: argv.iter().map(|a| a.to_string()).collect(),
         exe: program_path(argv.first().copied().unwrap_or("")),
         start_tick: ticks(),
+        affinity: u64::MAX,
         cpu_ticks: 0,
         running_since: 0,
         cred: current_cred(), // programs the kernel starts run as root
@@ -2914,7 +2959,9 @@ pub fn snapshot(only: Option<u64>) -> Vec<ProcInfo> {
         .values()
         .filter(|p| only.is_none_or(|o| o == p.pid))
         .map(|p| {
-            let running = if p.pid == cur { now.saturating_sub(p.running_since) } else { 0 };
+            // Its time on a core now (the caller's, and on more cores any
+            // process running elsewhere this moment).
+            let running = if p.pid == cur || p.state == State::Running { now.saturating_sub(p.running_since) } else { 0 };
             let zombie = matches!(p.state, State::Zombie(_));
             // Lock each once, here: a guard made inside the struct literal
             // below would live until its end, and a second lock() would spin.

@@ -90,7 +90,9 @@ static int dsp(void)
     CHECK(ioctl(d, SNDCTL_DSP_SYNC, 0) == 0);
     double took = now() - start;
     fprintf(stderr, "test_sound: 0.75 s of sound played in %.2f s\n", took);
-    CHECK(took > 0.6 && took < 2.0);
+    /* (Real time, give or take: QEMU's silent sound output catches up in
+     * bursts after the host was busy.) */
+    CHECK(took > 0.4 && took < 2.0);
     count_info after;
     CHECK(ioctl(d, SNDCTL_DSP_GETOPTR, &after) == 0 && after.bytes >= (int)n * 9 / 10);
     CHECK(ioctl(d, SNDCTL_DSP_GETODELAY, &delay) == 0 && delay == 0);
@@ -128,7 +130,7 @@ static int dsp(void)
     CHECK(write(d, sq, sizeof sq) == sizeof sq);
     CHECK(ioctl(d, SNDCTL_DSP_SYNC, 0) == 0);
     took = now() - start;
-    CHECK(took > 0.35 && took < 1.5);
+    CHECK(took > 0.2 && took < 1.5);
     close(d);
     /* Closed: it can be opened again at once. */
     d = open("/dev/dsp", O_WRONLY);

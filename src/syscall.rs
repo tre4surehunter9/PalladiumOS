@@ -645,14 +645,20 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_SETPRIORITY => if a1 <= 2 { 0 } else { -EINVAL },
         // No swap: memory never leaves RAM, so locking it is a no-op.
         SYS_MLOCK | SYS_MUNLOCK | SYS_MLOCKALL | SYS_MUNLOCKALL | SYS_MLOCK2 => 0,
-        // One CPU: a mask must include CPU 0.
-        // Any mask with a core that exists is accepted (processes still run
-        // on any core).
+        // The cores a process may run on: a mask with at least one that
+        // exists (the scheduler keeps to it).
         SYS_SCHED_SETAFFINITY => match unsafe { user_slice(a3, 8u64.min(a2)) } {
             Some(b) if !b.is_empty() => {
                 let mut m = [0u8; 8];
                 m[..b.len()].copy_from_slice(b);
-                if u64::from_le_bytes(m) & all_cores_mask() != 0 { 0 } else { -EINVAL }
+                let mask = u64::from_le_bytes(m) & all_cores_mask();
+                if mask == 0 {
+                    -EINVAL
+                } else if process::set_affinity(a1, mask) {
+                    0
+                } else {
+                    -ESRCH
+                }
             }
             Some(_) => -EINVAL,
             None => -EFAULT,
@@ -737,7 +743,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
             Ok(d) => vfs::sys_epoll_wait(a1, a2, a3, d),
             Err(e) => -e,
         },
-        SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(a2, a3),
+        SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(a1, a2, a3),
         // limits, time, randomness
         SYS_GETRLIMIT => sys_prlimit(a1, 0, a2),
         SYS_PRLIMIT64 => sys_prlimit(a2, a3, a4),
@@ -1222,13 +1228,15 @@ fn all_cores_mask() -> u64 {
     if n == 64 { u64::MAX } else { (1u64 << n) - 1 }
 }
 
-/// sched_getaffinity(pid, size, mask): every core (nproc counts them).
-fn sys_sched_getaffinity(size: u64, mask: u64) -> i64 {
+/// sched_getaffinity(pid, size, mask): the process's cores (nproc counts
+/// them).
+fn sys_sched_getaffinity(pid: u64, size: u64, mask: u64) -> i64 {
     if size < 8 {
         return -EINVAL;
     }
+    let Some(cores) = process::affinity(pid) else { return -ESRCH };
     let Some(out) = (unsafe { user_slice_mut(mask, 8) }) else { return -EFAULT };
-    out.copy_from_slice(&all_cores_mask().to_le_bytes());
+    out.copy_from_slice(&(cores & all_cores_mask()).to_le_bytes());
     8
 }
 
