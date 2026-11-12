@@ -24,20 +24,21 @@
 > * Running C programs with musl, and the ports (BusyBox, Lua, dash, MicroPython, fastfetch, TinyCC)
 > * Networking: the network card driver, TCP/IP and sockets
 > * The higher-half kernel, the boot log, the tests and most of this README
-> * UEFI booting and the framebuffer console, the AHCI and USB keyboard drivers, running Alpine Linux, and the X Window System (the kernel's side, and the ports: TinyX, rxvt, evilwm, fvwm95)
+> * UEFI booting and the framebuffer console, the AHCI and USB keyboard drivers, running Alpine Linux, and the X Window System (the kernel's side, and the ports: TinyX, rxvt, evilwm, fvwm95, the X.Org programs, xterm, Links, Tcl/Tk, Vim, xfm and the games)
+> * SMP (every CPU core), POSIX timers, and the shell's here-documents, aliases and `local`
 
 ## Features
 * **Linux-compatible system calls** (the x86_64 ABI): ordinary Linux programs run unchanged, static or dynamically linked (with musl's or glibc's own dynamic linker), including C programs built with an unmodified [musl](https://musl.libc.org) libc
 * **More than one CPU core** (SMP): programs run on every core at once (`cargo run` gives QEMU up to 4). See [CPU Cores](#cpu-cores)
-* **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control, `epoll`, `eventfd`, `timerfd`, `signalfd` and `inotify`, shared memory (`MAP_SHARED`, `/dev/shm`, POSIX semaphores between processes), and memory on demand (programs can reserve gigabytes and only use what they touch; programs bigger than the kernel's heap load piece by piece)
+* **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control, POSIX timers, `epoll`, `eventfd`, `timerfd`, `signalfd` and `inotify`, shared memory (`MAP_SHARED`, `/dev/shm`, POSIX semaphores between processes), and memory on demand (programs can reserve gigabytes and only use what they touch; programs bigger than the kernel's heap load piece by piece)
 * **Hardware**: boots with BIOS or UEFI, starts every CPU core (ACPI, local APICs), a framebuffer console (1280x720 in QEMU), IDE and AHCI (SATA) disks, PS/2 and USB (xHCI) keyboards, a PS/2 mouse, the RTL8139 network card
 * **Users and permissions**: login, passwords, POSIX file permissions, setuid programs, `su`
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
 * **Networking**: an RTL8139 driver, TCP/IP (smoltcp), DHCP, DNS, BSD sockets (TCP, UDP, raw, Unix-domain) and netlink, and an **SSH server** (Dropbear): log in from your own terminal with `ssh -p 2222 root@localhost`; a web server in PalladiumOS on port 80 (Apache, `busybox httpd`) is at `http://localhost:8080`
 * **Alpine Linux**: `alpine` sets up a real Alpine root filesystem on its own disk, where `apk add` installs Alpine's packages and they run on PalladiumOS: Python (including `multiprocessing`), Node.js, git, curl, vim, htop, and a web stack: Apache with PHP, SQLite and MariaDB
-* **The X Window System**, native: an X server (TinyX's `Xfbdev`) on the framebuffer, with the keyboard and a PS/2 mouse, window managers (fvwm95, with a taskbar and a Start menu, and evilwm) and terminals (rxvt). See [X](#the-x-window-system)
+* **The X Window System**, native: an X server (TinyX's `Xfbdev`) on the framebuffer, with the keyboard and a PS/2 mouse, window managers (fvwm95, with a taskbar and a Start menu, and evilwm), terminals (xterm, rxvt), the classic X.Org programs (xclock, xcalc, xedit, xeyes...), a web browser (Links), a file manager (xfm), Vim, Tcl/Tk, and games (DOOM with Freedoom, XBoard chess, xjewel). See [X](#the-x-window-system)
 * **Terminals**: pseudo-terminals (`/dev/ptmx`, `/dev/pts/N`), sessions and controlling terminals, job control
-* **A userland**: a POSIX-style shell, about 55 of PalladiumOS's own tools, and ported software: BusyBox, Lua, dash, MicroPython, fastfetch, TinyCC (a C compiler that runs inside PalladiumOS), Dropbear SSH, and the X programs (TinyX, rxvt, evilwm, fvwm95)
+* **A userland**: a POSIX-style shell, about 55 of PalladiumOS's own tools, and ported software: BusyBox, Lua, dash, MicroPython, fastfetch, TinyCC (a C compiler that runs inside PalladiumOS), Dropbear SSH, Vim, Tcl/Tk, and the X programs (TinyX, fvwm95, xterm, Links, xfm, the X.Org programs, games)
 * **A Linux-style boot log** with `[  OK  ]` lines, and `dmesg`
 
 ## Programs
@@ -326,7 +327,7 @@ Signals work as in POSIX:
 * Blocking syscalls interrupted by a handler fail with `EINTR`, or restart with `SA_RESTART`. Ignored and stop/continue signals never interrupt them: a `sleep 10` stopped and continued still sleeps 10 s.
 * Job control: SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU stop a process, SIGCONT continues it, and `wait4` reports both. Ctrl-C sends SIGINT, Ctrl-Z SIGTSTP and Ctrl-\ SIGQUIT to the foreground process group. As POSIX says, Ctrl-Z doesn't stop orphaned process groups (like programs the kernel started), which nobody could continue.
 * `execve` resets handlers to the default (ignored signals and the mask are kept).
-* Not yet: `SA_SIGINFO` details (the siginfo has only the signal number), alternate signal stacks (`sigaltstack` is remembered, but handlers run on the normal stack), handlers for faults (a segfault always ends the program).
+* Not yet: `SA_SIGINFO` details (the siginfo has only the signal number, except for POSIX timers' signals in `sigwaitinfo`), alternate signal stacks (`sigaltstack` is remembered, but handlers run on the normal stack), handlers for faults (a segfault always ends the program).
 
 ## Terminals and Sessions
 The console understands the usual ANSI escape sequences (cursor movement, absolute row and column, clearing, inserting and deleting characters and lines, scrolling, colors and reverse video), so full-screen programs like `edit`, BusyBox's `vi` and Alpine's `nano` work.
@@ -401,6 +402,7 @@ How it works: `cargo run` attaches a third disk, `target/alpine.img` (1 GiB, spa
 * `tests/ext2.rs` - the ext2 driver, the VFS, `/dev`, the ATA disk driver and the clock
 * `tests/ahci.rs` - the AHCI (SATA) disk driver, on QEMU's q35 machine
 * `tests/usb.rs` - the USB keyboard driver, with QEMU's xHCI controller and USB keyboard
+* `tests/smp.rs` - starting the other CPU cores and running programs on them at once (`PALLADIUM_SMP=N cargo test` runs every test kernel on N cores)
 * `tests/heap_allocation.rs`, `tests/stack_overflow.rs`, `tests/should_panic.rs`, `tests/basic_boot.rs` - kernel basics
 
 The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh` rebuilds them).
@@ -422,7 +424,7 @@ The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh
 
 Disks work on IDE (QEMU's default machine; the kernel talks ATA through I/O ports) and on **AHCI**, the SATA controller standard of modern PCs (the kernel finds the controller on PCI and moves sectors by DMA). Disk N is QEMU's `-drive ...,index=N`: the IDE position N, or SATA port N. Try it with `cargo run -- -machine q35`, where every disk is on AHCI.
 
-**One disk with everything**, for a USB stick or a real PC: `target/runner/release/palladium-runner usb target/x86_64-palladiumos/release/palladiumos palladium.img` (after `cargo build --release`) makes a GPT disk image with the UEFI boot partition and three ext2 partitions, which the kernel finds by name on any disk: `palladium-data` (`/`, empty, 256 MiB), `palladium-usr` (`/usr`, from `target/usr.img`) and `palladium-alpine` (`/alpine`, empty, 1 GiB). The image is 1.3 GB but sparse (about 32 MB on this machine). Write it with `sudo dd if=palladium.img of=/dev/sdX bs=4M conv=fsync status=progress` (not `conv=sparse`: the filesystems' empty parts must really be written as zeros, or old data on the stick shows through) (check the device with `lsblk` first: it is erased), or boot it in QEMU on its own: `qemu-system-x86_64 -machine q35 -bios /usr/share/edk2/x64/OVMF.4m.fd -drive format=raw,file=palladium.img`. Without such partitions, disks are found by number as above.
+**One disk with everything**, for a USB stick or a real PC: `target/runner/release/palladium-runner usb target/x86_64-palladiumos/release/palladiumos palladium.img` (after `cargo build --release`) makes a GPT disk image with the UEFI boot partition and three ext2 partitions, which the kernel finds by name on any disk: `palladium-data` (`/`, empty, 256 MiB), `palladium-usr` (`/usr`, from `target/usr.img`) and `palladium-alpine` (`/alpine`, empty, 1 GiB). The image is 1.6 GB but sparse (about 190 MB on this machine). Write it with `sudo dd if=palladium.img of=/dev/sdX bs=4M conv=fsync status=progress` (not `conv=sparse`: the filesystems' empty parts must really be written as zeros, or old data on the stick shows through) (check the device with `lsblk` first: it is erased), or boot it in QEMU on its own: `qemu-system-x86_64 -machine q35 -bios /usr/share/edk2/x64/OVMF.4m.fd -drive format=raw,file=palladium.img`. Without such partitions, disks are found by number as above.
 
 The kernel has a small VFS layer: every filesystem implements one interface, and paths are resolved through the mount table. The ext2 driver reads and writes files (including indirect blocks), creates and removes files and directories, and frees a file deleted while open only when it's closed. Linux tools can check and read the disk: `e2fsck -f target/disk.img`, `debugfs -R "ls -l /" target/disk.img`. Run `sync` (or `poweroff`/`reboot`, which sync first) before closing QEMU.
 
