@@ -291,6 +291,8 @@ Real-world programs are built from their original source by scripts in `tools/po
 * `tools/ports/tcltk.sh`: Tcl and Tk 8.6.18, static (no loadable extensions): `tclsh` and `wish` in `/usr/bin`, their script libraries and Tk's demos in `/usr/lib`.
 * `tools/ports/vim.sh`: Vim 9.2 (terminal), on ncurses, its runtime in `/usr/share/vim` (without the documentation, spelling and translations).
 * `tools/ports/xfm.sh`: xfm 1.5.4, the X File Manager, on libXaw3d 1.6.6 (the 3-D Athena widgets); PalladiumOS's applications window in `tools/ports/xfm/`.
+* `tools/ports/games.sh`: XBoard 4.6.2 (the last on the Athena widgets alone) with the Fairy-Max 5.0b engine, xjewel 1.6, xsnow 1.42 and xroach 4.0.
+* `tools/ports/doom.sh`: doomgeneric (git e257a09, its Xlib driver) and Freedoom 0.13.0's `freedoom1.wad` in `/usr/share/games/doom` (28 MB); `/usr/bin/doom` starts it.
 * `tools/ports/links.sh`: Links 2.30 with graphics (the X driver) and HTTPS: OpenSSL 3.5.9, libpng 1.6.59 and libjpeg 10, static; the build machine's CA certificates in `/usr/share/ssl/cert.pem`.
 * `tools/ports/fvwm95.sh`: fvwm95 2.0.43f, the window manager with the Windows 95 look, with libXpm 3.5.20 (and xbitmaps' headers), all on the system disk: `/usr/bin/fvwm95` and `xpmroot`, and in `/usr/lib/X11` its modules (FvwmTaskBar...), PalladiumOS's configuration (`tools/ports/fvwm95/system.fvwm95rc`) and its icons.
 
@@ -369,6 +371,7 @@ startx evilwm       # or the X server and the programs you name
   * tools: `xwd` and `xwud` (screenshots), `xev` (events), `xwininfo`, `xprop`, `xdpyinfo`, `xkill` (click a window to close it), `xsetroot`
 * `links -g URL`: a web browser in an X window (HTTPS, pictures); `links URL` in a terminal, `links -dump URL` for a page's text.
 * `wish`: Tcl/Tk 8.6, for programs with windows (`wish /usr/lib/tk8.6/demos/widget` is Tk's tour of what it can do); `tclsh` for Tcl alone.
+* Games (Start, Programs, Games): `doom` (DOOM, the original game's source made portable, with Freedoom's free levels), `xboard` (chess against Fairy-Max), `xjewel`, and on the desktop `xsnow` and `xroach`.
 * `xfm`: a file manager (folder windows with icons, drag and drop, an applications window).
 * `vim`: Vim 9.2 with syntax colouring, in a terminal (no GUI: Vim dropped its Athena one).
 * `xterm`, X's own terminal (with a terminfo database for full-screen programs), besides rxvt.
@@ -511,6 +514,13 @@ The release images include software by other people, under their own licences. P
 | [Vim](https://www.vim.org) | 9.2.1310 | the Vim licence (charityware, GPL-compatible) | `/usr/bin/vim`, `/usr/share/vim` | [vim-9.2.1310.tar.gz](https://github.com/vim/vim/archive/v9.2.1310/vim-9.2.1310.tar.gz) |
 | [xfm](https://musikinformatik.uni-mainz.de/ag/xfm) | 1.5.4 | GPL-2.0-or-later | `/usr/bin/xfm`, `/usr/share/xfm`, `/usr/lib/X11/xfm` | [xfm_1.5.4.orig.tar.gz](https://ports.ubuntu.com/ubuntu-ports/pool/universe/x/xfm/xfm_1.5.4.orig.tar.gz) (Debian's and Ubuntu's copy) |
 | [libXaw3d](https://www.x.org) | 1.6.6 | MIT/X11-style | linked into xfm | [libXaw3d-1.6.6.tar.xz](https://www.x.org/releases/individual/lib/libXaw3d-1.6.6.tar.xz) |
+| [doomgeneric](https://github.com/ozkl/doomgeneric) (id Software's DOOM, via Chocolate Doom) | git e257a09 | GPL-2.0-or-later | `/usr/bin/doomgeneric` | [commit e257a09](https://github.com/ozkl/doomgeneric/tree/e257a09527062bfb986b6e5e0780839b6cbd5b71) |
+| [Freedoom](https://freedoom.github.io) | 0.13.0 | BSD-3-Clause (its `COPYING.txt`, in `/usr/share/games/doom`) | `/usr/share/games/doom/freedoom1.wad` | [freedoom-0.13.0.zip](https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip) |
+| [XBoard](https://www.gnu.org/software/xboard/) | 4.6.2 | GPL-3.0-or-later | `/usr/bin/xboard`, `/usr/share/xboard` | [xboard-4.6.2.tar.gz](https://ftp.gnu.org/gnu/xboard/xboard-4.6.2.tar.gz) |
+| [Fairy-Max](http://hgm.nubati.net/) | 5.0b | free to use and distribute (H. G. Muller; its `copyright`) | `/usr/bin/fairymax`, `/usr/share/fairymax` | [fairymax_5.0b.orig.tar.gz](https://snapshot.debian.org/archive/debian/20200101T000000Z/pool/main/f/fairymax/fairymax_5.0b.orig.tar.gz) (Debian's copy) |
+| xjewel | 1.6 | free to distribute (its author's; see its `README`) | `/usr/bin/xjewel` | [xjewel_1.6.orig.tar.gz](https://snapshot.debian.org/archive/debian/20200101T000000Z/pool/main/x/xjewel/xjewel_1.6.orig.tar.gz) (Debian's copy) |
+| xsnow | 1.42 | freely distributable, unmodified (Rick Jansen keeps all rights; packaging for distributions is allowed; not free software) | `/usr/bin/xsnow` | [xsnow_1.42.orig.tar.gz](https://snapshot.debian.org/archive/debian/20190101T000000Z/pool/main/x/xsnow/xsnow_1.42.orig.tar.gz) (Debian's copy) |
+| xroach | 4.0 | any use, keeping the copyright notice (J. T. Anderson) | `/usr/bin/xroach` | [xroach_4.0.orig.tar.gz](https://snapshot.debian.org/archive/debian/20200101T000000Z/pool/main/x/xroach/xroach_4.0.orig.tar.gz) (Debian's copy) |
 | [Links](http://links.twibright.com) | 2.30 | GPL-2.0-or-later (with an OpenSSL exception) | `/usr/bin/links` | [links-2.30.tar.bz2](http://links.twibright.com/download/links-2.30.tar.bz2) |
 | [OpenSSL](https://www.openssl.org) | 3.5.9 | Apache-2.0 | linked into links | [openssl-3.5.9.tar.gz](https://www.openssl.org/source/openssl-3.5.9.tar.gz) |
 | [libpng](http://www.libpng.org) | 1.6.59 | the libpng licence (permissive) | linked into links | [libpng-1.6.59.tar.xz](https://download.sourceforge.net/libpng/libpng-1.6.59.tar.xz) |

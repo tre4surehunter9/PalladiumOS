@@ -60,6 +60,9 @@ Style "xmag"   TitleIcon mini-zoom.xpm
 Style "bitmap" TitleIcon mini-paint.xpm
 Style "Ico*"   TitleIcon mini-bball.xpm
 Style "xmessage" TitleIcon mini-exclam.xpm
+Style "doomgeneric" TitleIcon mini-happy.xpm
+Style "xboard" TitleIcon mini-slon.xpm
+Style "*Jewel*" TitleIcon mini-bball.xpm
 
 #------------------------------------------------------------------------------
 # At start
@@ -113,6 +116,7 @@ AddToMenu "StartMenu@fvwm-menu.xpm@^#808080^" \
 DestroyMenu "Programs"
 AddToMenu "Programs" \
   "Accessories%mini-hammer.xpm%"    Popup Accessories
++ "Games%mini-happy.xpm%"           Popup Games
 + "System tools%mini-modules.xpm%"  Popup SystemTools
 + ""                                Nop
 + "Terminal%mini-term.xpm%"         Exec rxvt
@@ -144,6 +148,16 @@ AddToMenu "Accessories" \
 + "Eyes%mini-eyes.xpm%"             Exec xeyes
 + "Polyhedron%mini-bball.xpm%"      Exec ico
 + "X logo%mini-bx2.xpm%"            Exec xlogo
+
+DestroyMenu "Games"
+AddToMenu "Games" \
+  "DOOM (Freedoom)%mini-happy.xpm%" Exec doom
++ "Chess (XBoard)%mini-slon.xpm%"   Exec xboard
++ "Jewels%mini-bball.xpm%"          Exec xjewel
++ ""                                Nop
++ "Let it snow (xsnow)%mini-xsnow.xpm%" Exec xsnow
++ "Roaches (xroach)%mini-roach.xpm%" Exec xroach
++ "Stop snow and roaches%mini-stop.xpm%" Exec busybox pkill -x "xsnow|xroach"
 
 DestroyMenu "SystemTools"
 AddToMenu "SystemTools" \
