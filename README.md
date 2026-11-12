@@ -415,6 +415,8 @@ How it works: `cargo run` attaches a third disk, `target/alpine.img` (1 GiB, spa
 * `tests/smp.rs` - starting the other CPU cores and running programs on them at once (`PALLADIUM_SMP=N cargo test` runs every test kernel on N cores)
 * `tests/heap_allocation.rs`, `tests/stack_overflow.rs`, `tests/should_panic.rs`, `tests/basic_boot.rs` - kernel basics
 
+Before a release, `tools/soak.sh [MINUTES] [CORES]` runs the soak test: the usermode test kernel on 4 cores, then round after round for 30 minutes (by default) of the stress program with processes starting and ending around it, the C test programs, and DOOM under X, stopping at the first failure or at any warning in the kernel log (a program's segfault, a disk error). Its output goes to `target/soak.log`.
+
 The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh` rebuilds them).
 
 ## Disk and Filesystems

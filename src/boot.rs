@@ -66,6 +66,14 @@ fn emit(line: &Line) {
     {
         let mut log = LOG.lock();
         let (buf, used) = &mut *log;
+        // Full: the oldest lines go (as Linux's dmesg), so what happens
+        // after a long time up is still there.
+        if *used + bytes.len() > LOG_SIZE {
+            let need = *used + bytes.len() - LOG_SIZE;
+            let cut = buf[need..*used].iter().position(|&b| b == b'\n').map_or(*used, |p| need + p + 1);
+            buf.copy_within(cut..*used, 0);
+            *used -= cut;
+        }
         let n = bytes.len().min(LOG_SIZE - *used);
         buf[*used..*used + n].copy_from_slice(&bytes[..n]);
         *used += n;
@@ -98,7 +106,18 @@ pub fn info(args: fmt::Arguments) {
 }
 
 /// A step's result: "[  OK  ] Did the thing".
+/// How many WARN or FAILED lines have been logged since boot (the log
+/// itself may have dropped old ones).
+pub fn warnings() -> u64 {
+    WARNINGS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+static WARNINGS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn status(status: Status, args: fmt::Arguments) {
+    if !matches!(status, Status::Ok) {
+        WARNINGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
     let mut line = Line { buf: [0; 256], len: 0 };
     let _ = match status {
         Status::Ok => write!(line, "[{}  OK  {}] ", GREEN, RESET),

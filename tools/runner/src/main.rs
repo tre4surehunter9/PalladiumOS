@@ -60,7 +60,12 @@ const TEST_ARGS: &[&str] = &[
     "-audiodev", "none,id=snd0", "-device", "AC97,audiodev=snd0",
 ];
 const TEST_SUCCESS: i32 = 33; // (0x10 << 1) | 1
-const TEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a test kernel may run (PALLADIUM_TEST_TIMEOUT seconds instead,
+/// for the soak test: tools/soak.sh).
+fn test_timeout() -> Duration {
+    let secs = std::env::var("PALLADIUM_TEST_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+    Duration::from_secs(secs)
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -333,9 +338,9 @@ fn run(kernel: &Path, extra: &[String], uefi: bool) {
                 let code = status.code().unwrap_or(1);
                 exit(if code == TEST_SUCCESS { 0 } else { code.max(1) });
             }
-            Ok(None) if start.elapsed() > TEST_TIMEOUT => {
+            Ok(None) if start.elapsed() > test_timeout() => {
                 let _ = child.kill();
-                eprintln!("palladium-runner: test timed out after {} s", TEST_TIMEOUT.as_secs());
+                eprintln!("palladium-runner: test timed out after {} s", test_timeout().as_secs());
                 exit(1);
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),

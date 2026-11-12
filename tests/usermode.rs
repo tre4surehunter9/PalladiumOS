@@ -2021,6 +2021,75 @@ fn framebuffer_console_and_mouse() {
     assert!(!palladiumos::vga_buffer::is_graphics(), "text mode is back");
 }
 
+/// The soak test (tools/soak.sh MINUTES): only in a kernel built with
+/// PALLADIUM_SOAK_MINUTES; else it does nothing. Round after round until
+/// the time is up: the stress program with processes starting and ending
+/// around it, the C test programs (sockets, events, threads, terminals,
+/// shared memory, the network, sound), and DOOM under X. Fails at the first
+/// failure or at any new WARN line in the kernel log (a program's
+/// segfault, a disk error...).
+#[test_case]
+fn soak() {
+    let Some(minutes) = option_env!("PALLADIUM_SOAK_MINUTES").and_then(|m| m.parse::<u64>().ok()) else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let ticks_per_s = 1_000_000_000 / palladiumos::process::TICK_NS;
+    let start = palladiumos::process::ticks();
+    let deadline = start + minutes * 60 * ticks_per_s;
+    let warnings = palladiumos::boot::warnings();
+    let check_log = |what: &str, round: u64| {
+        if palladiumos::boot::warnings() != warnings {
+            let log = palladiumos::boot::log();
+            let lines: Vec<&str> = log.lines().filter(|l| l.contains("WARN") || l.contains("FAILED")).collect();
+            panic!("soak round {}: the kernel logged a warning after {}:\n{}", round, what, lines.join("\n"));
+        }
+    };
+    let programs: &[(&str, &str)] = &[
+        ("test_unix", "test_unix"),
+        ("test_events", "test_events /alpine"),
+        ("test_threads", "test_threads"),
+        ("test_pty", "test_pty"),
+        ("test_shm", "test_shm"),
+        ("test_net", "test_net"),
+        ("test_sound", "test_sound"),
+    ];
+    let x = filesystem::read_file("/usr/bin/Xfbdev").is_ok() && filesystem::read_file("/usr/bin/doomgeneric").is_ok();
+    let mut round = 0u64;
+    while palladiumos::process::ticks() < deadline {
+        round += 1;
+        // 1. Stress, with processes starting and ending around it.
+        let status = sh("i=0; while [ $i -lt 400 ]; do ls /bin > /dev/null; i=$((i+1)); done & \
+                         j=0; while [ $j -lt 400 ]; do busybox true; j=$((j+1)); done & \
+                         for k in 1 2 3 4; do test_smp_stress /bin/busybox 20 > /tmp/soak$k.txt 2>&1 & done; wait");
+        let out: alloc::string::String =
+            (1..=4).map(|k| filesystem::read_file(&alloc::format!("/tmp/soak{}.txt", k)).unwrap_or_default()).collect();
+        assert!(status == 0 && out.matches(" ok: ").count() == 4, "soak round {}: stress:\n{}", round, out);
+        check_log("the stress run", round);
+        // 2. The C test programs.
+        for &(name, command) in programs {
+            if c_program(name).is_none() {
+                continue;
+            }
+            let status = sh(&alloc::format!("{} > /tmp/soak.out 2>&1", command));
+            assert_eq!(status, 0, "soak round {}: {}:\n{}", round, name, file("/tmp/soak.out"));
+            check_log(name, round);
+        }
+        // 3. DOOM under X (with sound), still running after 10 seconds.
+        if x {
+            let status = sh("Xfbdev :0 > /tmp/soakx.log 2>&1 & sleep 2; \
+                             DISPLAY=:0 doomgeneric -iwad /usr/share/games/doom/freedoom1.wad > /tmp/soakd.out 2>&1 & \
+                             sleep 10; pidof doomgeneric > /tmp/soakalive.txt; pkill doomgeneric; sleep 1; pkill Xfbdev; wait");
+            let alive = filesystem::read_file("/tmp/soakalive.txt").unwrap_or_default();
+            assert!(status == 0 || !alive.trim().is_empty(), "soak round {}: DOOM:\n{}", round, file("/tmp/soakd.out"));
+            assert!(!alive.trim().is_empty(), "soak round {}: DOOM died:\n{}", round, file("/tmp/soakd.out"));
+            check_log("DOOM", round);
+        }
+        assert!(only_kernel_left(), "soak round {}: processes left: {:?}", round, process::list());
+        let elapsed = (palladiumos::process::ticks() - start) / ticks_per_s;
+        palladiumos::serial_println!("soak: round {} passed ({}:{:02} of {} min, {} frames in use)",
+            round, elapsed / 60, elapsed % 60, minutes, frames_in_use());
+    }
+}
+
 #[test_case]
 fn processes_stay_intact_under_stress() {
     // Several programs at once (on every core with PALLADIUM_SMP=4): each
