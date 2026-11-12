@@ -2022,6 +2022,21 @@ fn framebuffer_console_and_mouse() {
 }
 
 #[test_case]
+fn processes_stay_intact_under_stress() {
+    // Several programs at once (on every core with PALLADIUM_SMP=4): each
+    // reads a file at random places, keeps memory and floating point,
+    // maps and unmaps memory, and takes a timer signal 100 times a second.
+    let Some(_) = c_program("test_smp_stress") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let status = sh("for i in 1 2 3; do test_smp_stress /bin/busybox 4 > /tmp/stress$i.txt 2>&1 & done; wait; \
+                     cat /tmp/stress1.txt /tmp/stress2.txt /tmp/stress3.txt > /tmp/stress.txt");
+    assert_eq!(status, 0);
+    let out = file("/tmp/stress.txt");
+    assert_eq!(out.matches(" ok: ").count(), 3, "{}", out);
+    assert!(only_kernel_left());
+}
+
+#[test_case]
 fn sound_card_plays() {
     let Some(_) = c_program("test_sound") else { return };
     let _ = filesystem::make_dir("/tmp");

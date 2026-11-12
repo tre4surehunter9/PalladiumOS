@@ -183,6 +183,33 @@ int main(void)
     CHECK(waitpid(child, &st, 0) == child && WEXITSTATUS(st) == 0);
     close(sv[0]);
 
+    /* ---- non-blocking stream: a full socket never makes a write wait
+     * (an X server disconnects a client whose write ends in EINTR), and
+     * a nearly full one takes what fits ---- */
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    CHECK(fcntl(sv[0], F_SETFL, O_NONBLOCK) == 0 && fcntl(sv[1], F_SETFL, O_NONBLOCK) == 0);
+    {
+        static char big[1000];
+        size_t total = 0;
+        ssize_t w;
+        while ((w = write(sv[0], big, sizeof big)) > 0)
+            total += w;
+        CHECK(w == -1 && errno == EAGAIN && total > 0);
+        struct pollfd pw = { .fd = sv[0], .events = POLLOUT };
+        CHECK(poll(&pw, 1, 0) == 0);
+        CHECK(read(sv[1], buf, 10) == 10);
+        CHECK(poll(&pw, 1, 0) == 1 && pw.revents & POLLOUT);
+        static char chunk[4000];
+        CHECK(write(sv[0], chunk, sizeof chunk) == 10);
+        CHECK(send(sv[0], chunk, sizeof chunk, 0) == -1 && errno == EAGAIN);
+        /* Drained: then an empty non-blocking socket says EAGAIN. */
+        while (read(sv[1], big, sizeof big) > 0)
+            ;
+        CHECK(read(sv[1], buf, sizeof buf) == -1 && errno == EAGAIN);
+    }
+    close(sv[0]);
+    close(sv[1]);
+
     /* ---- socketpair, datagram: message boundaries ---- */
     CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0);
     CHECK(send(sv[0], "one", 3, 0) == 3 && send(sv[0], "second", 6, 0) == 6);

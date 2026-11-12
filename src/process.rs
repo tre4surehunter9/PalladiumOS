@@ -1659,7 +1659,15 @@ pub fn tty_signal(sig: i32) {
 
 /// Called from the timer interrupt.
 pub fn tick() {
-    let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    TICKS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Every 5 seconds, the load averages: from core 0's timer interrupt, with
+/// the big kernel lock held. (Not in tick(), which runs before it: the
+/// process table taken there behind another core's back made that core's
+/// page faults fail their try_lock and kill programs with SIGSEGV.)
+pub fn sample_load_if_due() {
+    let now = ticks();
     if now >= NEXT_LOAD_SAMPLE.load(Ordering::Relaxed) {
         sample_load(now);
     }

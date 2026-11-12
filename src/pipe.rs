@@ -167,6 +167,47 @@ pub fn try_write(pipe: &Arc<Pipe>, data: &[u8]) -> i64 {
     n as i64
 }
 
+/// A non-blocking write for a stream socket: whatever fits (no PIPE_BUF
+/// all-or-nothing rule: poll's "writable" means some room, and any room
+/// takes some bytes), -EAGAIN when full, -EPIPE without readers (the
+/// socket decides about SIGPIPE).
+pub fn try_write_stream(pipe: &Arc<Pipe>, data: &[u8]) -> i64 {
+    if pipe.readers.load(Ordering::SeqCst) == 0 {
+        return -EPIPE;
+    }
+    let n = {
+        let mut buf = pipe.buf.lock();
+        let n = (PIPE_CAPACITY - buf.len()).min(data.len());
+        buf.extend(&data[..n]);
+        n
+    };
+    if n == 0 && !data.is_empty() {
+        return -crate::syscall::EAGAIN;
+    }
+    process::wake(pipe.key());
+    n as i64
+}
+
+/// A non-blocking read: what's there, 0 at end-of-file, else -EAGAIN.
+pub fn try_read(pipe: &Arc<Pipe>, out: &mut [u8]) -> i64 {
+    if out.is_empty() {
+        return 0;
+    }
+    let n = {
+        let mut buf = pipe.buf.lock();
+        let n = out.len().min(buf.len());
+        for (dst, src) in out.iter_mut().zip(buf.drain(..n)) {
+            *dst = src;
+        }
+        n
+    };
+    if n > 0 {
+        process::wake(pipe.key()); // room for blocked writers
+        return n as i64;
+    }
+    if pipe.writers.load(Ordering::SeqCst) == 0 { 0 } else { -crate::syscall::EAGAIN }
+}
+
 /// For poll: (has data, every write end closed).
 pub fn read_status(pipe: &Arc<Pipe>) -> (bool, bool) {
     (!pipe.buf.lock().is_empty(), pipe.writers.load(Ordering::SeqCst) == 0)

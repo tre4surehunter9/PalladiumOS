@@ -1017,10 +1017,9 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
             let pipe = r.pipe();
             let nonblocking = desc.nonblocking;
             drop(desc); // or while waiting for data
-            if nonblocking && !buf.is_empty() && pipe::read_status(&pipe) == (false, false) {
-                return -crate::syscall::EAGAIN; // empty, but writers remain
-            }
-            pipe::read(&pipe, buf)
+            // (Non-blocking: never wait, even if another reader took what
+            // was there: EAGAIN while empty but writers remain.)
+            if nonblocking { pipe::try_read(&pipe, buf) } else { pipe::read(&pipe, buf) }
         }
         Kind::File { loc, readable, .. } => {
             if !readable {

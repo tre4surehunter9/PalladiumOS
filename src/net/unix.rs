@@ -352,7 +352,9 @@ impl UnixSocket {
                 }
             };
             let len = buf.len().min(limit);
-            let n = pipe::read(&rx, &mut buf[..len]);
+            // (Non-blocking: never wait in the pipe, even if the data seen
+            // above is gone: EAGAIN, as Linux says.)
+            let n = if self.nonblocking_for(flags) { pipe::try_read(&rx, &mut buf[..len]) } else { pipe::read(&rx, &mut buf[..len]) };
             if n < 0 {
                 return Err(-n);
             }
@@ -413,7 +415,14 @@ impl UnixSocket {
                 let pos = ch.written;
                 ch.batches.push_back((pos, fds));
             }
-            let n = pipe::write(&tx, data);
+            // Non-blocking: what fits now, never waiting (a waiting write
+            // could end in EINTR, which an X server takes as the client
+            // gone, and disconnects it).
+            let nonblocking = self.nonblocking_for(flags);
+            let n = if nonblocking { pipe::try_write_stream(&tx, data) } else { pipe::write(&tx, data) };
+            if n == -EPIPE && nonblocking && flags & MSG_NOSIGNAL == 0 {
+                process::raise(process::SIGPIPE); // (pipe::write raises it itself)
+            }
             let mut ch = fds_out.lock();
             if n > 0 {
                 ch.written += n as u64;

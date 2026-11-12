@@ -295,7 +295,10 @@ impl Ext2 {
             return Ok(b.clone());
         }
         let mut buf = vec![0u8; self.block_size];
-        self.dev.read(n * (self.block_size / SECTOR_SIZE) as u64, &mut buf).map_err(|_| EIO)?;
+        self.dev.read(n * (self.block_size / SECTOR_SIZE) as u64, &mut buf).map_err(|e| {
+            crate::boot_warn!("ext2: reading block {} failed: {}", n, e);
+            EIO
+        })?;
         self.cache_put(n, buf.clone());
         Ok(buf)
     }
@@ -304,7 +307,10 @@ impl Ext2 {
         if self.read_only {
             return Err(EROFS);
         }
-        self.dev.write(n * (self.block_size / SECTOR_SIZE) as u64, data).map_err(|_| EIO)?;
+        self.dev.write(n * (self.block_size / SECTOR_SIZE) as u64, data).map_err(|e| {
+            crate::boot_warn!("ext2: writing block {} failed: {}", n, e);
+            EIO
+        })?;
         // (Its real contents are on disk now: a pending zero-fill is moot.)
         self.dirty.remove(&n);
         self.cache_put(n, data.to_vec());

@@ -74,6 +74,7 @@ extern "C" fn timer_dispatch(frame: &mut crate::syscall::SyscallFrame) {
     // The kernel: taken here, given back on the way out (syscall_return,
     // when going back to a program; below otherwise).
     let took = crate::smp::lock_kernel();
+    crate::process::sample_load_if_due();
     crate::xhci::poll(); // USB keyboards
     // Preemptive multitasking: only when we interrupted a user program, never
     // in the middle of kernel code (which may hold locks). Signals (Ctrl-C,
@@ -283,6 +284,12 @@ extern "x86-interrupt" fn page_fault_handler(
         }
         println!("Segmentation fault (address {:?}, rip {:?})",
                  Cr2::read(), stack_frame.instruction_pointer);
+        // (Also in the kernel log, as Linux's "segfault at": dmesg.)
+        crate::boot_warn!(
+            "pid {}: segfault at {:#x} ip {:#x} sp {:#x} error {:#x} cpu {}",
+            crate::process::current_pid(), addr, stack_frame.instruction_pointer.as_u64(),
+            stack_frame.stack_pointer.as_u64(), error_code.bits(), crate::smp::cpu_index()
+        );
         crate::process::kill_current(SIGSEGV);
     }
 
@@ -304,6 +311,11 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     let _k = crate::smp::enter();
     if crate::usermode::from_user(stack_frame.code_segment) {
         println!("General protection fault (rip {:?})", stack_frame.instruction_pointer);
+        crate::boot_warn!(
+            "pid {}: general protection fault ip {:#x} sp {:#x} cpu {}",
+            crate::process::current_pid(), stack_frame.instruction_pointer.as_u64(),
+            stack_frame.stack_pointer.as_u64(), crate::smp::cpu_index()
+        );
         crate::process::kill_current(SIGSEGV);
     }
     panic!("EXCEPTION: GENERAL PROTECTION FAULT (error {:#x})\n{:#?}", error_code, stack_frame);
@@ -313,6 +325,8 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     let _k = crate::smp::enter();
     if crate::usermode::from_user(stack_frame.code_segment) {
         println!("Illegal instruction (rip {:?})", stack_frame.instruction_pointer);
+        crate::boot_warn!("pid {}: illegal instruction ip {:#x} cpu {}", crate::process::current_pid(),
+            stack_frame.instruction_pointer.as_u64(), crate::smp::cpu_index());
         crate::process::kill_current(SIGILL);
     }
     panic!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
