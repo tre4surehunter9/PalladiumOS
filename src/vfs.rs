@@ -119,6 +119,10 @@ enum Kind {
     Fb,
     /// /dev/input/mice: the mouse.
     Mouse,
+    /// /dev/dsp: sound output (closing it lets the sound finish).
+    Dsp(Arc<crate::sound::Dsp>),
+    /// /dev/mixer: volumes.
+    Mixer,
 }
 
 struct EventFd {
@@ -202,6 +206,8 @@ fn handle(kind: Kind) -> Handle {
         Kind::Inotify(_) => "anon_inode:inotify".to_string(),
         Kind::Fb => "/dev/fb0".to_string(),
         Kind::Mouse => "/dev/input/mice".to_string(),
+        Kind::Dsp(_) => "/dev/dsp".to_string(),
+        Kind::Mixer => "/dev/mixer".to_string(),
     };
     Arc::new(OpenFile { label, desc: Mutex::new(Description { kind, offset: 0, nonblocking: false, dir_snapshot: None, async_io: false, async_owner: 0 }) })
 }
@@ -420,6 +426,14 @@ fn open_path(abs: &str, flags: u64, mode: u64) -> i64 {
                 Device::Console => Kind::Console,
                 Device::Fb => Kind::Fb,
                 Device::Mouse => Kind::Mouse,
+                Device::Dsp => match crate::sound::open_dsp() {
+                    Ok(d) => Kind::Dsp(d),
+                    Err(e) => return -e,
+                },
+                Device::Mixer => match crate::sound::open_mixer() {
+                    Ok(()) => Kind::Mixer,
+                    Err(e) => return -e,
+                },
                 Device::Ptmx => match crate::pty::open_master(nonblocking) {
                     // (its /dev/pts/N entry, for fstat and ttyname)
                     Ok(end) => {
@@ -545,6 +559,14 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
             }
         }
         Ok(h) if matches!(h.lock().kind, Kind::Fb) => return fb_ioctl(request, arg),
+        Ok(h) if matches!(h.lock().kind, Kind::Dsp(_)) => {
+            if request == crate::sound::SNDCTL_DSP_NONBLOCK {
+                h.lock().nonblocking = true;
+                return 0;
+            }
+            return crate::sound::dsp_ioctl(request, arg);
+        }
+        Ok(h) if matches!(h.lock().kind, Kind::Mixer) => return crate::sound::mixer_ioctl(request, arg),
         Ok(h) if matches!(h.lock().kind, Kind::Pty { .. }) => {
             // (The description isn't held while it runs: TIOCSWINSZ signals.)
             let Kind::Pty { end, .. } = &h.lock().kind else { unreachable!() };
@@ -931,7 +953,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
                     Kind::PipeRead(_) => (O_RDONLY | nb) as i64,
                     Kind::Dir { .. } => O_RDONLY as i64,
                     Kind::Mouse => (O_RDWR | nb | if desc.async_io { O_ASYNC } else { 0 }) as i64,
-                    Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) | Kind::Fb => (O_RDWR | nb) as i64,
+                    Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) | Kind::Fb | Kind::Dsp(_) | Kind::Mixer => (O_RDWR | nb) as i64,
                 }
             }
             // Record locks: granted (see sys_flock). F_GETLK reports
@@ -1069,6 +1091,7 @@ pub fn sys_read(fd: u64, buf: &mut [u8]) -> i64 {
             drop(desc);
             crate::mouse::read(buf, nonblocking)
         }
+        Kind::Dsp(_) | Kind::Mixer => -EINVAL, // (no recording)
     }
 }
 
@@ -1211,6 +1234,12 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
             if n == 0 && !bytes.is_empty() { -ENOSPC } else { n as i64 }
         }
         Kind::Mouse => crate::mouse::write(bytes),
+        Kind::Dsp(_) => {
+            let nonblocking = desc.nonblocking;
+            drop(desc); // (not held while waiting for the card)
+            crate::sound::write(bytes, nonblocking)
+        }
+        Kind::Mixer => -EINVAL,
     }
 }
 
@@ -1251,7 +1280,7 @@ pub fn sys_lseek(fd: u64, delta: u64, whence: u64) -> i64 {
         }
         Kind::Dir { .. } => -EINVAL,
         Kind::Null | Kind::Zero | Kind::Random => 0,
-        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } | Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) | Kind::Mouse => -ESPIPE,
+        Kind::Console | Kind::PipeRead(_) | Kind::PipeWrite(_) | Kind::Socket(_) | Kind::Pty { .. } | Kind::EventFd(_) | Kind::Epoll(_) | Kind::TimerFd(_) | Kind::SignalFd(_) | Kind::Inotify(_) | Kind::Mouse | Kind::Dsp(_) | Kind::Mixer => -ESPIPE,
         Kind::Fb => {
             let size = crate::vga_buffer::framebuffer().map_or(0, |f| f.1) as i64;
             let base = match whence {
@@ -1330,7 +1359,7 @@ pub fn sys_fstat(fd: u64, out: &mut [u8]) -> i64 {
     };
     let desc = h.lock();
     match &desc.kind {
-        Kind::Console | Kind::Null | Kind::Zero | Kind::Random | Kind::Fb | Kind::Mouse => {
+        Kind::Console | Kind::Null | Kind::Zero | Kind::Random | Kind::Fb | Kind::Mouse | Kind::Dsp(_) | Kind::Mixer => {
             fill_stat(out, 0, 0, S_IFCHR | 0o666, 1, 0, 0);
             0
         }
@@ -2043,6 +2072,7 @@ pub fn poll_ready(fd: i32, events: i16) -> i16 {
             if i.lock().readable() { POLLIN } else { 0 }
         }
         Kind::Mouse => (if crate::mouse::readable() { POLLIN } else { 0 }) | POLLOUT,
+        Kind::Dsp(_) => if crate::sound::writable() { POLLOUT } else { 0 },
         Kind::Epoll(list) => {
             // Readable when something it watches is ready (epolls inside
             // epolls aren't looked into).
@@ -2945,6 +2975,9 @@ pub fn timer_capped(deadline: Option<u64>) -> Option<u64> {
             t.next
         })
         .min();
+    // While sound plays, the card frees buffers without telling anyone:
+    // look again next tick (poll on /dev/dsp).
+    let next = if crate::sound::playing() { Some(next.map_or(now + 1, |n| n.min(now + 1))) } else { next };
     match (deadline, next) {
         (Some(d), Some(n)) => Some(d.min(n)),
         (d, n) => d.or(n),

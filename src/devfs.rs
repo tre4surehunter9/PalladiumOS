@@ -4,7 +4,8 @@
 //! zeros), /dev/random and /dev/urandom (random bytes, as getrandom),
 //! /dev/console (the screen and keyboard), /dev/tty (the opener's
 //! controlling terminal), /dev/ptmx (a new pseudo-terminal) and /dev/pts/N
-//! (the pseudo-terminals in use, see pty.rs).
+//! (the pseudo-terminals in use, see pty.rs), /dev/fb0, the mouse, and
+//! /dev/dsp and /dev/mixer (sound, see sound.rs).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -22,7 +23,9 @@ const SHM_DIR: Ino = 51;
 const PTS_BASE: Ino = 100;
 const DEVICES: &[(&str, Device)] = &[
     ("console", Device::Console),
+    ("dsp", Device::Dsp),
     ("fb0", Device::Fb),
+    ("mixer", Device::Mixer),
     ("null", Device::Null),
     ("psaux", Device::Mouse),
     ("ptmx", Device::Ptmx),

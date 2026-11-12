@@ -53,6 +53,7 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     palladiumos::mounts::mount("/dev", alloc::boxed::Box::new(palladiumos::devfs::DevFs));
     palladiumos::block::mount_shm();
     palladiumos::mouse::init();
+    palladiumos::sound::init(); // QEMU's AC'97, sound going nowhere
 
     test_main();
     palladiumos::hlt_loop();
@@ -2018,6 +2019,17 @@ fn framebuffer_console_and_mouse() {
     assert_eq!(status, 0, "{}", file("/tmp/fb.out"));
     assert!(file("/tmp/fb.out").contains("all checks passed"));
     assert!(!palladiumos::vga_buffer::is_graphics(), "text mode is back");
+}
+
+#[test_case]
+fn sound_card_plays() {
+    let Some(_) = c_program("test_sound") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    assert!(palladiumos::sound::present(), "QEMU's AC'97 card was found");
+    let status = sh("test_sound > /tmp/snd.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/snd.out"));
+    assert!(file("/tmp/snd.out").contains("all checks passed"), "{}", file("/tmp/snd.out"));
+    assert!(only_kernel_left());
 }
 
 #[test_case]

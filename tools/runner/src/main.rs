@@ -45,6 +45,8 @@ const RUN_ARGS: &[&str] = &[
     "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:80", "-device", "rtl8139,netdev=net0",
     // A USB keyboard (QEMU sends the window's keys to it, not to PS/2).
     "-device", "qemu-xhci", "-device", "usb-kbd",
+    // A sound card (AC'97), played through this machine's sound system.
+    "-device", "AC97",
 ];
 
 /// QEMU's arguments for test kernels.
@@ -54,6 +56,8 @@ const TEST_ARGS: &[&str] = &[
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
     "-drive", "format=raw,file=target/test-scratch.img,index=3,media=disk",
     "-netdev", "user,id=net0", "-device", "rtl8139,netdev=net0",
+    // A sound card whose sound goes nowhere (it still plays in real time).
+    "-audiodev", "none,id=snd0", "-device", "AC97,audiodev=snd0",
 ];
 const TEST_SUCCESS: i32 = 33; // (0x10 << 1) | 1
 const TEST_TIMEOUT: Duration = Duration::from_secs(300);

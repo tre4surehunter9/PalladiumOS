@@ -42,6 +42,10 @@ pub enum Device {
     Fb,
     /// /dev/input/mice, /dev/psaux: the mouse
     Mouse,
+    /// /dev/dsp: sound output (OSS)
+    Dsp,
+    /// /dev/mixer: the sound card's volumes (OSS)
+    Mixer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

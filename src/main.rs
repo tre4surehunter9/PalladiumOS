@@ -138,6 +138,9 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
             Some(n) => boot_ok!("Found a USB controller (xHCI): {} USB keyboard{}", n, if n == 1 { "" } else { "s" }),
             None => {}
         }
+        if let Some(card) = palladiumos::sound::init() {
+            boot_ok!("Found a sound card: {} (/dev/dsp, /dev/mixer)", card);
+        }
         mount_filesystems();
         start_network();
         let (count, bytes) = palladiumos::programs::install();

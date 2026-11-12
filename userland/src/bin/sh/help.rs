@@ -148,6 +148,14 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "sound",
+        "sound (a sound card: QEMU's -device AC97)",
+        &[
+            ("play", "play WAV files, or a tone: play -t 440 1"),
+            ("volume", "show or set the volume: volume 70"),
+        ],
+    ),
+    (
         "programming",
         "compilers, languages and other shells",
         &[

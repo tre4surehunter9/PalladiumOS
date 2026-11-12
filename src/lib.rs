@@ -182,6 +182,7 @@ pub mod boot;
 pub mod net;
 pub mod rtc;
 pub mod smp;
+pub mod sound;
 
 
 extern crate alloc;
