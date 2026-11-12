@@ -290,6 +290,11 @@ impl Drop for Dsp {
         if s.fill > 0 && s.queued() + 1 < BUFS {
             s.submit();
         }
+        // Nothing left to play: stop the card (as drivers do once a stream
+        // has drained), rather than leave it running on an empty ring.
+        if s.queued() == 0 && s.running {
+            s.restart();
+        }
         s.open = false;
     }
 }
@@ -312,10 +317,23 @@ pub fn open_dsp() -> Result<Arc<Dsp>, i64> {
     s.partial_len = 0;
     s.phase = 0;
     s.fill = 0;
+    let mut settle = false;
     if s.queued() == 0 {
+        // Left running by the last program (it ended with sound still
+        // playing): stop it, and give it a moment stopped before it starts
+        // again. (QEMU only turns its output off after a while; started
+        // again at once, it pulls the next sound in a burst.)
+        settle = s.running;
         s.restart();
     }
     s.apply_rate();
+    drop(s);
+    if settle {
+        let until = crate::process::ticks() + 3;
+        while crate::process::ticks() < until && !crate::process::signal_pending() {
+            crate::process::block_on_until(SOUND_KEY, until);
+        }
+    }
     Ok(Arc::new(Dsp))
 }
 

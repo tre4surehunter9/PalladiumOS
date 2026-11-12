@@ -2050,7 +2050,7 @@ fn soak() {
         ("test_pty", "test_pty"),
         ("test_shm", "test_shm"),
         ("test_net", "test_net"),
-        ("test_sound", "test_sound"),
+        ("test_sound", "test_sound --no-timing"), // (QEMU's silent sound output: bursts under load)
     ];
     let x = filesystem::read_file("/usr/bin/Xfbdev").is_ok() && filesystem::read_file("/usr/bin/doomgeneric").is_ok();
     let mut round = 0u64;
@@ -2102,6 +2102,16 @@ fn processes_stay_intact_under_stress() {
     assert_eq!(status, 0);
     let out = file("/tmp/stress.txt");
     assert_eq!(out.matches(" ok: ").count(), 3, "{}", out);
+    assert!(only_kernel_left());
+}
+
+#[test_case]
+fn siginfo_fault_handlers_and_altstack() {
+    let Some(_) = c_program("test_siginfo") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let status = sh("test_siginfo > /tmp/si.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/si.out"));
+    assert!(file("/tmp/si.out").contains("all checks passed"), "{}", file("/tmp/si.out"));
     assert!(only_kernel_left());
 }
 

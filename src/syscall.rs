@@ -41,6 +41,8 @@ pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT4: u64 = 61;
 pub const SYS_KILL: u64 = 62;
+pub const SYS_RT_SIGQUEUEINFO: u64 = 129;
+pub const SYS_RT_TGSIGQUEUEINFO: u64 = 297;
 pub const SYS_FCNTL: u64 = 72;
 pub const SYS_RT_SIGRETURN: u64 = 15;
 pub const SYS_POLL: u64 = 7;
@@ -564,6 +566,8 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_EXECVE => process::execve(frame, a1, a2, a3),
         SYS_WAIT4 => process::sys_wait4(a1, a2, a3, a4),
         SYS_KILL => process::sys_kill(a1, a2),
+        SYS_RT_SIGQUEUEINFO => process::sys_rt_sigqueueinfo(a1, 0, a2, a3),
+        SYS_RT_TGSIGQUEUEINFO => process::sys_rt_sigqueueinfo(a1, a2, a3, a4),
         SYS_GETUID | SYS_GETEUID | SYS_GETGID | SYS_GETEGID | SYS_SETUID | SYS_SETGID | SYS_SETREUID
         | SYS_SETREGID | SYS_SETRESUID | SYS_SETRESGID | SYS_GETRESUID | SYS_GETRESGID => process::sys_id(frame.rax, a1, a2, a3),
         SYS_GETGROUPS => process::sys_getgroups(a1, a2),
@@ -730,7 +734,7 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_TIMERFD_SETTIME => vfs::sys_timerfd_settime(a1, a2, a3, a4),
         SYS_TIMERFD_GETTIME => vfs::sys_timerfd_gettime(a1, a2),
         SYS_CAPGET => sys_capget(a1, a2),
-        SYS_SIGALTSTACK => sys_sigaltstack(a1, a2),
+        SYS_SIGALTSTACK => process::sys_sigaltstack(a1, a2, frame.rsp),
         SYS_SYSINFO => sys_sysinfo(a1),
         SYS_PRCTL => process::sys_prctl(a1, a2),
         SYS_EVENTFD => vfs::sys_eventfd2(a1, 0),
@@ -994,32 +998,6 @@ fn sys_capget(header: u64, data: u64) -> i64 {
         let words = if version == 0x1998_0330 { 1 } else { 2 };
         let Some(d) = (unsafe { user_slice_mut(data, 12 * words) }) else { return -EFAULT };
         d.fill(0);
-    }
-    0
-}
-
-/// sigaltstack(new, old): remember an alternate signal stack. (Handlers
-/// still run on the normal stack; programs set one up as a precaution, for
-/// handling a stack overflow.)
-fn sys_sigaltstack(new: u64, old: u64) -> i64 {
-    const SS_DISABLE: u32 = 2;
-    static ALT: spin::Mutex<alloc::collections::BTreeMap<u64, [u8; 24]>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
-    let pid = process::current_pid();
-    if old != 0 {
-        let Some(o) = (unsafe { user_slice_mut(old, 24) }) else { return -EFAULT };
-        match ALT.lock().get(&pid) {
-            Some(s) => o.copy_from_slice(s),
-            None => {
-                o.fill(0);
-                o[8..12].copy_from_slice(&SS_DISABLE.to_le_bytes());
-            }
-        }
-    }
-    if new != 0 {
-        let Some(n) = (unsafe { user_slice(new, 24) }) else { return -EFAULT };
-        let mut s = [0u8; 24];
-        s.copy_from_slice(n);
-        ALT.lock().insert(pid, s);
     }
     0
 }

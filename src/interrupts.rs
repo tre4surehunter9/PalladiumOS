@@ -8,7 +8,18 @@ use lazy_static::lazy_static;
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
     let mut idt = InterruptDescriptorTable::new();
-    idt.breakpoint.set_handler_fn(breakpoint_handler);
+    unsafe {
+        // Exceptions programs cause: they become signals (exception_dispatch).
+        // int3 may be used from ring 3 (debuggers' breakpoints).
+        idt.divide_error.set_handler_addr(x86_64::VirtAddr::new(exc_divide_entry as *const () as u64));
+        idt.breakpoint.set_handler_addr(x86_64::VirtAddr::new(exc_breakpoint_entry as *const () as u64))
+            .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
+        idt.invalid_opcode.set_handler_addr(x86_64::VirtAddr::new(exc_opcode_entry as *const () as u64));
+        idt.general_protection_fault.set_handler_addr(x86_64::VirtAddr::new(exc_gp_entry as *const () as u64));
+        idt.page_fault.set_handler_addr(x86_64::VirtAddr::new(exc_page_entry as *const () as u64));
+        idt.x87_floating_point.set_handler_addr(x86_64::VirtAddr::new(exc_x87_entry as *const () as u64));
+        idt.simd_floating_point.set_handler_addr(x86_64::VirtAddr::new(exc_simd_entry as *const () as u64));
+    }
     unsafe {
         idt.double_fault.set_handler_fn(double_fault_handler)
         .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
@@ -24,9 +35,6 @@ lazy_static! {
     idt[(PIC_1_OFFSET + 10) as usize].set_handler_fn(pci_irq10);
     idt[(PIC_1_OFFSET + 11) as usize].set_handler_fn(pci_irq11);
     idt[(PIC_1_OFFSET + 12) as usize].set_handler_fn(mouse_irq12);
-    idt.page_fault.set_handler_fn(page_fault_handler);
-    idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
-    idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
     idt[crate::smp::SPURIOUS_VECTOR as usize].set_handler_fn(spurious_interrupt);
     unsafe {
         idt[crate::smp::AP_TIMER_VECTOR as usize]
@@ -241,95 +249,154 @@ pub fn unmask_irq(irq: u8) {
     });
 }
 
-pub extern "x86-interrupt" fn breakpoint_handler(
-    stack_frame: InterruptStackFrame)
-{
-    let _k = crate::smp::enter();
-    println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
-}
-
 pub extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame, _error_code: u64) -> !
 {
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: PageFaultErrorCode,
-) {
-    use x86_64::registers::control::Cr2;
+// The exceptions a program can cause (divide error, breakpoint, invalid
+// opcode, general protection, page fault, x87 and SSE errors) save every
+// register in a SyscallFrame, as the timer does: a fault becomes a signal
+// whose handler gets the program's registers (and may go back to them).
+// Some exceptions push an error code: swapped with rax, its slot becomes
+// rax's in the frame. They return through syscall_return.
+macro_rules! exception_entry {
+    ($name:literal, $vector:literal, err) => {
+        core::arch::global_asm!(
+            concat!(".global ", $name), concat!($name, ":"),
+            "xchg rax, [rsp]",
+            "push rcx", "push rdx", "push rsi", "push rdi", "push r8", "push r9", "push r10",
+            "push r11", "push rbx", "push rbp", "push r12", "push r13", "push r14", "push r15",
+            "cld", "mov rdi, rsp", "mov rsi, rax", concat!("mov rdx, ", $vector),
+            "call exception_dispatch",
+            "jmp syscall_return",
+        );
+    };
+    ($name:literal, $vector:literal) => {
+        core::arch::global_asm!(
+            concat!(".global ", $name), concat!($name, ":"),
+            "push rax",
+            "push rcx", "push rdx", "push rsi", "push rdi", "push r8", "push r9", "push r10",
+            "push r11", "push rbx", "push rbp", "push r12", "push r13", "push r14", "push r15",
+            "cld", "mov rdi, rsp", "xor esi, esi", concat!("mov rdx, ", $vector),
+            "call exception_dispatch",
+            "jmp syscall_return",
+        );
+    };
+}
+exception_entry!("exc_divide_entry", 0);
+exception_entry!("exc_breakpoint_entry", 3);
+exception_entry!("exc_opcode_entry", 6);
+exception_entry!("exc_gp_entry", 13, err);
+exception_entry!("exc_page_entry", 14, err);
+exception_entry!("exc_x87_entry", 16);
+exception_entry!("exc_simd_entry", 19);
 
-    let addr = Cr2::read().as_u64();
-    let _k = crate::smp::enter();
-    // A write to a page shared copy-on-write after fork: copy it, retry.
-    // (Also when the kernel writes for a program; it normally breaks the
-    // sharing first, in is_user_range.)
-    if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION | PageFaultErrorCode::CAUSED_BY_WRITE)
-        && addr < crate::memory::USER_SPACE_END
-        && crate::memory::break_cow_current(addr)
-    {
+unsafe extern "C" {
+    fn exc_divide_entry();
+    fn exc_breakpoint_entry();
+    fn exc_opcode_entry();
+    fn exc_gp_entry();
+    fn exc_page_entry();
+    fn exc_x87_entry();
+    fn exc_simd_entry();
+}
+
+/// A program's fault: its handler, if it has one; else it dies (and the
+/// kernel log says so, as Linux's "segfault at").
+fn user_fault(frame: &mut crate::syscall::SyscallFrame, sig: i32, info: crate::process::SigInfo, what: core::fmt::Arguments) {
+    if crate::process::fault_signal(frame, sig, info) {
         return;
     }
-    if crate::usermode::from_user(stack_frame.code_segment) {
-        // The stack growing into a page it hasn't used yet: map it, retry.
-        if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
-            && crate::usermode::handle_stack_fault(addr)
-        {
-            return;
-        }
-        // mmap'd memory touched for the first time: give it a page, retry.
-        if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) && crate::mmap::fault_in(addr) {
-            return;
-        }
-        println!("Segmentation fault (address {:?}, rip {:?})",
-                 Cr2::read(), stack_frame.instruction_pointer);
-        // (Also in the kernel log, as Linux's "segfault at": dmesg.)
-        crate::boot_warn!(
-            "pid {}: segfault at {:#x} ip {:#x} sp {:#x} error {:#x} cpu {}",
-            crate::process::current_pid(), addr, stack_frame.instruction_pointer.as_u64(),
-            stack_frame.stack_pointer.as_u64(), error_code.bits(), crate::smp::cpu_index()
-        );
-        crate::process::kill_current(SIGSEGV);
-    }
-
-    crate::serial_println!(
-        "EXCEPTION: PAGE FAULT at {:?}, {:?}, cpu {}, pid {}\n{:#?}",
-        Cr2::read(), error_code, crate::smp::cpu_index(), crate::process::current_pid(), stack_frame
-    );
-    println!("EXCEPTION: PAGE FAULT");
-    println!("Accessed Address: {:?}", Cr2::read());
-    println!("Error Code: {:?}", error_code);
-    println!("{:#?}", stack_frame);
-    hlt_loop();
+    println!("{} (rip {:#x})", what, frame.rip);
+    crate::boot_warn!("pid {}: {} ip {:#x} sp {:#x} cpu {}", crate::process::current_pid(), what, frame.rip, frame.rsp,
+        crate::smp::cpu_index());
+    crate::process::kill_current(sig);
 }
 
-extern "x86-interrupt" fn general_protection_fault_handler(
-    stack_frame: InterruptStackFrame,
-    error_code: u64,
-) {
-    let _k = crate::smp::enter();
-    if crate::usermode::from_user(stack_frame.code_segment) {
-        println!("General protection fault (rip {:?})", stack_frame.instruction_pointer);
-        crate::boot_warn!(
-            "pid {}: general protection fault ip {:#x} sp {:#x} cpu {}",
-            crate::process::current_pid(), stack_frame.instruction_pointer.as_u64(),
-            stack_frame.stack_pointer.as_u64(), crate::smp::cpu_index()
-        );
-        crate::process::kill_current(SIGSEGV);
-    }
-    panic!("EXCEPTION: GENERAL PROTECTION FAULT (error {:#x})\n{:#?}", error_code, stack_frame);
+/// The SIGFPE code for an SSE exception: the first unmasked flag set in
+/// MXCSR (x87: in its status word).
+fn fpe_code(flags: u32, masks: u32) -> i32 {
+    use crate::process::{FPE_FLTDIV, FPE_FLTINV, FPE_FLTOVF, FPE_FLTRES, FPE_FLTUND};
+    let raised = flags & !masks & 0x3f;
+    if raised & 0x01 != 0 { FPE_FLTINV }
+    else if raised & 0x04 != 0 { FPE_FLTDIV }
+    else if raised & 0x08 != 0 { FPE_FLTOVF }
+    else if raised & 0x12 != 0 { FPE_FLTUND }
+    else if raised & 0x20 != 0 { FPE_FLTRES }
+    else { FPE_FLTINV }
 }
 
-extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    let _k = crate::smp::enter();
-    if crate::usermode::from_user(stack_frame.code_segment) {
-        println!("Illegal instruction (rip {:?})", stack_frame.instruction_pointer);
-        crate::boot_warn!("pid {}: illegal instruction ip {:#x} cpu {}", crate::process::current_pid(),
-            stack_frame.instruction_pointer.as_u64(), crate::smp::cpu_index());
-        crate::process::kill_current(SIGILL);
+#[unsafe(no_mangle)]
+extern "C" fn exception_dispatch(frame: &mut crate::syscall::SyscallFrame, error: u64, vector: u64) {
+    use crate::process::{SigInfo, SEGV_ACCERR, SEGV_MAPERR, SI_KERNEL};
+    use x86_64::registers::control::Cr2;
+    let addr = if vector == 14 { Cr2::read().as_u64() } else { 0 };
+    let took = crate::smp::lock_kernel();
+    let user = crate::usermode::from_user(frame.cs);
+    match vector {
+        14 => {
+            let present = error & 1 != 0;
+            let write = error & 2 != 0;
+            // A write to a page shared copy-on-write after fork: copy it,
+            // retry. (Also when the kernel writes for a program; it normally
+            // breaks the sharing first, in is_user_range.)
+            if present && write && addr < crate::memory::USER_SPACE_END && crate::memory::break_cow_current(addr) {
+                return finish(took, user);
+            }
+            if user {
+                // The stack growing, or mmap'd memory touched for the first
+                // time: give it a page, retry.
+                if !present && (crate::usermode::handle_stack_fault(addr) || crate::mmap::fault_in(addr)) {
+                    return finish(took, user);
+                }
+                let code = if present || crate::mmap::mapped(addr) { SEGV_ACCERR } else { SEGV_MAPERR };
+                user_fault(frame, crate::process::SIGSEGV, SigInfo::fault(code, addr),
+                    format_args!("segfault at {:#x} error {:#x}", addr, error));
+                return finish(took, user);
+            }
+            crate::serial_println!(
+                "EXCEPTION: PAGE FAULT at {:#x}, error {:#x}, cpu {}, pid {}, rip {:#x}, rsp {:#x}",
+                addr, error, crate::smp::cpu_index(), crate::process::current_pid(), frame.rip, frame.rsp
+            );
+            println!("EXCEPTION: PAGE FAULT");
+            println!("Accessed Address: {:#x}", addr);
+            println!("Error Code: {:#x}, rip {:#x}", error, frame.rip);
+            hlt_loop();
+        }
+        13 if user => user_fault(frame, crate::process::SIGSEGV, SigInfo { code: SI_KERNEL, ..SigInfo::default() },
+            format_args!("general protection fault")),
+        6 if user => user_fault(frame, crate::process::SIGILL, SigInfo::fault(crate::process::ILL_ILLOPN, frame.rip),
+            format_args!("illegal instruction")),
+        0 if user => user_fault(frame, crate::process::SIGFPE, SigInfo::fault(crate::process::FPE_INTDIV, frame.rip),
+            format_args!("divide error")),
+        16 | 19 if user => {
+            let code = if vector == 19 {
+                let mut mxcsr = 0u32;
+                unsafe { core::arch::asm!("stmxcsr [{}]", in(reg) &mut mxcsr, options(nostack)) };
+                fpe_code(mxcsr, (mxcsr >> 7) & 0x3f)
+            } else {
+                let (mut sw, mut cw) = (0u16, 0u16);
+                unsafe { core::arch::asm!("fnstsw [{}]", "fnstcw [{}]", in(reg) &mut sw, in(reg) &mut cw, options(nostack)) };
+                fpe_code(sw as u32, cw as u32)
+            };
+            user_fault(frame, crate::process::SIGFPE, SigInfo::fault(code, frame.rip), format_args!("floating-point error"));
+        }
+        3 if user => user_fault(frame, crate::process::SIGTRAP, SigInfo { code: SI_KERNEL, ..SigInfo::default() },
+            format_args!("breakpoint (int3)")),
+        3 => println!("EXCEPTION: BREAKPOINT at {:#x}", frame.rip),
+        _ => panic!("EXCEPTION {} (error {:#x}) in the kernel at rip {:#x}, rsp {:#x}", vector, error, frame.rip, frame.rsp),
     }
-    panic!("EXCEPTION: INVALID OPCODE\n{:#?}", stack_frame);
+    finish(took, user)
+}
+
+/// Back to where the exception happened: a program lets the big kernel lock
+/// go on the way (syscall_return); kernel code keeps what it had.
+fn finish(took: bool, user: bool) {
+    if took && !user {
+        crate::smp::unlock_kernel();
+    }
 }
 
 // Signal numbers (Linux), used for "killed by signal" exit statuses.

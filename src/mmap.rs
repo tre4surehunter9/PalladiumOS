@@ -359,6 +359,13 @@ fn remember(maps: &mut Maps, map: Map) {
 /// The page at `addr` was touched for the first time: if it's mmap'd
 /// memory the program may use, give it its page (zeroed, or the shared
 /// one). False if it isn't (a real segmentation fault).
+/// Is `addr` in one of the current process's mappings (even one it may not
+/// touch: a PROT_NONE guard page)? A fault there is SEGV_ACCERR, not
+/// SEGV_MAPERR.
+pub fn mapped(addr: u64) -> bool {
+    process::try_with_current_mm(|mm| mm.maps.iter().any(|m| m.start <= addr && addr < m.end)).unwrap_or(false)
+}
+
 pub fn fault_in(addr: u64) -> bool {
     let addr = addr & !0xfff;
     let Some(found) = process::try_with_current_mm(|mm| mm.maps.iter().find(|m| m.start <= addr && addr < m.end).cloned()) else {

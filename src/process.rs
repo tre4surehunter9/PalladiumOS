@@ -45,6 +45,111 @@ pub enum ExitReason {
     Signaled(i32),
 }
 
+// si_code values (Linux's)
+pub const SI_USER: i32 = 0;
+pub const SI_KERNEL: i32 = 0x80;
+pub const SI_QUEUE: i32 = -1;
+pub const SI_TIMER: i32 = -2;
+pub const SI_TKILL: i32 = -6;
+pub const CLD_EXITED: i32 = 1;
+pub const CLD_KILLED: i32 = 2;
+pub const CLD_STOPPED: i32 = 5;
+pub const CLD_CONTINUED: i32 = 6;
+pub const SEGV_MAPERR: i32 = 1;
+pub const SEGV_ACCERR: i32 = 2;
+pub const ILL_ILLOPN: i32 = 2;
+pub const FPE_INTDIV: i32 = 1;
+pub const FPE_FLTDIV: i32 = 3;
+pub const FPE_FLTOVF: i32 = 4;
+pub const FPE_FLTUND: i32 = 5;
+pub const FPE_FLTRES: i32 = 6;
+pub const FPE_FLTINV: i32 = 7;
+pub const TRAP_BRKPT: i32 = 1;
+
+/// Why a signal was sent, for the handler's siginfo (SA_SIGINFO) and
+/// sigtimedwait: si_code and the fields that go with it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SigInfo {
+    pub code: i32,
+    /// si_pid (the sender, or the child for SIGCHLD); a timer's id.
+    pub pid: i32,
+    /// si_uid; a timer's overrun.
+    pub uid: u32,
+    /// si_addr (faults), si_value (sigqueue, timers).
+    pub word: u64,
+    /// si_status (SIGCHLD: the exit code or the signal).
+    pub status: i32,
+}
+
+impl SigInfo {
+    /// Sent by the kernel itself (SIGPIPE, SIGALRM, SIGIO, keyboard signals...).
+    pub const KERNEL: SigInfo = SigInfo { code: SI_KERNEL, pid: 0, uid: 0, word: 0, status: 0 };
+
+    /// Sent by the current process (kill: SI_USER, tkill: SI_TKILL...).
+    fn from_current(table: &BTreeMap<u64, Box<Process>>, code: i32, value: u64) -> SigInfo {
+        let (pid, uid) = table.get(&current_pid()).map_or((0, 0), |p| (p.tgid as i32, p.cred.ruid));
+        SigInfo { code, pid, uid, word: value, status: 0 }
+    }
+
+    pub fn fault(code: i32, addr: u64) -> SigInfo {
+        SigInfo { code, word: addr, ..SigInfo::default() }
+    }
+
+    /// The 128-byte siginfo_t of Linux x86_64 for signal `sig`.
+    pub fn bytes(&self, sig: i32) -> [u8; 128] {
+        let mut b = [0u8; 128];
+        b[0..4].copy_from_slice(&sig.to_le_bytes());
+        b[8..12].copy_from_slice(&self.code.to_le_bytes());
+        let faulting = matches!(sig, SIGSEGV | SIGBUS | SIGILL | SIGFPE | SIGTRAP);
+        if faulting && self.code > 0 {
+            b[16..24].copy_from_slice(&self.word.to_le_bytes()); // si_addr
+        } else {
+            b[16..20].copy_from_slice(&self.pid.to_le_bytes()); // si_pid / si_timerid
+            b[20..24].copy_from_slice(&self.uid.to_le_bytes()); // si_uid / si_overrun
+            if sig == SIGCHLD && self.code > 0 {
+                b[24..28].copy_from_slice(&self.status.to_le_bytes()); // si_status
+            } else {
+                b[24..32].copy_from_slice(&self.word.to_le_bytes()); // si_value
+            }
+        }
+        b
+    }
+}
+
+/// An alternate signal stack (sigaltstack): handlers with SA_ONSTACK run on
+/// it (a program can handle its own stack overflowing).
+#[derive(Clone, Copy, Debug)]
+pub struct AltStack {
+    pub sp: u64,
+    pub size: u64,
+    /// SS_DISABLE, or 0 (enabled), with SS_AUTODISARM.
+    pub flags: u32,
+}
+
+pub const SS_ONSTACK: u32 = 1;
+pub const SS_DISABLE: u32 = 2;
+pub const SS_AUTODISARM: u32 = 1 << 31;
+
+impl AltStack {
+    pub const DISABLED: AltStack = AltStack { sp: 0, size: 0, flags: SS_DISABLE };
+
+    /// Is `rsp` on it?
+    pub fn holds(&self, rsp: u64) -> bool {
+        self.flags & SS_DISABLE == 0 && rsp > self.sp && rsp - self.sp <= self.size
+    }
+
+    /// Its ss_flags as seen from stack pointer `rsp` (sigaltstack, uc_stack).
+    pub fn flags_at(&self, rsp: u64) -> u32 {
+        if self.flags & SS_DISABLE != 0 {
+            SS_DISABLE
+        } else if self.holds(rsp) {
+            SS_ONSTACK
+        } else {
+            self.flags & SS_AUTODISARM
+        }
+    }
+}
+
 impl ExitReason {
     /// Encoding used by wait4's status (what WIFEXITED/WEXITSTATUS decode).
     fn wait_status(self) -> i32 {
@@ -122,6 +227,10 @@ pub struct Process {
     pub ctty: u32,
     /// Signals sent but not yet acted on (bit n-1 = signal n).
     pending: u64,
+    /// Why each pending signal was sent (the latest of each).
+    siginfo: BTreeMap<i32, SigInfo>,
+    /// sigaltstack: where handlers with SA_ONSTACK run.
+    pub altstack: AltStack,
     /// Signals this thread waits for in rt_sigtimedwait (sigwait): one
     /// blocked by the thread it was sent to comes here instead.
     sigwait: u64,
@@ -271,6 +380,8 @@ pub fn init() {
         sid: 0,
         ctty: CTTY_CONSOLE,
         pending: 0,
+        siginfo: BTreeMap::new(),
+        altstack: AltStack::DISABLED,
         sigwait: 0,
         actions: Box::new([SigAction::DEFAULT; MAX_SIGNAL as usize]),
         blocked: 0,
@@ -344,6 +455,51 @@ pub fn try_with_current_mm<T>(f: impl FnOnce(&mut Mm) -> T) -> Option<T> {
     let mm = TABLE.try_lock()?.get(&current_pid())?.mm.clone();
     let mut guard = mm.try_lock()?;
     Some(f(&mut guard))
+}
+
+fn current_altstack() -> AltStack {
+    TABLE.lock().get(&current_pid()).map_or(AltStack::DISABLED, |p| p.altstack)
+}
+
+/// sigaltstack(new, old), with the program's stack pointer `rsp` (to say
+/// whether it's on the alternate stack, which mustn't change while it is).
+pub fn sys_sigaltstack(new: u64, old: u64, rsp: u64) -> i64 {
+    const MINSIGSTKSZ: u64 = 2048;
+    let mut table = TABLE.lock();
+    let Some(p) = table.get_mut(&current_pid()) else { return -ESRCH };
+    let cur = p.altstack;
+    let new_stack = if new != 0 {
+        let Some(n) = (unsafe { user_slice(new, 24) }) else { return -EFAULT };
+        let sp = u64::from_le_bytes(n[0..8].try_into().unwrap());
+        let flags = u32::from_le_bytes(n[8..12].try_into().unwrap());
+        let size = u64::from_le_bytes(n[16..24].try_into().unwrap());
+        if cur.holds(rsp) {
+            return -EPERM; // (on it now)
+        }
+        if flags & !(SS_DISABLE | SS_AUTODISARM | SS_ONSTACK) != 0 {
+            return -EINVAL;
+        }
+        Some(if flags & SS_DISABLE != 0 {
+            AltStack::DISABLED
+        } else if size < MINSIGSTKSZ {
+            return -crate::syscall::ENOMEM;
+        } else {
+            AltStack { sp, size, flags: flags & SS_AUTODISARM }
+        })
+    } else {
+        None
+    };
+    if old != 0 {
+        let Some(o) = (unsafe { user_slice_mut(old, 24) }) else { return -EFAULT };
+        o.fill(0);
+        o[0..8].copy_from_slice(&cur.sp.to_le_bytes());
+        o[8..12].copy_from_slice(&cur.flags_at(rsp).to_le_bytes());
+        o[16..24].copy_from_slice(&cur.size.to_le_bytes());
+    }
+    if let Some(a) = new_stack {
+        p.altstack = a;
+    }
+    0
 }
 
 fn current_affinity() -> u64 {
@@ -651,7 +807,8 @@ pub fn exit_current(reason: ExitReason) -> ! {
                 parent.state = State::Ready;
             }
         }
-        signal_locked(&mut table, ppid, SIGCHLD);
+        let info = child_info(&table, cur);
+        signal_info_locked(&mut table, ppid, SIGCHLD, info);
         if table.get(&cur).is_some_and(|p| p.borrowed_vm) {
             wake(vfork_key(cur)); // a vfork child: the parent may go on
         }
@@ -800,8 +957,23 @@ fn notify_exit_locked(table: &mut BTreeMap<u64, Box<Process>>, pid: u64) {
             parent.state = State::Ready;
         }
     }
-    signal_locked(table, ppid, SIGCHLD);
+    let info = child_info(table, pid);
+    signal_info_locked(table, ppid, SIGCHLD, info);
     wake_kernel_locked(table);
+}
+
+/// SIGCHLD's siginfo for a child that exited, was killed, stopped or
+/// continued.
+fn child_info(table: &BTreeMap<u64, Box<Process>>, child: u64) -> SigInfo {
+    let Some(c) = table.get(&child) else { return SigInfo::KERNEL };
+    let (code, status) = match (c.state, c.wait_event) {
+        (State::Zombie(ExitReason::Exited(code)), _) => (CLD_EXITED, code),
+        (State::Zombie(ExitReason::Signaled(sig)), _) => (CLD_KILLED, sig),
+        (_, Some(0xffff)) => (CLD_CONTINUED, SIGCONT),
+        (_, Some(ev)) if ev & 0xff == 0x7f => (CLD_STOPPED, (ev >> 8) as i32),
+        _ => (SI_KERNEL, 0),
+    };
+    SigInfo { code, pid: c.tgid as i32, uid: c.cred.ruid, word: 0, status }
 }
 
 /// Free a reaped process's memory. Its kernel stack is freed when it drops.
@@ -1016,6 +1188,8 @@ fn fork_with(frame: &SyscallFrame, kind: CloneKind, stack: u64) -> i64 {
         sid,
         ctty,
         pending: 0,
+        siginfo: BTreeMap::new(),
+        altstack: if thread { AltStack::DISABLED } else { current_altstack() }, // (Linux: not for threads)
         sigwait: 0,
         actions, // handlers and the mask are inherited; pending signals and alarms aren't
         blocked,
@@ -1208,6 +1382,7 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
         p.mm = Mm::new(); // the new program starts with an empty heap and no mmaps
         p.fs_base = 0;
         p.gs_base = 0;
+        p.altstack = AltStack::DISABLED; // (the old program's memory is gone)
         let borrowed = core::mem::replace(&mut p.borrowed_vm, false);
         // Handlers are gone with the old program: back to the default action
         // (ignored signals stay ignored; the mask and pending signals stay).
@@ -1463,6 +1638,8 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         sid: pid,  // and session, on the console
         ctty: CTTY_CONSOLE,
         pending: 0,
+        siginfo: BTreeMap::new(),
+        altstack: AltStack::DISABLED,
         sigwait: 0,
         actions: Box::new([SigAction::DEFAULT; MAX_SIGNAL as usize]),
         blocked: 0,
@@ -1609,6 +1786,10 @@ pub const SIGHUP: i32 = 1;
 pub const SIGINT: i32 = 2;
 pub const SIGQUIT: i32 = 3;
 pub const SIGKILL: i32 = 9;
+pub const SIGILL: i32 = 4;
+pub const SIGTRAP: i32 = 5;
+pub const SIGBUS: i32 = 7;
+pub const SIGFPE: i32 = 8;
 pub const SIGSEGV: i32 = 11;
 pub const SIGPIPE: i32 = 13;
 pub const SIGALRM: i32 = 14;
@@ -1632,6 +1813,7 @@ pub const SIG_IGN: u64 = 1;
 // sigaction flags (Linux values)
 const SA_NOCLDSTOP: u64 = 1;
 const SA_RESTORER: u64 = 0x0400_0000;
+const SA_ONSTACK: u64 = 0x0800_0000;
 const SA_RESTART: u64 = 0x1000_0000;
 const SA_NODEFER: u64 = 0x4000_0000;
 const SA_RESETHAND: u64 = 0x8000_0000;
@@ -1790,12 +1972,19 @@ fn notify_parent_locked(table: &mut BTreeMap<u64, Box<Process>>, child: u64, sto
     }
     let nocldstop = parent.actions[(SIGCHLD - 1) as usize].flags & SA_NOCLDSTOP != 0;
     if ppid != 0 && !(stop_or_continue && nocldstop) {
-        signal_locked(table, ppid, SIGCHLD);
+        let info = child_info(table, child);
+        signal_info_locked(table, ppid, SIGCHLD, info);
     }
 }
 
-/// Send `sig` to one process. Returns false if there's no such process.
+/// Send `sig` to one process, from the kernel. Returns false if there's no
+/// such process.
 fn signal_locked(table: &mut BTreeMap<u64, Box<Process>>, pid: u64, sig: i32) -> bool {
+    signal_info_locked(table, pid, sig, SigInfo::KERNEL)
+}
+
+/// Send `sig` to one process, saying why (its siginfo).
+fn signal_info_locked(table: &mut BTreeMap<u64, Box<Process>>, pid: u64, sig: i32, info: SigInfo) -> bool {
     if pid == 0 {
         return false; // the kernel can't be signaled
     }
@@ -1838,6 +2027,7 @@ fn signal_locked(table: &mut BTreeMap<u64, Box<Process>>, pid: u64, sig: i32) ->
         let default_stop = p.actions[(sig - 1) as usize].handler == SIG_DFL && sig != SIGSTOP && STOP_SIGNALS & bit(sig) != 0;
         if !discarded(p, sig) && !(default_stop && orphan) {
             p.pending |= bit(sig);
+            p.siginfo.insert(sig, info);
             let wake = sig == SIGKILL || p.blocked & bit(sig) == 0 || p.sigwait & bit(sig) != 0;
             if wake && matches!(p.state, State::Waiting | State::Sleeping | State::Blocked(_)) {
                 p.state = State::Ready; // so it notices
@@ -1872,22 +2062,26 @@ fn signal_group_locked(table: &mut BTreeMap<u64, Box<Process>>, pgid: u64, sig: 
 /// that isn't blocking it (the first thread if they all are). Returns
 /// false if there's no such process.
 fn signal_process_locked(table: &mut BTreeMap<u64, Box<Process>>, tgid: u64, sig: i32) -> bool {
+    signal_process_info_locked(table, tgid, sig, SigInfo::KERNEL)
+}
+
+fn signal_process_info_locked(table: &mut BTreeMap<u64, Box<Process>>, tgid: u64, sig: i32, info: SigInfo) -> bool {
     let threads: Vec<(u64, bool)> = table
         .values()
         .filter(|t| t.tgid == tgid && !matches!(t.state, State::Zombie(_)))
         .map(|t| (t.pid, sig > 0 && t.blocked & bit(sig) != 0))
         .collect();
     if threads.len() <= 1 {
-        return signal_locked(table, tgid, sig); // one thread (or a zombie)
+        return signal_info_locked(table, tgid, sig, info); // one thread (or a zombie)
     }
     if sig == SIGKILL || sig == SIGCONT || (sig > 0 && STOP_SIGNALS & bit(sig) != 0) {
         for (t, _) in &threads {
-            signal_locked(table, *t, sig);
+            signal_info_locked(table, *t, sig, info);
         }
         return true;
     }
     let target = threads.iter().find(|(_, blocked)| !blocked).map_or(threads[0].0, |(t, _)| *t);
-    signal_locked(table, target, sig)
+    signal_info_locked(table, target, sig, info)
 }
 
 /// Send the signals typed at the keyboard to the foreground process group.
@@ -2024,14 +2218,21 @@ pub fn handle_signals(frame: &mut SyscallFrame, syscall: Option<(u64, i64)>) {
         }
         return;
     }
-    let (sig, act, old_mask) = {
+    let (sig, act, old_mask, info, alt, on_alt) = {
         let mut table = TABLE.lock();
         let p = table.get_mut(&current_pid()).unwrap();
         // signal_pending dropped everything quieter: the lowest deliverable
         // signal is the one to act on.
         let sig = lowest(p.pending & !p.blocked);
         p.pending &= !bit(sig);
+        let info = p.siginfo.remove(&sig).unwrap_or(SigInfo::KERNEL);
         let act = p.actions[(sig - 1) as usize];
+        // SA_ONSTACK: onto the alternate stack, unless already on it.
+        let alt = p.altstack;
+        let on_alt = act.flags & SA_ONSTACK != 0 && alt.flags & SS_DISABLE == 0 && !alt.holds(frame.rsp);
+        if on_alt && alt.flags & SS_AUTODISARM != 0 {
+            p.altstack = AltStack::DISABLED; // back with sigreturn
+        }
         if act.handler == SIG_DFL {
             drop(table);
             exit_group(ExitReason::Signaled(sig));
@@ -2045,24 +2246,59 @@ pub fn handle_signals(frame: &mut SyscallFrame, syscall: Option<(u64, i64)>) {
         if act.flags & SA_RESETHAND != 0 {
             p.actions[(sig - 1) as usize] = SigAction::DEFAULT;
         }
-        (sig, act, old_mask)
+        (sig, act, old_mask, info, alt, on_alt)
     };
     if matches!(syscall, Some((num, ret)) if ret == -EINTR && restartable_after_handler(num)) && act.flags & SA_RESTART != 0 {
         restart(frame);
     }
     // No way back from the handler without a restorer (libc always gives one).
-    if act.flags & SA_RESTORER == 0 || crate::signal::setup_frame(frame, sig, act.handler, act.restorer, old_mask).is_err() {
+    let frame_info = crate::signal::Delivery {
+        info: info.bytes(sig),
+        stack_top: on_alt.then(|| alt.sp + alt.size),
+        uc_stack: (alt.sp, alt.flags_at(frame.rsp), alt.size),
+    };
+    if act.flags & SA_RESTORER == 0
+        || crate::signal::setup_frame(frame, sig, act.handler, act.restorer, old_mask, &frame_info).is_err()
+    {
         exit_group(ExitReason::Signaled(SIGSEGV));
     }
+}
+
+/// A fault in the program (from the exception handlers, which have its
+/// whole frame): its handler runs, if it has one that isn't blocked, with
+/// `info` (the address...). Returns false if not: the caller ends the
+/// program with `sig` (as Linux does when the signal is blocked or ignored:
+/// a fault can't be skipped).
+pub fn fault_signal(frame: &mut SyscallFrame, sig: i32, info: SigInfo) -> bool {
+    {
+        let mut table = TABLE.lock();
+        let p = table.get_mut(&current_pid()).unwrap();
+        let act = p.actions[(sig - 1) as usize];
+        if act.handler == SIG_DFL || act.handler == SIG_IGN || p.blocked & bit(sig) != 0 {
+            return false;
+        }
+        p.pending |= bit(sig);
+        p.siginfo.insert(sig, info);
+    }
+    handle_signals(frame, None);
+    true
 }
 
 /// rt_sigreturn(): back from a handler. Restores the registers and signal
 /// mask saved in the frame on the user stack. Returns the restored rax.
 pub fn sys_rt_sigreturn(frame: &mut SyscallFrame) -> i64 {
     match crate::signal::restore_frame(frame) {
-        Ok(mask) => {
+        Ok((mask, (sp, flags, size))) => {
             let mut table = TABLE.lock();
-            table.get_mut(&current_pid()).unwrap().blocked = mask & !UNBLOCKABLE;
+            let p = table.get_mut(&current_pid()).unwrap();
+            p.blocked = mask & !UNBLOCKABLE;
+            // The alternate stack as it was when the signal came (as Linux
+            // does: SS_AUTODISARM turned it off meanwhile).
+            p.altstack = if flags & SS_DISABLE != 0 || size < 2048 {
+                AltStack::DISABLED
+            } else {
+                AltStack { sp, size, flags: flags & SS_AUTODISARM }
+            };
             frame.rax as i64
         }
         Err(()) => exit_group(ExitReason::Signaled(SIGSEGV)),
@@ -2106,8 +2342,9 @@ pub fn sys_kill(pid: u64, sig: u64) -> i64 {
     if permitted.is_empty() {
         return -EPERM;
     }
+    let info = SigInfo::from_current(&table, SI_USER, 0);
     for t in permitted {
-        signal_process_locked(&mut table, t, sig);
+        signal_process_info_locked(&mut table, t, sig, info);
     }
     0
 }
@@ -2126,7 +2363,39 @@ pub fn sys_tkill(tgid: u64, tid: u64, sig: u64) -> i64 {
     if !allowed {
         return -EPERM;
     }
-    signal_locked(&mut table, tid, sig as i32);
+    let info = SigInfo::from_current(&table, SI_TKILL, 0);
+    signal_info_locked(&mut table, tid, sig as i32, info);
+    0
+}
+
+/// rt_sigqueueinfo(tgid, sig, info) and rt_tgsigqueueinfo(tgid, tid, sig,
+/// info) (`tid` 0: the process): a signal with a value (sigqueue). Only
+/// negative si_codes (SI_QUEUE...) unless it's to oneself, as on Linux.
+pub fn sys_rt_sigqueueinfo(tgid: u64, tid: u64, sig: u64, uinfo: u64) -> i64 {
+    if !(1..=MAX_SIGNAL as u64).contains(&sig) {
+        return -EINVAL;
+    }
+    let Some(u) = (unsafe { user_slice(uinfo, 32) }) else { return -EFAULT };
+    let code = i32::from_le_bytes(u[8..12].try_into().unwrap());
+    let value = u64::from_le_bytes(u[24..32].try_into().unwrap());
+    let mut table = TABLE.lock();
+    let me = table.get(&current_pid()).map(|p| (p.cred.clone(), p.tgid));
+    let Some((cred, my_tgid)) = me else { return -ESRCH };
+    let target = if tid != 0 { tid } else { tgid };
+    let Some(t) = table.get(&target).filter(|t| t.tgid == tgid) else { return -ESRCH };
+    if (code >= 0 || code == SI_TKILL) && t.tgid != my_tgid {
+        return -EPERM;
+    }
+    let allowed = cred.euid == 0 || [cred.ruid, cred.euid].iter().any(|&u| u == t.cred.ruid || u == t.cred.suid);
+    if !allowed {
+        return -EPERM;
+    }
+    let info = SigInfo::from_current(&table, code, value);
+    if tid != 0 {
+        signal_info_locked(&mut table, tid, sig as i32, info);
+    } else {
+        signal_process_info_locked(&mut table, tgid, sig as i32, info);
+    }
     0
 }
 
@@ -2387,8 +2656,9 @@ pub fn sys_rt_sigtimedwait(set: u64, info: u64, timeout: u64) -> i64 {
                     let p = table.get_mut(&t).unwrap();
                     let sig = lowest(p.pending & set);
                     p.pending &= !bit(sig);
+                    let info = p.siginfo.remove(&sig).unwrap_or(SigInfo::KERNEL);
                     table.get_mut(&cur).unwrap().sigwait = 0;
-                    Some((sig, take_ptimer_signal(&[cur, t], sig)))
+                    Some((sig, info))
                 }
                 None => {
                     table.get_mut(&cur).unwrap().sigwait = set;
@@ -2396,17 +2666,10 @@ pub fn sys_rt_sigtimedwait(set: u64, info: u64, timeout: u64) -> i64 {
                 }
             }
         };
-        if let Some((sig, timer)) = taken {
+        if let Some((sig, why)) = taken {
             if info != 0 {
                 let Some(out) = (unsafe { user_slice_mut(info, 128) }) else { return -EFAULT };
-                out.fill(0);
-                out[0..4].copy_from_slice(&sig.to_le_bytes()); // si_signo (si_code 0: SI_USER)
-                if let Some((id, value, overrun)) = timer {
-                    out[8..12].copy_from_slice(&(-2i32).to_le_bytes()); // si_code: SI_TIMER
-                    out[16..20].copy_from_slice(&id.to_le_bytes()); // si_timerid
-                    out[20..24].copy_from_slice(&overrun.to_le_bytes()); // si_overrun
-                    out[24..32].copy_from_slice(&value.to_le_bytes()); // si_value
-                }
+                out.copy_from_slice(&why.bytes(sig));
             }
             return sig as i64;
         }
@@ -2660,9 +2923,6 @@ struct PosixTimer {
 }
 
 static PTIMERS: Mutex<Vec<PosixTimer>> = Mutex::new(Vec::new());
-/// Timer signals not taken yet, for their siginfo (si_code SI_TIMER):
-/// (thread or process, signal, timer id, value, overrun).
-static PTIMER_SIGNALS: Mutex<Vec<(u64, i32, i32, u64, i32)>> = Mutex::new(Vec::new());
 
 const SIGEV_SIGNAL: i32 = 0;
 const SIGEV_NONE: i32 = 1;
@@ -2693,26 +2953,15 @@ fn fire_posix_timers_locked(table: &mut BTreeMap<u64, Box<Process>>) {
             continue;
         }
         t.overrun = missed;
-        if let Some(mut sigs) = PTIMER_SIGNALS.try_lock() {
-            sigs.retain(|s| !(s.0 == target && s.1 == t.signo));
-            sigs.push((target, t.signo, t.id, t.value, missed));
-        }
+        let info = SigInfo { code: SI_TIMER, pid: t.id, uid: missed as u32, word: t.value, status: 0 };
         if t.notify == SIGEV_THREAD_ID {
-            signal_locked(table, target, t.signo);
+            signal_info_locked(table, target, t.signo, info);
         } else {
-            signal_process_locked(table, target, t.signo);
+            signal_process_info_locked(table, target, t.signo, info);
         }
     }
 }
 
-/// The siginfo details of a timer's signal just taken, if it was one:
-/// (timer id, value, overrun).
-fn take_ptimer_signal(pids: &[u64], sig: i32) -> Option<(i32, u64, i32)> {
-    let mut sigs = PTIMER_SIGNALS.lock();
-    let i = sigs.iter().position(|s| pids.contains(&s.0) && s.1 == sig)?;
-    let s = sigs.remove(i);
-    Some((s.2, s.3, s.4))
-}
 
 /// A process's timers go when it ends or runs another program.
 pub fn drop_posix_timers(tgid: u64) {

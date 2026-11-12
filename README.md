@@ -327,7 +327,9 @@ Signals work as in POSIX:
 * Blocking syscalls interrupted by a handler fail with `EINTR`, or restart with `SA_RESTART`. Ignored and stop/continue signals never interrupt them: a `sleep 10` stopped and continued still sleeps 10 s.
 * Job control: SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU stop a process, SIGCONT continues it, and `wait4` reports both. Ctrl-C sends SIGINT, Ctrl-Z SIGTSTP and Ctrl-\ SIGQUIT to the foreground process group. As POSIX says, Ctrl-Z doesn't stop orphaned process groups (like programs the kernel started), which nobody could continue.
 * `execve` resets handlers to the default (ignored signals and the mask are kept).
-* Not yet: `SA_SIGINFO` details (the siginfo has only the signal number, except for POSIX timers' signals in `sigwaitinfo`), alternate signal stacks (`sigaltstack` is remembered, but handlers run on the normal stack), handlers for faults (a segfault always ends the program).
+* `SA_SIGINFO` handlers get the whole siginfo: who sent it and how (`SI_USER` from `kill`, `SI_TKILL`, `SI_QUEUE` with its value from `sigqueue`, `SI_TIMER`, `SI_KERNEL`), a child's pid and exit status with `SIGCHLD` (`CLD_EXITED`, `CLD_KILLED`, `CLD_STOPPED`, `CLD_CONTINUED`), and for faults the address and cause (`SEGV_MAPERR`, `SEGV_ACCERR`, `ILL_ILLOPN`, `FPE_INTDIV`...). `sigwaitinfo` reports the same.
+* Faults can be handled: a program's own handler gets SIGSEGV, SIGILL, SIGFPE (integer division by zero, x87 and SSE errors) and SIGTRAP (`int3`) with all its registers in the ucontext, and can return (to try again, after mapping the page, say) or jump out (`siglongjmp`). Without a handler, or with the signal blocked, the program ends, and the kernel log says where (`dmesg`).
+* Alternate signal stacks (`sigaltstack`, with `SS_AUTODISARM`): `SA_ONSTACK` handlers run on them, so a program (or a thread) can handle its own stack overflow.
 
 ## Terminals and Sessions
 The console understands the usual ANSI escape sequences (cursor movement, absolute row and column, clearing, inserting and deleting characters and lines, scrolling, colors and reverse video), so full-screen programs like `edit`, BusyBox's `vi` and Alpine's `nano` work.
