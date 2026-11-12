@@ -182,7 +182,7 @@ fn start_network() {
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], irq
             );
             // DHCP usually answers at once in QEMU; don't hold up the boot.
-            match net::wait_for_dhcp(40) {
+            match net::wait_for_dhcp(2200) {
                 Some(c) => boot_ok!(
                     "Configured eth0 by DHCP: {} (gateway {}, DNS {})",
                     c.address,

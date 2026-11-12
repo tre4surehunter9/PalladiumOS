@@ -2108,7 +2108,7 @@ fn eth0_is_configured_by_dhcp() {
         palladiumos::serial_print!("(skipped: no network card) ");
         return;
     }
-    let config = palladiumos::net::config().or_else(|| palladiumos::net::wait_for_dhcp(5 * 18)).expect("no DHCP answer");
+    let config = palladiumos::net::config().or_else(|| palladiumos::net::wait_for_dhcp(5000)).expect("no DHCP answer");
     assert_eq!(alloc::format!("{}", config.address), "10.0.2.15/24");
     assert_eq!(config.gateway.map(|g| alloc::format!("{}", g)).as_deref(), Some("10.0.2.2"));
     assert_eq!(config.dns.map(|d| alloc::format!("{}", d)).as_deref(), Some("10.0.2.3"));

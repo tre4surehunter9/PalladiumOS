@@ -56,7 +56,7 @@ const TCP_BUFFER: usize = 64 * 1024;
 const UDP_BUFFER: usize = 16 * 1024;
 const BACKLOG: usize = 4;
 /// How long connect() waits for an answer.
-const CONNECT_TIMEOUT_TICKS: u64 = 20 * 18;
+const CONNECT_TIMEOUT_MS: u64 = 20_000;
 
 /// Which interface a smoltcp socket lives on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -384,7 +384,7 @@ impl Socket {
             super::poll();
             return Err(EINPROGRESS);
         }
-        let deadline = process::ticks() + CONNECT_TIMEOUT_TICKS;
+        let deadline = process::ticks() + (CONNECT_TIMEOUT_MS * 1_000_000).div_ceil(process::TICK_NS);
         let r = wait(self, 0, Some(deadline), |net| match self.tcp_state(net) {
             Some(tcp::State::Established) | Some(tcp::State::CloseWait) => Some(Ok(())),
             Some(tcp::State::SynSent) | Some(tcp::State::SynReceived) => None,

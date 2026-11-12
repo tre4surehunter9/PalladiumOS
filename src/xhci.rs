@@ -31,8 +31,15 @@ const POLL_LIMIT: u32 = 20_000_000;
 /// Reports queued on the keyboard's endpoint at once.
 const REPORT_SLOTS: usize = 16;
 const REPORT_SIZE: usize = 64;
-/// Key repeat: after this many timer ticks (about 0.5 s), every tick.
-const REPEAT_DELAY: u32 = 9;
+/// Key repeat, as a PC keyboard: after 500 ms held, 20 times a second.
+/// (In timer ticks, from their length: tick-counted values sped up when
+/// the timer went from 18.2 to 100 Hz.)
+const REPEAT_DELAY_MS: u64 = 500;
+const REPEAT_EVERY_MS: u64 = 50;
+
+fn ms_to_ticks(ms: u64) -> u32 {
+    (ms * 1_000_000).div_ceil(crate::process::TICK_NS).max(1) as u32
+}
 
 // TRB types.
 const TRB_NORMAL: u32 = 1;
@@ -629,7 +636,8 @@ impl Keyboard {
     fn tick(&mut self) {
         if let Some((key, ticks)) = self.held.as_mut() {
             *ticks += 1;
-            if *ticks > REPEAT_DELAY {
+            let delay = ms_to_ticks(REPEAT_DELAY_MS);
+            if *ticks > delay && (*ticks - delay) % ms_to_ticks(REPEAT_EVERY_MS) == 0 {
                 let code = usage_to_scancode(*key);
                 emit(code, true);
             }

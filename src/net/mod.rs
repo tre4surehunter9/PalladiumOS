@@ -221,9 +221,9 @@ pub fn poll_if_due() {
     }
 }
 
-/// Wait at boot (up to `ticks`) for DHCP to configure eth0.
-pub fn wait_for_dhcp(ticks: u64) -> Option<IpConfig> {
-    let until = crate::process::ticks() + ticks;
+/// Wait at boot (up to `ms` milliseconds) for DHCP to configure eth0.
+pub fn wait_for_dhcp(ms: u64) -> Option<IpConfig> {
+    let until = crate::process::ticks() + (ms * 1_000_000).div_ceil(crate::process::TICK_NS);
     while crate::process::ticks() < until {
         poll();
         if let Some(c) = config() {
