@@ -156,6 +156,7 @@ AddToMenu "Games" \
 + "Jewels%mini-bball.xpm%"          Exec xjewel
 + "Mahjongg%mini-xmahjongg.xpm%"    Exec xmahjongg
 + "DOS games%mini-cd.xpm%"          Popup DosGames
++ "NES games%mini-tetris.xpm%"      Popup NesGames
 + ""                                Nop
 + "Let it snow (xsnow)%mini-xsnow.xpm%" Exec xsnow
 + "Roaches (xroach)%mini-roach.xpm%" Exec xroach
@@ -166,6 +167,12 @@ AddToMenu "DosGames" \
   "WORDLOS (Wordle)%mini-happy.xpm%" Exec wordlos
 + "Floppy Bird%mini-happy.xpm%"     Exec floppybird
 + "DOSBox (a DOS prompt)%mini-term.xpm%" Exec dosbox
+
+DestroyMenu "NesGames"
+AddToMenu "NesGames" \
+  "Nova the Squirrel%mini-happy.xpm%" Exec nes /usr/share/games/nes/nova.nes
++ "Thwaite%mini-bomb.xpm%"          Exec nes /usr/share/games/nes/thwaite.nes
++ "Concentration Room%mini-cdlabel.xpm%" Exec nes /usr/share/games/nes/croom.nes
 
 DestroyMenu "SystemTools"
 AddToMenu "SystemTools" \

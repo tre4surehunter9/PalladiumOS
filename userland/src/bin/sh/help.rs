@@ -137,6 +137,7 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
             ("xjewel", "falling jewels: line up three"),
             ("xmahjongg", "mahjongg solitaire: take matching free tiles"),
             ("dosbox", "a PC with DOS in a window (C: is /usr/share/games/dos)"),
+            ("nes", "a NES emulator: nes /usr/share/games/nes/nova.nes (Z/X, Enter, arrows)"),
             ("wordlos", "WORDLOS, Wordle for DOS (in DOSBox)"),
             ("floppybird", "Floppy Bird, for DOS (in DOSBox; Space flaps)"),
             ("xsnow", "snow on the desktop (xroach: roaches under the windows)"),
