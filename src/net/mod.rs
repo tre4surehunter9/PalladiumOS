@@ -203,6 +203,36 @@ pub fn ipv6_addresses() -> alloc::vec::Vec<(u32, Ipv6Address, u8)> {
     out
 }
 
+/// eth0's IPv6 routes: (destination, prefix length, gateway): each of its
+/// networks on the link (no gateway), and those through a router (from
+/// its advertisements: the default route), for netlink (ip -6 route).
+pub fn ipv6_routes() -> alloc::vec::Vec<([u8; 16], u8, Option<[u8; 16]>)> {
+    let mut out = alloc::vec::Vec::new();
+    let mut guard = NET.lock();
+    let Some(eth) = guard.as_mut().and_then(|n| n.eth.as_mut()) else { return out };
+    for c in eth.iface.ip_addrs() {
+        if let IpCidr::Ipv6(c) = c {
+            // The network: the address with only its prefix's bits.
+            let mut net = c.address().octets();
+            for (i, b) in net.iter_mut().enumerate() {
+                let keep = (c.prefix_len() as usize).saturating_sub(i * 8).min(8);
+                *b &= !(0xffu16 >> keep) as u8;
+            }
+            if !out.iter().any(|(d, p, _)| *d == net && *p == c.prefix_len()) {
+                out.push((net, c.prefix_len(), None));
+            }
+        }
+    }
+    eth.iface.routes_mut().update(|routes| {
+        for r in routes.iter() {
+            if let (IpCidr::Ipv6(c), IpAddress::Ipv6(via)) = (r.cidr, r.via_router) {
+                out.push((c.address().octets(), c.prefix_len(), Some(via.octets())));
+            }
+        }
+    });
+    out
+}
+
 fn apply(eth: &mut Eth, cfg: IpConfig) {
     eth.iface.update_ip_addrs(|addrs| {
         // (Only the IPv4 address: IPv6's come from elsewhere.)

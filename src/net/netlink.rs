@@ -207,6 +207,30 @@ fn route_messages(out: &mut Vec<u8>, seq: u32, pid: u32, l: &Link) {
     route(out, Some((net, prefix)), None, RTPROT_KERNEL, 253); // scope link
 }
 
+/// An IPv6 route on eth0: to `dst`/`prefix`, on the link or through `gw`
+/// (learned from router advertisements: protocol "ra").
+fn route6_message(out: &mut Vec<u8>, seq: u32, pid: u32, dst: [u8; 16], prefix: u8, gw: Option<[u8; 16]>) {
+    const RT_TABLE_MAIN: u8 = 254;
+    const RTPROT_KERNEL: u8 = 2;
+    const RTPROT_RA: u8 = 9;
+    const RTN_UNICAST: u8 = 1;
+    let mut body = Vec::new();
+    // struct rtmsg: family, dst_len, src_len, tos, table, protocol, scope (universe), type, flags
+    let proto = if gw.is_some() { RTPROT_RA } else { RTPROT_KERNEL };
+    body.extend_from_slice(&[AF_INET6, prefix, 0, 0, RT_TABLE_MAIN, proto, 0, RTN_UNICAST]);
+    body.extend_from_slice(&0u32.to_le_bytes());
+    attr(&mut body, 15, &(RT_TABLE_MAIN as u32).to_le_bytes()); // RTA_TABLE
+    if prefix > 0 {
+        attr(&mut body, 1, &dst); // RTA_DST
+    }
+    if let Some(g) = gw {
+        attr(&mut body, 5, &g); // RTA_GATEWAY
+    }
+    attr(&mut body, 4, &2u32.to_le_bytes()); // RTA_OIF: eth0
+    attr(&mut body, 6, &(if gw.is_some() { 1024u32 } else { 256 }).to_le_bytes()); // RTA_PRIORITY (Linux's metrics)
+    message(out, RTM_NEWROUTE, NLM_F_MULTI, seq, pid, &body);
+}
+
 /// The interface ioctls on `req` (struct ifreq: a 16-byte name, then the
 /// answer). None: not one of these.
 pub fn interface_ioctl(request: u64, req: &mut [u8; 40]) -> Option<Result<(), i64>> {
@@ -319,9 +343,16 @@ impl NetlinkSocket {
                     }
                 }
             }
-            RTM_GETROUTE if ipv4 => {
-                for l in links() {
-                    route_messages(&mut out, seq, pid, &l);
+            RTM_GETROUTE if ipv4 || ipv6 => {
+                if ipv4 {
+                    for l in links() {
+                        route_messages(&mut out, seq, pid, &l);
+                    }
+                }
+                if ipv6 {
+                    for (dst, prefix, gw) in super::ipv6_routes() {
+                        route6_message(&mut out, seq, pid, dst, prefix, gw);
+                    }
                 }
             }
             _ if flags & NLM_F_DUMP == NLM_F_DUMP => {} // nothing to list (IPv6...)
