@@ -30,7 +30,7 @@
 ## Features
 * **Linux-compatible system calls** (the x86_64 ABI): ordinary Linux programs run unchanged, static or dynamically linked (with musl's or glibc's own dynamic linker), including C programs built with an unmodified [musl](https://musl.libc.org) libc
 * **More than one CPU core** (SMP): programs run on every core at once (`cargo run` gives QEMU up to 4). See [CPU Cores](#cpu-cores)
-* **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control, POSIX timers, `epoll`, `eventfd`, `timerfd`, `signalfd` and `inotify`, shared memory (`MAP_SHARED`, `/dev/shm`, POSIX semaphores between processes), and memory on demand (programs can reserve gigabytes and only use what they touch; programs bigger than the kernel's heap load piece by piece)
+* **Processes**: preemptive multitasking, `fork` (copy-on-write) / `execve` / `wait4`, threads (pthreads, `futex`), signals with handlers and job control, POSIX timers, `epoll`, `eventfd`, `timerfd`, `signalfd` and `inotify`, shared memory (`MAP_SHARED`, `/dev/shm`, POSIX semaphores between processes, System V `shmget`/`shmat`, which X's MIT-SHM uses), and memory on demand (programs can reserve gigabytes and only use what they touch; programs bigger than the kernel's heap load piece by piece)
 * **Hardware**: boots with BIOS or UEFI, starts every CPU core (ACPI, local APICs), a framebuffer console (1280x720 in QEMU), IDE and AHCI (SATA) disks, PS/2 and USB (xHCI) keyboards, a PS/2 mouse, the RTL8139 network card, an AC'97 sound card (OSS: `/dev/dsp`, `/dev/mixer`; see [Sound](#sound))
 * **Users and permissions**: login, passwords, POSIX file permissions, setuid programs, `su`
 * **Filesystems**: ext2 on a virtual disk (saved across reboots), a VFS with mounts, `/proc`, `/dev`, pipes, symbolic and hard links
@@ -131,6 +131,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 24 | sched_yield | yes |
 | 25 | mremap | answers like Linux (`ENOMEM`, or `EFAULT` outside memory); libc then allocates and copies |
 | 26 | msync | writes shared file mappings back to their files |
+| 29 / 30 / 31 / 67 | shmget, shmat, shmctl, shmdt | System V shared memory: segments by key or `IPC_PRIVATE`, kept while attached after `IPC_RMID`, inherited by `fork`, `SHM_RDONLY`, `SHM_RND`, `SHM_REMAP`, owner and mode, `IPC_STAT`/`IPC_SET`, and `ipcs`'s queries. X's MIT-SHM extension uses it, and Mesa drawing to X (glxgears: from 60 to about 100 frames a second) |
 | 32 | dup | yes |
 | 33 | dup2 | yes |
 | 34 | pause | yes |
@@ -392,7 +393,7 @@ startx evilwm       # or the X server and the programs you name
 * `vim`: Vim 9.2 with syntax colouring, in a terminal (no GUI: Vim dropped its Athena one).
 * `xterm`, X's own terminal (with a terminfo database for full-screen programs), besides rxvt.
 * rxvt runs the PalladiumOS shell. Its programs work as anywhere else (`rxvt -e busybox top` runs one in a window of its own).
-* **OpenGL**: Mesa 26.2 draws in software (softpipe, its renderer that needs no LLVM: OpenGL 3.3, GLSL 3.30) and shows the result with plain X calls (Mesa's "xlib" GLX), so it needs no GLX extension or graphics card driver. `glxgears` (about 60 frames a second under KVM) and `glxinfo`; programs link `target/ports/mesa/lib/libGL.a` (with its headers in `target/ports/mesa/include`).
+* **OpenGL**: Mesa 26.2 draws in software (softpipe, its renderer that needs no LLVM: OpenGL 3.3, GLSL 3.30) and shows the result with plain X calls (Mesa's "xlib" GLX), so it needs no GLX extension or graphics card driver. `glxgears` (about 100 frames a second under KVM, with X's shared memory images) and `glxinfo`; programs link `target/ports/mesa/lib/libGL.a` (with its headers in `target/ports/mesa/include`).
 * **Ctrl+Alt+Backspace** stops the X server and gives the console back. X's messages are in `/tmp/Xfbdev.log`.
 
 What the kernel provides for it: `/dev/fb0` (the Linux framebuffer ioctls, and `mmap` of the screen itself), the console's VT and keyboard ioctls (graphics mode, medium-raw keycodes, the keymap), a mouse (`/dev/input/mice`, `/dev/psaux`, with the IntelliMouse wheel protocol: a PS/2 mouse, USB mice, or a USB tablet), `SIGIO` on input, and Unix-domain sockets for X's clients. Fonts: X.Org's classic bitmap fonts in `/usr/share/fonts/X11` (`misc`: `fixed`, `6x13`, `7x14`, `9x15`...; `75dpi`: Adobe's Helvetica, Courier, Times, New Century Schoolbook), Unicode-encoded, which fvwm95 uses (Helvetica) and any X program can ask for (`rxvt -fn 9x15`), then libXfont's built-in `fixed` and `cursor`. `cargo run` gives the screen 1280x720; with the release images, add `-vga none -device VGA,edid=on,xres=1280,yres=720` to QEMU. X needs QEMU's window. `cargo run` gives QEMU a USB tablet, so the pointer simply follows yours over the window, without grabbing the mouse; with the release images, add `-device qemu-xhci -device usb-tablet` (or click into the window for the PS/2 mouse, and Ctrl+Alt+G lets it go again).

@@ -55,6 +55,10 @@ pub const SYS_READV: u64 = 19;
 pub const SYS_WRITEV: u64 = 20;
 pub const SYS_MREMAP: u64 = 25;
 pub const SYS_MSYNC: u64 = 26;
+pub const SYS_SHMGET: u64 = 29;
+pub const SYS_SHMAT: u64 = 30;
+pub const SYS_SHMCTL: u64 = 31;
+pub const SYS_SHMDT: u64 = 67;
 pub const SYS_MADVISE: u64 = 28;
 pub const SYS_FSYNC: u64 = 74;
 pub const SYS_FDATASYNC: u64 = 75;
@@ -602,6 +606,10 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_MREMAP => crate::mmap::sys_mremap(a1, a2),
         SYS_MADVISE => 0,
         SYS_MSYNC => crate::mmap::sys_msync(a1, a2),
+        SYS_SHMGET => crate::shm::sys_shmget(a1, a2, a3),
+        SYS_SHMAT => crate::shm::sys_shmat(a1, a2, a3),
+        SYS_SHMCTL => crate::shm::sys_shmctl(a1, a2, a3),
+        SYS_SHMDT => crate::shm::sys_shmdt(a1),
         // files
         SYS_PREAD64 => match unsafe { user_slice_mut(a2, a3) } {
             Some(buf) => vfs::sys_pread(a1, buf, a4),

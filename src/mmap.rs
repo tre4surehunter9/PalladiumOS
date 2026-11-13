@@ -478,6 +478,68 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
     }
 }
 
+/// SysV shared memory (shm.rs): a new segment's memory, pages on first touch.
+pub fn new_shared() -> Arc<SharedMem> {
+    SharedMem::anonymous()
+}
+
+/// shmat: map `mem` (`len` bytes, from its first page) at `addr`, or
+/// anywhere if 0. At a given address: only where nothing is mapped, unless
+/// `replace` (SHM_REMAP). Returns the address or -errno.
+pub fn attach(addr: u64, len: u64, prot: u64, replace: bool, mem: Arc<SharedMem>) -> i64 {
+    let len = page_up(len);
+    drain_deferred();
+    let mut maps = process::with_current_mm(|mm| core::mem::take(&mut mm.maps));
+    let result = (|| {
+        let start = if addr != 0 {
+            if !in_user_space(addr, addr + len) {
+                return Err(EINVAL);
+            }
+            if in_use(&maps, addr, addr + len) {
+                if !replace {
+                    return Err(EINVAL);
+                }
+                unmap_pages(addr, addr + len);
+                forget(&mut maps, addr, addr + len);
+            }
+            addr
+        } else {
+            find_free(&maps, 0, len).ok_or(ENOMEM)?
+        };
+        remember(&mut maps, Map { start, end: start + len, prot, shared: Some((mem, 0)) });
+        Ok(start)
+    })();
+    process::with_current_mm(|mm| mm.maps = maps);
+    match result {
+        Ok(start) => start as i64,
+        Err(e) => -e,
+    }
+}
+
+/// shmdt: unmap the attachment at `addr` (the mappings from there on of one
+/// SharedMem, starting at its first page). Returns that memory.
+pub fn detach(addr: u64) -> Result<Arc<SharedMem>, i64> {
+    let found = process::with_current_mm(|mm| {
+        let first = mm.maps.iter().find(|m| m.start == addr)?;
+        let (mem, index) = first.shared.as_ref()?;
+        if *index != 0 {
+            return None;
+        }
+        let mem = mem.clone();
+        // (mprotect may have split it into several mappings.)
+        let mut end = first.end;
+        while let Some(next) = mm.maps.iter().find(|m| {
+            m.start == end && m.shared.as_ref().is_some_and(|(n, i)| Arc::ptr_eq(n, &mem) && *i == (end - addr) / 4096)
+        }) {
+            end = next.end;
+        }
+        Some((mem, end))
+    });
+    let Some((mem, end)) = found else { return Err(-EINVAL) };
+    sys_munmap(addr, end - addr);
+    Ok(mem)
+}
+
 /// Map device memory at `phys` (the framebuffer): eagerly, uncounted.
 fn map_device(addr: u64, len: u64, prot: u64, flags: u64, phys: u64) -> i64 {
     let fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0;

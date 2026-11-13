@@ -177,6 +177,7 @@ pub mod perm;
 pub mod signal;
 pub mod fpu;
 pub mod mmap;
+pub mod shm;
 pub mod random;
 pub mod boot;
 pub mod net;

@@ -2012,6 +2012,21 @@ fn epoll_eventfd_and_big_programs() {
 }
 
 #[test_case]
+fn sysv_shared_memory_works() {
+    let Some(_) = c_program("test_sysvshm") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    // A first run grows kernel tables once; the second must give back all
+    // it took.
+    assert_eq!(sh("test_sysvshm > /tmp/sysvshm.out 2>&1"), 0, "{}", file("/tmp/sysvshm.out"));
+    let before = frames_in_use();
+    let status = sh("test_sysvshm > /tmp/sysvshm.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/sysvshm.out"));
+    assert!(file("/tmp/sysvshm.out").contains("all checks passed"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+    assert_eq!(frames_in_use(), before, "the segments were freed");
+}
+
+#[test_case]
 fn shared_memory_works() {
     let Some(_) = c_program("test_shm") else { return };
     let _ = filesystem::make_dir("/tmp");
@@ -2061,6 +2076,7 @@ fn soak() {
         ("test_threads", "test_threads"),
         ("test_pty", "test_pty"),
         ("test_shm", "test_shm"),
+        ("test_sysvshm", "test_sysvshm"),
         ("test_net", "test_net"),
         ("test_sound", "test_sound --no-timing"), // (QEMU's silent sound output: bursts under load)
     ];
