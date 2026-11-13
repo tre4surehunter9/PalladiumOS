@@ -138,6 +138,19 @@ const OS_RELEASE: &str = concat!(
     "HOME_URL=\"https://github.com/tre4surehunter9/PalladiumOS/\"\n",
 );
 
+/// fastfetch's system-wide config: PalladiumOS's logo (a periodic table
+/// tile for palladium) and fastfetch's own default modules, so with a
+/// desktop running it shows the display, window manager, terminal...
+/// (modules it finds nothing for are left out).
+const FASTFETCH_CONFIG: &str = r#"{
+  "logo": { "type": "file", "source": "/etc/xdg/fastfetch/palladium.txt",
+            "color": { "1": "cyan", "2": "white" } },
+  "modules": ["title", "separator", "os", "host", "kernel", "uptime", "packages", "shell", "display", "de", "wm",
+              "wmtheme", "theme", "icons", "font", "cursor", "terminal", "terminalfont", "cpu", "gpu", "memory",
+              "swap", "disk", "localip", "battery", "poweradapter", "locale", "break", "colors"]
+}
+"#;
+
 /// The PalladiumOS logo (for fastfetch): element 46 of the periodic table.
 const PALLADIUM_LOGO: &str = "\
 $1+------------------+
@@ -183,15 +196,6 @@ pub fn init_default_files() {
     let defaults = [
         // Names for addresses (libc reads this before asking DNS).
         ("/etc/hosts", "127.0.0.1\tlocalhost\n10.0.2.2\tgateway\n"),
-        // fastfetch's system-wide config: PalladiumOS's logo, a periodic
-        // table tile for palladium.
-        (
-            "/etc/xdg/fastfetch/config.jsonc",
-            "{\n  \"logo\": { \"type\": \"file\", \"source\": \"/etc/xdg/fastfetch/palladium.txt\",\n            \
-             \"color\": { \"1\": \"cyan\", \"2\": \"white\" } },\n  \
-             \"modules\": [\"title\", \"separator\", \"os\", \"host\", \"kernel\", \"uptime\", \"shell\", \
-             \"terminal\", \"cpu\", \"memory\", \"swap\", \"disk\", \"localip\", \"locale\", \"break\", \"colors\"]\n}\n",
-        ),
         ("/etc/xdg/fastfetch/palladium.txt", PALLADIUM_LOGO),
         // The machine's name, read at boot (`hostname NAME` changes it
         // until the next boot; write it here to keep it).
@@ -225,6 +229,9 @@ pub fn init_default_files() {
     // Written every boot: it describes the system, so an old disk gets the
     // current version.
     let _ = write_file("/etc/os-release", OS_RELEASE);
+    // fastfetch's system-wide config, also every boot (your own goes in
+    // ~/.config/fastfetch/config.jsonc).
+    let _ = write_file("/etc/xdg/fastfetch/config.jsonc", FASTFETCH_CONFIG);
     init_users();
     init_sudoers();
 }

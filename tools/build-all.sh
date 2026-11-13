@@ -17,7 +17,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-ALL_PORTS="lua dash fastfetch tcc micropython busybox dropbear fonts tinyx x11-clients fvwm95 x11-apps xterm links tcltk vim xfm cxx icewm sdl games doom dosbox nes sudo mpg123 vorbis sox mesa"
+ALL_PORTS="lua dash tcc micropython busybox dropbear fonts tinyx x11-clients fvwm95 x11-apps xterm links tcltk vim xfm fastfetch cxx icewm sdl games doom dosbox nes sudo mpg123 vorbis sox mesa"
 STAMPS=target/ports/stamps
 
 # What each port produces (relative to target/).
@@ -25,7 +25,7 @@ outputs() {
     case $1 in
         lua) echo "ports/bin/lua ports/bin/luac" ;;
         dash) echo "ports/bin/dash" ;;
-        fastfetch) echo "ports/bin/fastfetch" ;;
+        fastfetch) echo "sysroot/bin/fastfetch" ;;
         tcc) echo "ports/bin/tcc sysroot/lib/tcc/libtcc1.a sysroot/src/tinycc/tcc.c" ;;
         micropython) echo "ports/bin/micropython" ;;
         busybox) echo "ports/bin/busybox sysroot/bin/vi" ;;

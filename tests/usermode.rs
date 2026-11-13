@@ -1774,7 +1774,10 @@ fn dash_port_works() {
 
 #[test_case]
 fn fastfetch_port_works() {
-    let Some(_) = c_program("fastfetch") else { return };
+    if palladiumos::mounts::resolve("/usr/bin/fastfetch").is_err() {
+        palladiumos::serial_print!("(skipped: fastfetch not built) ");
+        return;
+    }
     filesystem::init_default_files(); // /etc/os-release and fastfetch's config
     let _ = filesystem::make_dir("/tmp");
     assert_eq!(sh("fastfetch --logo none > /tmp/ff 2>&1"), 0);
@@ -1786,6 +1789,15 @@ fn fastfetch_port_works() {
     // With the logo (from /etc/xdg/fastfetch/config.jsonc)
     assert_eq!(sh("fastfetch > /tmp/ff2 2>&1"), 0);
     assert!(file("/tmp/ff2").contains("Palladium"), "{}", file("/tmp/ff2"));
+    // With a desktop: the display (X's RandR) and the window manager.
+    let exists = |p: &str| palladiumos::mounts::resolve(p).is_ok();
+    if exists("/usr/bin/Xfbdev") && exists("/usr/bin/icewm") {
+        sh("Xfbdev :0 > /tmp/ffx.log 2>&1 & sleep 2; DISPLAY=:0 icewm > /dev/null 2>&1 & sleep 2; \
+            DISPLAY=:0 fastfetch --logo none > /tmp/ff3 2>&1; pkill icewm; sleep 1; pkill Xfbdev; wait");
+        let out = file("/tmp/ff3");
+        assert!(out.contains("Display: ") && out.contains("IceWM"), "{}", out);
+    }
+    assert!(only_kernel_left());
 }
 
 /// tcc needs the system disk (/usr) too.
