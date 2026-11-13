@@ -19,6 +19,11 @@ ApmFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
 InputFontName="-misc-fixed-medium-r-normal--13-*-*-*-*-*-iso8859-1"
 LabelFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
 # (The desktop: the theme's own background.)
+
+# Moving and resizing windows: an outline, and the window drawn once where
+# it's let go (redrawing it at each step tears in QEMU's window).
+OpaqueMove=0
+OpaqueResize=0
 # The taskbar: a clock in plain text (no LED digits), CPU and memory.
 TaskBarShowClock=1
 TaskBarClockLeds=0
