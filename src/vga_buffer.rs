@@ -42,8 +42,68 @@ impl ColorCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 struct ScreenChar {
+    /// What the cell shows: ASCII; a Latin-1 character (0xa1..=0xff, as
+    /// its code point); UNKNOWN; or BLOCK.
     ascii_character: u8,
     color_code: ColorCode,
+}
+
+/// A cell's character outside ASCII and Latin-1 (drawn as U+FFFD, the
+/// replacement character).
+const UNKNOWN: u8 = 0x80;
+/// A solid block (block elements and shades, and the console's old square).
+const BLOCK: u8 = 0x81;
+
+/// The cell for a character: Latin-1 as itself, box drawing, blocks and
+/// arrows approximated in ASCII (the font has none of them), the rest
+/// UNKNOWN.
+fn cell_for(c: u32) -> u8 {
+    match c {
+        0x20..=0x7e | 0xa1..=0xff => c as u8,
+        0xa0 => b' ', // (no-break space)
+        // Box drawing: ─ ━ ═ and dashes, │ ┃ ║, the corners and joints.
+        0x2500 | 0x2501 | 0x2504 | 0x2505 | 0x2508 | 0x2509 | 0x254c | 0x254d | 0x2550 | 0x2574 | 0x2576 | 0x2578 | 0x257a | 0x257c | 0x257e => b'-',
+        0x2502 | 0x2503 | 0x2506 | 0x2507 | 0x250a | 0x250b | 0x254e | 0x254f | 0x2551 | 0x2575 | 0x2577 | 0x2579 | 0x257b | 0x257d | 0x257f => b'|',
+        0x250c..=0x254b | 0x2552..=0x2570 => b'+',
+        0x2571 => b'/',
+        0x2572 => b'\\',
+        0x2573 => b'X',
+        // Block elements and shades: a block.
+        0x2580..=0x259f | 0x25a0 | 0x25aa | 0x25ac | 0x25ae => BLOCK,
+        // Triangles and arrows (sort markers, tree views).
+        0x25b2 | 0x25b3 | 0x25b4 | 0x25b5 | 0x2191 => b'^',
+        0x25bc | 0x25bd | 0x25be | 0x25bf | 0x2193 => b'v',
+        0x25b6 | 0x25b7 | 0x25b8 | 0x25b9 | 0x25ba | 0x25bb | 0x2192 | 0x2023 => b'>',
+        0x25c0 | 0x25c1 | 0x25c2 | 0x25c3 | 0x25c4 | 0x25c5 | 0x2190 => b'<',
+        0x2022 | 0x2219 | 0x25cf | 0x25cb | 0x25e6 => b'*', // bullets, circles
+        0x2018 | 0x2019 | 0x201a | 0x2032 => b'\'',
+        0x201c | 0x201d | 0x201e | 0x2033 => b'"',
+        0x2010..=0x2015 | 0x2212 => b'-', // dashes, minus
+        0x2026 => b'.', // ellipsis (one cell: what width it was given)
+        0x2713 | 0x2714 => b'v', // check marks
+        0x2717 | 0x2718 => b'x',
+        _ => UNKNOWN,
+    }
+}
+
+/// How many cells a character takes, as libc's wcwidth says (so full-
+/// screen programs line up): 0 for combining marks and zero-width
+/// characters, 2 for East Asian wide ones and emoji, else 1.
+fn cell_width(c: u32) -> usize {
+    match c {
+        0x0300..=0x036f | 0x0483..=0x0489 | 0x0591..=0x05bd | 0x0610..=0x061a | 0x064b..=0x065f | 0x200b..=0x200f
+        | 0x2028..=0x202e | 0x2060..=0x2064 | 0x20d0..=0x20ff | 0xfe00..=0xfe0f | 0xfe20..=0xfe2f | 0xfeff => 0,
+        0x1100..=0x115f | 0x231a | 0x231b | 0x2329 | 0x232a | 0x23e9..=0x23ec | 0x23f0 | 0x23f3 | 0x25fd | 0x25fe
+        | 0x2614 | 0x2615 | 0x2648..=0x2653 | 0x267f | 0x2693 | 0x26a1 | 0x26aa | 0x26ab | 0x26bd | 0x26be
+        | 0x26c4 | 0x26c5 | 0x26ce | 0x26d4 | 0x26ea | 0x26f2..=0x26f5 | 0x26fa | 0x26fd | 0x2705 | 0x270a
+        | 0x270b | 0x2728 | 0x274c | 0x274e | 0x2753..=0x2755 | 0x2757 | 0x2795..=0x2797 | 0x27b0 | 0x27bf
+        | 0x2b1b | 0x2b1c | 0x2b50 | 0x2b55 | 0x2e80..=0x303e | 0x3041..=0x33ff | 0x3400..=0x4dbf
+        | 0x4e00..=0x9fff | 0xa000..=0xa4cf | 0xa960..=0xa97f | 0xac00..=0xd7a3 | 0xf900..=0xfaff
+        | 0xfe10..=0xfe19 | 0xfe30..=0xfe6f | 0xff00..=0xff60 | 0xffe0..=0xffe6 | 0x1f004 | 0x1f0cf | 0x1f18e
+        | 0x1f191..=0x1f19a | 0x1f200..=0x1f251 | 0x1f300..=0x1f64f | 0x1f680..=0x1f6ff | 0x1f7e0..=0x1f7eb
+        | 0x1f90c..=0x1f9ff | 0x1fa70..=0x1faff | 0x20000..=0x2fffd | 0x30000..=0x3fffd => 2,
+        _ => 1,
+    }
 }
 
 /// The largest grid (cells); the real size depends on the framebuffer.
@@ -131,6 +191,10 @@ pub struct Writer {
     string_esc: bool,
     /// Where ESC 7 saved the cursor.
     saved_cursor: (usize, usize),
+    /// A UTF-8 character being read (its bits so far) and how many more
+    /// bytes it needs (they can come in the next write).
+    utf8: u32,
+    utf8_need: u8,
 }
 
 
@@ -175,13 +239,11 @@ impl Writer {
 
 impl Writer {
     pub fn write_string(&mut self, s: &str) {
-        for byte in s.bytes() {
-            match byte {
-                // printable ascii byte or new line
-                0x08 => self.write_byte(0x08),
-                0x20..=0x7e | b'\n' => self.write_byte(byte),
-                // not part of printable ascii range
-                _ => self.write_byte(0xfe),
+        for c in s.chars() {
+            match c {
+                '\u{8}' | '\n' | ' '..='~' => self.write_byte(c as u8),
+                _ if (c as u32) < 0x20 || c == '\u{7f}' => {}
+                _ => self.write_char(c as u32),
             }
 
         }
@@ -271,6 +333,8 @@ lazy_static! {
         in_string: false,
         string_esc: false,
         saved_cursor: (0, 0),
+        utf8: 0,
+        utf8_need: 0,
     });
 }
 
@@ -439,7 +503,8 @@ impl Writer {
         let bg = PALETTE[(ch.color_code.0 >> 4 & 0xf) as usize];
         let cursor = self.cursor_at == Some((row, col));
         let glyph = match ch.ascii_character {
-            c @ 0x21..=0x7e => get_raster(c as char, FontWeight::Regular, RasterHeight::Size16),
+            c @ (0x21..=0x7e | 0xa1..=0xff) => get_raster(c as char, FontWeight::Regular, RasterHeight::Size16),
+            UNKNOWN => get_raster('\u{fffd}', FontWeight::Regular, RasterHeight::Size16),
             _ => None,
         };
         let k = fb.scale;
@@ -454,9 +519,9 @@ impl Writer {
             for px_i in 0..CELL_W * k {
                 let x = px_i / k;
                 // How much foreground: the glyph's coverage, a solid block for
-                // 0xfe (the VGA font's square), full for the cursor's line.
+                // BLOCK, full for the cursor's line.
                 let mut on: u32 = match (ch.ascii_character, &glyph) {
-                    (0xfe, _) => if (2..CELL_W - 1).contains(&x) && (4..CELL_H - 3).contains(&y) { 255 } else { 0 },
+                    (BLOCK, _) => if (2..CELL_W - 1).contains(&x) && (4..CELL_H - 3).contains(&y) { 255 } else { 0 },
                     (_, Some(g)) => g.raster().get(y).and_then(|r| r.get(x)).copied().unwrap_or(0) as u32,
                     _ => 0,
                 };
@@ -813,6 +878,9 @@ impl Writer {
                 i = j + 1;
                 continue;
             }
+            if b < 0x80 {
+                self.utf8_broken(); // (a character cut short)
+            }
             match b {
                 b'\n' => self.new_line(),
                 b'\r' => self.column_position = 0,
@@ -827,8 +895,22 @@ impl Writer {
                 // Other control characters (bell, shift in/out...) aren't
                 // printed, as on a terminal.
                 0x00..=0x1f | 0x7f => {}
-                // (Not ASCII: one block per byte, the VGA font has no UTF-8.)
-                _ => self.write_byte(0xfe),
+                // UTF-8: a character's first byte, then its continuation
+                // bytes (a broken sequence shows as one UNKNOWN).
+                0x80..=0xbf if self.utf8_need > 0 => {
+                    self.utf8 = self.utf8 << 6 | (b & 0x3f) as u32;
+                    self.utf8_need -= 1;
+                    if self.utf8_need == 0 {
+                        self.write_char(self.utf8);
+                    }
+                }
+                0xc2..=0xdf => self.utf8_start(b as u32 & 0x1f, 1),
+                0xe0..=0xef => self.utf8_start(b as u32 & 0x0f, 2),
+                0xf0..=0xf4 => self.utf8_start(b as u32 & 0x07, 3),
+                _ => {
+                    self.utf8_broken();
+                    self.write_byte(UNKNOWN);
+                }
             }
             i += 1;
         }
@@ -836,6 +918,19 @@ impl Writer {
     }
 
     fn csi(&mut self, cmd: u8, params: &[u16]) {
+        // Past the last column (a full line written, the wrap not done yet:
+        // the next character does it), a sequence that works from the
+        // cursor first does the wrap: the cursor is at the start of the next
+        // line, as on the terminal TERM=ansi describes (automatic margins,
+        // no xenl). ncurses counts on it: after a full row it moves just the
+        // column (CSI G) for the next one. (Text itself keeps the deferred
+        // wrap: a line exactly as wide as the screen and its newline make
+        // one line, not two.)
+        if self.column_position >= self.width
+            && matches!(cmd, b'A' | b'B' | b'G' | b'`' | b'd' | b'a' | b'e' | b'@' | b'P' | b'X' | b'K' | b'b')
+        {
+            self.new_line();
+        }
         let arg = |i: usize, default: u16| -> usize {
             match params.get(i) {
                 Some(&0) | None => default as usize,
@@ -949,6 +1044,34 @@ impl Writer {
     }
 
     /// CSI @: insert `n` blanks at the cursor; the rest of the line moves right.
+    /// A UTF-8 character's first byte: `bits`, then `need` more bytes.
+    fn utf8_start(&mut self, bits: u32, need: u8) {
+        self.utf8_broken();
+        self.utf8 = bits;
+        self.utf8_need = need;
+    }
+
+    /// A UTF-8 character that didn't get all its bytes: shown as UNKNOWN.
+    fn utf8_broken(&mut self) {
+        if self.utf8_need > 0 {
+            self.utf8_need = 0;
+            self.write_byte(UNKNOWN);
+        }
+    }
+
+    /// Print a character outside ASCII: its cell (and a blank one after
+    /// it if it's wide; nothing if it takes no room).
+    fn write_char(&mut self, c: u32) {
+        match cell_width(c) {
+            0 => {}
+            1 => self.write_byte(cell_for(c)),
+            _ => {
+                self.write_byte(cell_for(c));
+                self.write_byte(b' ');
+            }
+        }
+    }
+
     fn insert_chars(&mut self, n: usize) {
         let (row, col) = (self.row_position, self.column_position.min(self.width - 1));
         for c in (col..self.width).rev() {

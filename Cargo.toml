@@ -16,7 +16,7 @@ features = ["spin_no_std"]
 # framebuffer). tools/runner builds the bootable disk images.
 bootloader_api = "0.11.17"
 # The console's font (pre-rendered Noto Sans Mono, 9x16).
-noto-sans-mono-bitmap = { version = "0.2", default-features = false, features = ["regular", "size_16", "unicode-basic-latin"] }
+noto-sans-mono-bitmap = { version = "0.2", default-features = false, features = ["regular", "size_16", "unicode-basic-latin", "unicode-latin-1-supplement", "unicode-specials"] }
 # TCP/IP (no_std): Ethernet, IPv4, ARP, DHCP, TCP, UDP, ICMP.
 smoltcp = { version = "0.14", default-features = false, features = [
     "alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "proto-dhcpv4",
