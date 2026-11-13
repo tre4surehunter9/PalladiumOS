@@ -100,6 +100,15 @@ cat > shim/X11/extensions/XTest.h <<'SHIM'
 #include <X11/extensions/xtestproto.h>
 SHIM
 CPPFLAGS="-I$PWD/shim $CPPFLAGS"
+# The pointer drawn by the graphics device where the kernel can (a virtio
+# GPU's hardware cursor): tools/ports/tinyx/hwcursor.c, in the card's table.
+cp "$ROOT/tools/ports/tinyx/hwcursor.c" kdrive/fbdev/palladium-cursor.c
+grep -q palladium-cursor.c kdrive/fbdev/fbdev.c || echo '#include "palladium-cursor.c"' >>kdrive/fbdev/fbdev.c
+grep -q fbdevInitCursor kdrive/fbdev/fbdev.h ||
+    sed -i 's|^#endif[[:space:]]*/\* _FBDEV_H_ \*/|Bool fbdevInitCursor(ScreenPtr pScreen);\nvoid fbdevEnableCursor(ScreenPtr pScreen);\nvoid fbdevDisableCursor(ScreenPtr pScreen);\nvoid fbdevFiniCursor(ScreenPtr pScreen);\n\n&|' kdrive/fbdev/fbdev.h
+sed -i 's|^\t0,\t\t\t/\* initCursor \*/|\tfbdevInitCursor,\t/* initCursor */|; s|^\t0,\t\t\t/\* enableCursor \*/|\tfbdevEnableCursor,\t/* enableCursor */|; s|^\t0,\t\t\t/\* disableCursor \*/|\tfbdevDisableCursor,\t/* disableCursor */|; s|^\t0,\t\t\t/\* finiCursor \*/|\tfbdevFiniCursor,\t/* finiCursor */|' kdrive/fbdev/fbinit.c
+grep -q fbdevInitCursor kdrive/fbdev/fbinit.c && grep -q fbdevInitCursor kdrive/fbdev/fbdev.h ||
+    { echo "TinyX's fbdev not patched for the hardware cursor" >&2; exit 1; }
 # (Its configure script is made here; xtrans's macros are in $X.)
 ACLOCAL_PATH="$X/share/aclocal" autoreconf -fi >autoreconf.log 2>&1 || { tail -20 autoreconf.log; exit 1; }
 # Old C (built as gnu17): INITARGS (an extension init's parameters) is

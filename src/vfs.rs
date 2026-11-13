@@ -3426,6 +3426,9 @@ fn fb_copy(offset: usize, buf: &mut [u8], write: bool) -> usize {
 /// The fbdev ioctls: the screen's description (fb_var_screeninfo,
 /// fb_fix_screeninfo), and the ones that change nothing here (the mode
 /// can't change, there's no palette with true color).
+const PAL_FBIO_CURSOR_IMAGE: u64 = 0x46F0;
+const PAL_FBIO_CURSOR_MOVE: u64 = 0x46F1;
+
 fn fb_ioctl(request: u64, arg: u64) -> i64 {
     const FBIOGET_VSCREENINFO: u64 = 0x4600;
     const FBIOPUT_VSCREENINFO: u64 = 0x4601;
@@ -3470,6 +3473,21 @@ fn fb_ioctl(request: u64, arg: u64) -> i64 {
             0
         }
         FBIOGETCMAP | FBIOPUTCMAP | FBIOPAN_DISPLAY | FBIOBLANK => 0,
+        // PalladiumOS's own: the pointer drawn by the graphics device (a
+        // virtio GPU's hardware cursor), for X (tools/ports/tinyx/hwcursor.c).
+        // Without one, ENOTTY: X draws the pointer itself.
+        PAL_FBIO_CURSOR_IMAGE => {
+            // struct: hot_x, hot_y, then 64 x 64 ARGB (premultiplied).
+            let Some(b) = (unsafe { crate::syscall::user_slice(arg, 8 + 64 * 64 * 4) }) else { return -EFAULT };
+            let word = |i: usize| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
+            if crate::virtio_gpu::cursor_image(word(0), word(1), &b[8..]) { 0 } else { -ENOTTY }
+        }
+        PAL_FBIO_CURSOR_MOVE => {
+            // struct: x, y, visible.
+            let Some(b) = (unsafe { crate::syscall::user_slice(arg, 12) }) else { return -EFAULT };
+            let word = |i: usize| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
+            if crate::virtio_gpu::cursor_move(word(0) as i32, word(1) as i32, word(2) != 0) { 0 } else { -ENOTTY }
+        }
         _ => -ENOTTY,
     }
 }

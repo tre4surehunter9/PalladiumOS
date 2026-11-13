@@ -2080,6 +2080,12 @@ fn the_screen_is_on_the_virtio_gpu() {
     assert!(palladiumos::vga_buffer::framebuffer_is_ram(), "its framebuffer is ordinary memory");
     let (_, len, w, h, stride, bpp, _) = palladiumos::vga_buffer::framebuffer().unwrap();
     assert!(w >= 640 && h >= 480 && stride == w && bpp == 4 && len >= w * h * 4, "{}x{}", w, h);
+    // Its hardware cursor: an image, shown, moved, hidden.
+    let arrow = alloc::vec![0xffu8; 64 * 64 * 4];
+    assert!(palladiumos::virtio_gpu::cursor_image(1, 1, &arrow), "a cursor image");
+    for (x, y, shown) in [(100, 100, true), (200, 150, true), (200, 150, false)] {
+        assert!(palladiumos::virtio_gpu::cursor_move(x, y, shown));
+    }
 }
 
 #[test_case]
