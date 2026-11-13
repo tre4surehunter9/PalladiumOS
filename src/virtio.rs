@@ -12,10 +12,14 @@
 //! Requests go through split virtqueues in memory: a table of descriptors
 //! (buffer address, length, flags, next), a ring where the driver lists
 //! the chains it made available, and one where the device lists those it
-//! used. Here a request is a chain of two descriptors, the command (read by
-//! the device) and room for its answer (written by it); `Queue::request`
-//! puts one in, rings the doorbell and waits for the answer: the commands
-//! are small and the device (QEMU) answers at once.
+//! used. Two ways to use one:
+//! - `Queue::request`: a chain of two descriptors, the command (read by the
+//!   device) and room for its answer (written by it), then waiting for the
+//!   answer: for small commands the device (QEMU) answers at once (virtio-
+//!   gpu's control).
+//! - `submit`, `kick`, `take_used`: buffers handed over one descriptor each
+//!   and taken back as the device uses them, for streams (virtio-net's
+//!   received and sent frames).
 
 use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};
@@ -68,6 +72,9 @@ pub struct Device {
     common: *mut u8,
     notify: *mut u8,
     notify_mul: u32,
+    /// The interrupt status register (reading it acknowledges the
+    /// interrupt: PCI's are level-triggered).
+    pub isr: *mut u8,
     /// Its own configuration (virtio-gpu's events, a disk's size...).
     pub config: *mut u8,
 }
@@ -104,7 +111,7 @@ impl Device {
         if cfg32(&pci, 0x04) >> 16 & 0x10 == 0 {
             return None;
         }
-        let (mut common, mut notify, mut notify_mul, mut config) = (None, None, 0, None);
+        let (mut common, mut notify, mut notify_mul, mut config, mut isr) = (None, None, 0, None, None);
         let mut at = cfg8(&pci, 0x34) & !3;
         let mut guard = 0;
         while at != 0 && guard < 48 {
@@ -124,6 +131,7 @@ impl Device {
                             notify = Some(regs);
                             notify_mul = cfg32(&pci, at + 16);
                         }
+                        3 => isr = Some(regs),
                         4 => config = Some(regs),
                         _ => {}
                     }
@@ -131,7 +139,14 @@ impl Device {
             }
             at = cfg8(&pci, at + 1) & !3;
         }
-        let dev = Device { pci, common: common?, notify: notify?, notify_mul, config: config.unwrap_or(core::ptr::null_mut()) };
+        let dev = Device {
+            pci,
+            common: common?,
+            notify: notify?,
+            notify_mul,
+            isr: isr.unwrap_or(core::ptr::null_mut()),
+            config: config.unwrap_or(core::ptr::null_mut()),
+        };
         // Reset, then: we see you, we can drive you.
         dev.w8(DEVICE_STATUS, 0);
         let mut tries = 0;
@@ -162,6 +177,15 @@ impl Device {
             return None;
         }
         Some((dev, agreed))
+    }
+
+    /// No interrupts from this device (its driver polls): the PCI
+    /// interrupt disabled. Else, a level-triggered line nobody acknowledges
+    /// stays raised, and on a line shared with another device (virtio-net's)
+    /// the CPU never gets out of the interrupt.
+    pub fn no_interrupts(&self) {
+        let cmd = pci::read32(self.pci.bus, self.pci.slot, self.pci.func, 0x04);
+        pci::write32(self.pci.bus, self.pci.slot, self.pci.func, 0x04, cmd | 1 << 10);
     }
 
     /// Everything's set up: the device may start.
@@ -228,6 +252,14 @@ impl Device {
         self.w32(off + 4, (v >> 32) as u32);
     }
 
+    /// A byte of the device's own configuration.
+    pub fn config8(&self, off: usize) -> u8 {
+        if self.config.is_null() {
+            return 0;
+        }
+        unsafe { read_volatile(self.config.add(off)) }
+    }
+
     /// A 32-bit field of the device's own configuration.
     pub fn config32(&self, off: usize) -> u32 {
         if self.config.is_null() {
@@ -269,6 +301,47 @@ impl Queue {
             write_volatile(d.add(12) as *mut u16, flags);
             write_volatile(d.add(14) as *mut u16, next);
         }
+    }
+
+    /// The number of descriptors (and buffers) the queue has.
+    pub fn size(&self) -> u16 {
+        self.size
+    }
+
+    /// Hand buffer `phys` (`len` bytes) to the device as descriptor `desc`
+    /// (written by the device if `writable`: received data; else read by
+    /// it). It comes back through take_used with that number.
+    pub fn submit(&mut self, desc: u16, phys: u64, len: u32, writable: bool) {
+        self.set_desc(desc, phys, len, if writable { DESC_WRITE } else { 0 }, 0);
+        unsafe {
+            let slot = self.next_avail % self.size;
+            write_volatile(self.avail.add(4 + 2 * slot as usize) as *mut u16, desc);
+            fence(Ordering::SeqCst);
+            self.next_avail = self.next_avail.wrapping_add(1);
+            write_volatile(self.avail.add(2) as *mut u16, self.next_avail);
+        }
+    }
+
+    /// Tell the device there's something new in the queue.
+    pub fn kick(&self) {
+        fence(Ordering::SeqCst);
+        unsafe { write_volatile(self.doorbell as *mut u16, self.index) };
+    }
+
+    /// A buffer the device has finished with: (descriptor, bytes it wrote).
+    pub fn take_used(&mut self) -> Option<(u16, u32)> {
+        let idx = unsafe { read_volatile(self.used.add(2) as *const u16) };
+        if idx == self.last_used {
+            return None;
+        }
+        fence(Ordering::SeqCst);
+        let slot = (self.last_used % self.size) as usize;
+        let (id, len) = unsafe {
+            let e = self.used.add(4 + 8 * slot);
+            (read_volatile(e as *const u32), read_volatile(e.add(4) as *const u32))
+        };
+        self.last_used = self.last_used.wrapping_add(1);
+        Some((id as u16, len))
     }
 
     /// Send `cmd` (at most a page) and wait for an answer of up to
@@ -313,8 +386,18 @@ impl Queue {
     }
 }
 
-/// The virtio PCI functions for device type `kind` (virtio 1.x numbers
-/// them 0x1040 + type: 16 GPU, 1 network, 2 block).
+/// The virtio PCI functions for device type `kind` (16 GPU, 1 network, 2
+/// block): modern-only devices are numbered 0x1040 + type; "transitional"
+/// ones, which also speak the old (legacy) interface and are what QEMU's
+/// virtio-net-pci and virtio-blk-pci are by default, 0x1000..0x103f with
+/// the type as their PCI subsystem ID. Both have the modern registers.
 pub fn find(kind: u16) -> Vec<PciDevice> {
-    pci::scan().into_iter().filter(|d| d.vendor == VENDOR && d.device == 0x1040 + kind).collect()
+    pci::scan()
+        .into_iter()
+        .filter(|d| {
+            d.vendor == VENDOR
+                && (d.device == 0x1040 + kind
+                    || ((0x1000..0x1040).contains(&d.device) && (cfg32(d, 0x2C) >> 16) as u16 == kind))
+        })
+        .collect()
 }

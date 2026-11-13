@@ -7,8 +7,6 @@
 //! address and a "start" register written with the length. Both buffers
 //! are physical memory the card reaches by DMA.
 
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::time::Instant;
 use x86_64::instructions::port::Port;
 
 use super::pci::PciDevice;
@@ -135,7 +133,7 @@ pub fn ack_interrupt(io: u16) {
 impl Rtl8139 {
 
     /// The next received frame, if any (copied out of the ring).
-    fn receive_frame(&mut self, out: &mut [u8; MTU + 4]) -> Option<usize> {
+    pub(super) fn receive_frame(&mut self, out: &mut [u8; MTU + 4]) -> Option<usize> {
         unsafe {
             if self.in8(CMD) & CMD_BUFFER_EMPTY != 0 {
                 return None;
@@ -163,7 +161,7 @@ impl Rtl8139 {
     }
 
     /// Send a frame (waits for a free slot).
-    fn send_frame(&mut self, frame: &[u8]) {
+    pub(super) fn send_frame(&mut self, frame: &[u8]) {
         let slot = self.tx_next;
         self.tx_next = (slot + 1) % TX_SLOTS;
         unsafe {
@@ -184,46 +182,3 @@ impl Rtl8139 {
     }
 }
 
-pub struct Rx {
-    frame: [u8; MTU + 4],
-    len: usize,
-}
-
-pub struct Tx<'a>(&'a mut Rtl8139);
-
-impl RxToken for Rx {
-    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
-        f(&self.frame[..self.len])
-    }
-}
-
-impl TxToken for Tx<'_> {
-    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let mut buf = [0u8; MTU];
-        let r = f(&mut buf[..len]);
-        self.0.send_frame(&buf[..len]);
-        r
-    }
-}
-
-impl Device for Rtl8139 {
-    type RxToken<'a> = Rx;
-    type TxToken<'a> = Tx<'a>;
-
-    fn receive(&mut self, _t: Instant) -> Option<(Rx, Tx<'_>)> {
-        let mut frame = [0u8; MTU + 4];
-        let len = self.receive_frame(&mut frame)?;
-        Some((Rx { frame, len }, Tx(self)))
-    }
-
-    fn transmit(&mut self, _t: Instant) -> Option<Tx<'_>> {
-        Some(Tx(self))
-    }
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        let mut caps = DeviceCapabilities::default();
-        caps.medium = Medium::Ethernet;
-        caps.max_transmission_unit = MTU;
-        caps
-    }
-}

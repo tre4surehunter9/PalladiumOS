@@ -11,8 +11,10 @@
 //! (for retransmissions), idle time and the card's interrupt all call
 //! `poll`, which moves packets and wakes processes waiting on sockets.
 
+pub mod card;
 pub mod pci;
 pub mod rtl8139;
+pub mod virtio_net;
 pub mod socket;
 pub mod unix;
 pub mod netlink;
@@ -26,7 +28,7 @@ use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr};
 use spin::Mutex;
 
-use rtl8139::Rtl8139;
+use card::Card;
 
 /// The wait key for processes blocked on a socket: every poll that changes
 /// anything wakes them, and they check their socket again.
@@ -42,7 +44,7 @@ pub struct IpConfig {
 
 pub struct Eth {
     pub iface: Interface,
-    pub dev: Rtl8139,
+    pub dev: Card,
     pub sockets: SocketSet<'static>,
     dhcp: SocketHandle,
     pub config: Option<IpConfig>,
@@ -67,6 +69,8 @@ static IRQ: AtomicBool = AtomicBool::new(false);
 /// The card's IRQ line (0 = none) and I/O ports, for the interrupt handler.
 static CARD_IRQ: AtomicU64 = AtomicU64::new(0);
 static CARD_IO: AtomicU64 = AtomicU64::new(0);
+/// A virtio-net card's ISR register (read to acknowledge its interrupt).
+static CARD_ISR: AtomicU64 = AtomicU64::new(0);
 /// Tick of the last timer-driven poll.
 static LAST_POLL: AtomicU64 = AtomicU64::new(0);
 
@@ -80,17 +84,16 @@ fn seed() -> u64 {
 
 /// Find the card and set up the interfaces. Returns the card's MAC address
 /// and IRQ, if there is one.
-pub fn init() -> Option<([u8; 6], u8)> {
-    let card = pci::scan().into_iter().find(|d| d.vendor == Rtl8139::VENDOR && d.device == Rtl8139::DEVICE);
-    let eth = card.and_then(|c| Rtl8139::new(&c)).map(|mut dev| {
-        let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(dev.mac)));
+pub fn init() -> Option<([u8; 6], u8, &'static str)> {
+    let eth = Card::find().map(|mut dev| {
+        let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(dev.mac())));
         config.random_seed = seed();
         // IPv6: a global address from the router's advertisements (SLAAC:
         // QEMU's user network sends them, prefix fec0::/64)...
         config.slaac = true;
         let mut iface = Interface::new(config, &mut dev, now());
         // ...and the link-local one, from the MAC address (EUI-64).
-        let link_local = link_local(dev.mac);
+        let link_local = link_local(dev.mac());
         iface.update_ip_addrs(|addrs| {
             let _ = addrs.push(IpCidr::Ipv6(Ipv6Cidr::new(link_local, 64)));
         });
@@ -98,11 +101,13 @@ pub fn init() -> Option<([u8; 6], u8)> {
         let dhcp = sockets.add(dhcpv4::Socket::new());
         Eth { iface, dev, sockets, dhcp, config: None }
     });
-    let found = eth.as_ref().map(|e| (e.dev.mac, e.dev.irq));
-    if let Some(e) = eth.as_ref() {
-        CARD_IO.store(e.dev.io_base() as u64, Ordering::SeqCst);
+    let found = eth.as_ref().map(|e| (e.dev.mac(), e.dev.irq(), e.dev.name()));
+    match eth.as_ref().map(|e| &e.dev) {
+        Some(Card::Rtl(r)) => CARD_IO.store(r.io_base() as u64, Ordering::SeqCst),
+        Some(Card::Virtio(v)) => CARD_ISR.store(v.isr, Ordering::SeqCst),
+        None => {}
     }
-    if let Some((_, irq)) = found {
+    if let Some((_, irq, _)) = found.filter(|f| f.1 != 0 && f.1 != 0xff) {
         CARD_IRQ.store(irq as u64, Ordering::SeqCst);
         crate::interrupts::unmask_irq(irq);
     }
@@ -126,6 +131,7 @@ pub fn interrupt() {
     if io != 0 {
         rtl8139::ack_interrupt(io);
     }
+    virtio_net::ack_interrupt(CARD_ISR.load(Ordering::SeqCst));
     IRQ.store(true, Ordering::SeqCst);
 }
 

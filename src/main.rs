@@ -189,10 +189,10 @@ extern crate alloc;
 fn start_network() {
     use palladiumos::{boot_info, boot_ok, boot_warn, net};
     match net::init() {
-        Some((mac, irq)) => {
+        Some((mac, irq, card)) => {
             boot_info!(
-                "eth0: RTL8139, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, IRQ {}",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], irq
+                "eth0: {}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, IRQ {}",
+                card, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], irq
             );
             // DHCP usually answers at once in QEMU; don't hold up the boot.
             match net::wait_for_dhcp(2200) {

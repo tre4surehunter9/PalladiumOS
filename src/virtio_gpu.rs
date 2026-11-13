@@ -123,6 +123,7 @@ impl Gpu {
 pub fn init() -> Option<(u32, u32)> {
     let pci = virtio::find(16).into_iter().next()?;
     let (dev, _) = Device::new(pci, 0)?;
+    dev.no_interrupts(); // (it's polled)
     let control = dev.queue(0, 64)?;
     dev.start();
     let cursor_queue = dev.queue(1, 16);

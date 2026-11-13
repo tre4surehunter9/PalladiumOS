@@ -44,7 +44,8 @@ const RUN_ARGS: &[&str] = &[
     "-drive", "format=raw,file=target/disk.img,index=1,media=disk",
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
     "-drive", "format=raw,file=target/alpine.img,index=3,media=disk",
-    "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:80", "-device", "rtl8139,netdev=net0",
+    // A virtio network card (much faster than an emulated RTL8139).
+    "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:80", "-device", "virtio-net-pci,netdev=net0",
     // A USB keyboard (QEMU sends the window's keys to it, not to PS/2),
     // and a USB tablet: the pointer follows yours in QEMU's window, without
     // it grabbing the mouse.
@@ -59,7 +60,8 @@ const TEST_ARGS: &[&str] = &[
     "-drive", "format=raw,file=target/test-disk.img,index=1,media=disk",
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
     "-drive", "format=raw,file=target/test-scratch.img,index=3,media=disk",
-    "-netdev", "user,id=net0", "-device", "rtl8139,netdev=net0",
+    // (The network card: test_extra_args.)
+    "-netdev", "user,id=net0",
     // A sound card whose sound goes nowhere (it still plays in real time).
     "-audiodev", "none,id=snd0", "-device", "AC97,audiodev=snd0",
 ];
@@ -271,24 +273,30 @@ fn find_ovmf() -> Option<PathBuf> {
     candidates.iter().map(PathBuf::from).find(|p| p.exists())
 }
 
-/// Extra QEMU arguments for some test kernels, by name.
-fn test_extra_args(kernel: &Path, test: bool) -> &'static [&'static str] {
+/// Extra QEMU arguments for some test kernels, by name, and each one's
+/// network card: virtio-net for the usermode tests (where the network is
+/// tested), the RTL8139 for the others.
+fn test_extra_args(kernel: &Path, test: bool) -> Vec<&'static str> {
     let name = kernel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if !test {
-        &[]
-    } else if name.starts_with("ahci-") {
-        &["-machine", "q35"] // q35 has its disks on AHCI
-    } else if name.starts_with("ext2-") {
-        &["-machine", "pc"] // its disks on IDE (it tests the IDE driver; KVM would pick q35)
-    } else if name.starts_with("smp-") {
-        &["-smp", "4"] // four CPU cores
-    } else if name.starts_with("usermode-") {
-        &["-vga", "none", "-device", "virtio-vga"] // the screen on a virtio GPU (X and /dev/fb0 tested there)
-    } else if name.starts_with("usb-") {
-        &["-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-tablet", "-device", "usb-mouse"]
-    } else {
-        &[]
+        return Vec::new();
     }
+    let mut args: Vec<&'static str> = if name.starts_with("ahci-") {
+        vec!["-machine", "q35"] // q35 has its disks on AHCI
+    } else if name.starts_with("ext2-") {
+        vec!["-machine", "pc"] // its disks on IDE (it tests the IDE driver; KVM would pick q35)
+    } else if name.starts_with("smp-") {
+        vec!["-smp", "4"] // four CPU cores
+    } else if name.starts_with("usermode-") {
+        vec!["-vga", "none", "-device", "virtio-vga"] // the screen on a virtio GPU (X and /dev/fb0 tested there)
+    } else if name.starts_with("usb-") {
+        vec!["-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-tablet", "-device", "usb-mouse"]
+    } else {
+        Vec::new()
+    };
+    let nic = if name.starts_with("usermode-") { "virtio-net-pci,netdev=net0" } else { "rtl8139,netdev=net0" };
+    args.extend(["-device", nic]);
+    args
 }
 
 /// KVM, when this machine has it (/dev/kvm usable) and PALLADIUM_NO_KVM

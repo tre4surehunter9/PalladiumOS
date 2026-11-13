@@ -239,7 +239,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 452 | fchmodat2 | `AT_SYMLINK_NOFOLLOW`, `AT_EMPTY_PATH` |
 
 ## Networking
-PalladiumOS has TCP/IP, IPv4 and IPv6: a driver for the RTL8139 network card (what `cargo run` gives QEMU, on its user network), the [smoltcp](https://github.com/smoltcp-rs/smoltcp) stack, and BSD sockets.
+PalladiumOS has TCP/IP, IPv4 and IPv6: drivers for virtio-net (what `cargo run` gives QEMU, on its user network: a 50 MB download from the host takes 0.6 s, 2.2 s on the RTL8139) and the RTL8139 network card, the [smoltcp](https://github.com/smoltcp-rs/smoltcp) stack, and BSD sockets.
 * `eth0` is configured by DHCP at boot (QEMU: 10.0.2.15, gateway 10.0.2.2, DNS 10.0.2.3, written to `/etc/resolv.conf`); `lo` (127.0.0.1, ::1) works with or without a card. `/etc/hosts` has `localhost`.
 * Sockets: `AF_INET` TCP, UDP and raw IP: `socket`, `bind`, `listen`, `accept`/`accept4`, `connect`, `send`/`recv`(`to`/`from`/`msg`), `shutdown`, `getsockname`/`getpeername`, `setsockopt`/`getsockopt` (`SO_ERROR`), `poll`, non-blocking mode (`SOCK_NONBLOCK`, `O_NONBLOCK`, `FIONBIO`, `MSG_DONTWAIT`), `EPIPE`/`SIGPIPE`. Closing with unread data resets the connection, as on Linux.
 * Raw sockets (`SOCK_RAW`, root only, as Linux needs `CAP_NET_RAW`) give packets with their IPv4 header; sent data gets a header from the kernel unless `IP_HDRINCL` is set (or the protocol is `IPPROTO_RAW`). PalladiumOS answers pings itself.

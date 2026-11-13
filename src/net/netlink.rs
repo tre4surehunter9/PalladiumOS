@@ -77,7 +77,7 @@ fn links() -> Vec<Link> {
         addr: Some(([127, 0, 0, 1], 8)),
         gateway: None,
     }];
-    let eth = super::NET.lock().as_ref().and_then(|n| n.eth.as_ref()).map(|e| (e.dev.mac, e.config));
+    let eth = super::NET.lock().as_ref().and_then(|n| n.eth.as_ref()).map(|e| (e.dev.mac(), e.config));
     if let Some((mac, config)) = eth {
         v.push(Link {
             index: 2,
