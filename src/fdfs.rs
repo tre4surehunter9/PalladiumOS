@@ -52,6 +52,8 @@ pub struct Fdfs {
     /// Hard links: extra names (directory, name) for file nodes. A node's
     /// own name is its first; these are the others.
     links: Vec<(usize, String, usize)>,
+    /// Its type in /proc/mounts ("memfs", or "sysfs" for /sys).
+    kind: &'static str,
 }
 
 impl Fdfs {
@@ -69,7 +71,13 @@ impl Fdfs {
             sockets: Default::default(),
             owners: Default::default(),
             links: Vec::new(),
+            kind: "memfs",
         }
+    }
+
+    /// An empty one named `kind` in /proc/mounts.
+    pub fn named(kind: &'static str) -> Self {
+        Fdfs { kind, ..Fdfs::new() }
     }
 
     /// Resolve an absolute path like "/documents/hello.txt" to a node index.
@@ -411,7 +419,7 @@ impl Fdfs {
 
 impl FileSystem for Fdfs {
     fn name(&self) -> &'static str {
-        "memfs"
+        self.kind
     }
 
     fn root(&self) -> Ino {

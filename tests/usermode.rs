@@ -53,6 +53,7 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
         palladiumos::filesystem::make_dir(dir).unwrap();
     }
     palladiumos::mounts::mount("/proc", alloc::boxed::Box::new(palladiumos::procfs::ProcFs));
+    palladiumos::block::mount_sys();
     palladiumos::mounts::mount("/dev", alloc::boxed::Box::new(palladiumos::devfs::DevFs));
     palladiumos::block::mount_shm();
     palladiumos::mouse::init();
@@ -2048,6 +2049,26 @@ fn nano_port_works() {
     // Its syntax files are where /etc/nanorc says.
     assert!(file("/etc/nanorc").contains("include \"/usr/share/nano/*.nanorc\""));
     assert!(palladiumos::mounts::resolve("/usr/share/nano/c.nanorc").is_ok());
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn htop_port_and_sys_cpus() {
+    // /sys/devices/system/cpu: a directory per core (htop counts them).
+    let _ = filesystem::make_dir("/tmp");
+    let n = palladiumos::smp::cores();
+    assert_eq!(sh("ls /sys/devices/system/cpu > /tmp/sys1; cat /sys/devices/system/cpu/online > /tmp/sys2"), 0);
+    for i in 0..n {
+        assert!(file("/tmp/sys1").contains(&alloc::format!("cpu{}/\n", i)), "{}", file("/tmp/sys1"));
+    }
+    let want = if n == 1 { alloc::string::String::from("0\n") } else { alloc::format!("0-{}\n", n - 1) };
+    assert_eq!(file("/tmp/sys2"), want);
+    if palladiumos::mounts::resolve("/usr/bin/htop").is_err() {
+        palladiumos::serial_print!("(htop skipped: not built) ");
+        return;
+    }
+    assert_eq!(sh("htop --version > /tmp/htop1 2>&1"), 0, "{}", file("/tmp/htop1"));
+    assert!(file("/tmp/htop1").starts_with("htop 3.5.3"), "{}", file("/tmp/htop1"));
     assert!(only_kernel_left(), "{:?}", process::list());
 }
 

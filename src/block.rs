@@ -466,6 +466,36 @@ pub fn mount_system_disk() -> bool {
 
 /// Mount an in-memory filesystem at /dev/shm, open to everyone (sticky,
 /// like /tmp): where shm_open and named semaphores keep their files.
+/// /sys: what programs read there about the machine, in memory. So far
+/// the CPU cores (/sys/devices/system/cpu: cpu0, cpu1... and online,
+/// possible, present: "0-N"), as htop and libc's get_nprocs_conf count
+/// them.
+pub fn mount_sys() {
+    use crate::filesystem::{make_dir, write_file};
+    let _ = make_dir("/sys");
+    crate::mounts::mount("/sys", Box::new(crate::fdfs::Fdfs::named("sysfs")));
+    let n = crate::smp::cores().max(1);
+    let cpu = "/sys/devices/system/cpu";
+    for dir in ["/sys/devices", "/sys/devices/system", cpu] {
+        let _ = make_dir(dir);
+    }
+    let range = if n == 1 { alloc::string::String::from("0\n") } else { alloc::format!("0-{}\n", n - 1) };
+    for file in ["online", "possible", "present"] {
+        let path = alloc::format!("{}/{}", cpu, file);
+        let _ = write_file(&path, &range);
+        let _ = crate::filesystem::chmod(&path, 0o444);
+    }
+    for i in 0..n {
+        let _ = make_dir(&alloc::format!("{}/cpu{}", cpu, i));
+        if i > 0 {
+            // (cpu0 can't be taken offline: Linux has no "online" for it.)
+            let path = alloc::format!("{}/cpu{}/online", cpu, i);
+            let _ = write_file(&path, "1\n");
+            let _ = crate::filesystem::chmod(&path, 0o444);
+        }
+    }
+}
+
 pub fn mount_shm() {
     crate::mounts::mount("/dev/shm", Box::new(crate::fdfs::Fdfs::new()));
     let _ = crate::filesystem::chmod("/dev/shm", 0o1777);

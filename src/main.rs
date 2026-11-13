@@ -266,6 +266,8 @@ fn mount_filesystems() {
     boot_ok!("Mounted /dev/shm (shared memory, in memory)");
     mounts::mount("/proc", Box::new(palladiumos::procfs::ProcFs));
     boot_ok!("Mounted /proc (processes and system information)");
+    block::mount_sys();
+    boot_ok!("Mounted /sys (the CPU cores, in memory)");
     if block::mount_system_disk() {
         boot_ok!("Mounted the system disk at /usr (read-only: C headers and libraries)");
     } else {
