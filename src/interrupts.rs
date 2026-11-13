@@ -83,12 +83,16 @@ extern "C" fn timer_dispatch(frame: &mut crate::syscall::SyscallFrame) {
     let took = crate::smp::lock_kernel();
     crate::process::sample_load_if_due();
     crate::xhci::poll(); // USB keyboards
-    crate::virtio_gpu::tick(); // the screen, on a virtio GPU
     // Preemptive multitasking: only when we interrupted a user program, never
     // in the middle of kernel code (which may hold locks). Signals (Ctrl-C,
     // alarms) reach busy programs here too.
     if crate::usermode::from_user(frame.cs) {
         crate::net::poll_if_due();
+        // The screen, on a virtio GPU. (Only when a program was
+        // interrupted: it allocates, and kernel code interrupted mid-
+        // allocation holds the heap's lock: waiting for it here, on the
+        // same core, would be forever.)
+        crate::virtio_gpu::tick();
         crate::process::preempt();
         crate::process::handle_signals(frame, None);
     } else if took {

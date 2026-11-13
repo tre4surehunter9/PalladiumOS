@@ -34,6 +34,11 @@ const SET_SCANOUT: u32 = 0x0103;
 const RESOURCE_FLUSH: u32 = 0x0104;
 const TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+const GET_EDID: u32 = 0x010A;
+const RESP_OK_EDID: u32 = 0x1104;
+/// VIRTIO_GPU_F_EDID: the device describes its screen as a monitor would
+/// (QEMU's edid=on, with xres x yres as the preferred mode).
+const F_EDID: u64 = 1 << 1;
 const UPDATE_CURSOR: u32 = 0x0300;
 const MOVE_CURSOR: u32 = 0x0301;
 const RESP_OK_NODATA: u32 = 0x1100;
@@ -119,27 +124,49 @@ impl Gpu {
     }
 }
 
+/// The preferred mode from the first scanout's EDID (its first detailed
+/// timing: the horizontal and vertical active pixels).
+fn preferred_mode(gpu: &mut Gpu) -> Option<(u32, u32)> {
+    let mut cmd = header(GET_EDID);
+    push32(&mut cmd, 0); // scanout 0
+    push32(&mut cmd, 0);
+    let resp = gpu.control.request(&cmd, 24 + 8 + 1024);
+    if answer_type(&resp) != RESP_OK_EDID {
+        return None;
+    }
+    let edid = &resp[32..];
+    if edid[..8] != [0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0] {
+        return None; // not an EDID
+    }
+    let d = &edid[54..72];
+    let w = d[2] as u32 | (d[4] as u32 & 0xf0) << 4;
+    let h = d[5] as u32 | (d[7] as u32 & 0xf0) << 4;
+    ((640..=7680).contains(&w) && (480..=4320).contains(&h)).then_some((w, h))
+}
+
 /// Find a virtio GPU and put the screen on it. Returns its size.
 pub fn init() -> Option<(u32, u32)> {
     let pci = virtio::find(16).into_iter().next()?;
-    let (dev, _) = Device::new(pci, 0)?;
+    let (dev, features) = Device::new(pci, F_EDID)?;
     dev.no_interrupts(); // (it's polled)
     let control = dev.queue(0, 64)?;
     dev.start();
     let cursor_queue = dev.queue(1, 16);
     let mut gpu = Gpu { dev, control, width: 0, height: 0, cursor: None };
 
-    // The screen's size: the one the firmware and the bootloader chose
-    // (from the card's EDID: QEMU's xres, yres), else the first scanout's.
-    // (Not the scanout's when there's a choice: with QEMU's window, it's
-    // the window's size at the moment, small at first.)
+    // The screen's size: the EDID's preferred mode (QEMU: xres x yres),
+    // else the firmware's, else the first scanout's. (Not the scanout's
+    // when there's a choice: with QEMU's window it's the window's size at
+    // the moment, small at first; the firmware may have taken that too.)
     let info = gpu.control.request(&header(GET_DISPLAY_INFO), 24 + 16 * 24);
     if answer_type(&info) != RESP_OK_DISPLAY_INFO {
         return None;
     }
     let field = |i: usize| u32::from_le_bytes(info[24 + i * 4..28 + i * 4].try_into().unwrap());
-    let (width, height) = match crate::vga_buffer::framebuffer() {
-        Some((_, _, w, h, ..)) if w >= 640 && h >= 480 => (w as u32, h as u32),
+    let edid = if features & F_EDID != 0 { preferred_mode(&mut gpu) } else { None };
+    let (width, height) = match (edid, crate::vga_buffer::framebuffer()) {
+        (Some(mode), _) => mode,
+        (None, Some((_, _, w, h, ..))) if w >= 640 && h >= 480 => (w as u32, h as u32),
         _ => (field(2), field(3)),
     };
     if width == 0 || height == 0 || width > 7680 || height > 4320 {
@@ -208,7 +235,10 @@ pub fn present() -> bool {
     GPU.lock().is_some()
 }
 
-/// From the timer: hand the screen over if it may have changed.
+/// Hand the screen over if it may have changed. Called from the timer when
+/// it interrupted a program, and from the idle loop; never from an
+/// interrupt of kernel code (it allocates: the interrupted code may hold
+/// the heap's lock).
 pub fn tick() {
     let now = crate::process::ticks();
     if now.saturating_sub(LAST_FLUSH.load(Ordering::Relaxed)) < FLUSH_TICKS {
