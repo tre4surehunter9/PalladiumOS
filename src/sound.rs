@@ -48,8 +48,11 @@ const GLOB_STA: u16 = 0x30;
 const CR_RUN: u8 = 0x01;
 const CR_RESET: u8 = 0x02;
 const SR_HALTED: u16 = 0x01;
-/// Buffer descriptor flag: when the buffers run out, play silence.
+/// Buffer descriptor flag, "buffer underrun policy": when the buffers run
+/// out, Intel's card sends zeros, QEMU's repeats the last sample.
 const BD_BUP: u16 = 1 << 14;
+/// Zero frames after a stream's end (see Dsp::drop): 64 at 48 kHz is 1.3 ms.
+const SILENT_TAIL_FRAMES: usize = 64;
 
 // OSS formats
 pub const AFMT_U8: u32 = 0x08;
@@ -284,6 +287,18 @@ pub struct Dsp;
 impl Drop for Dsp {
     fn drop(&mut self) {
         let mut s = SOUND.lock();
+        // The stream ends on silence: a short run of zero frames after the
+        // program's last sound (as room allows). Else the card stops on
+        // whatever the last sample was, a jump to nothing: a click. (And
+        // QEMU's card repeats the last sample when it runs out, where
+        // Intel's sends zeros: this way it's 0 either way.)
+        if s.running || s.fill > 0 {
+            for _ in 0..SILENT_TAIL_FRAMES {
+                if !s.put_frame(0, 0) {
+                    break;
+                }
+            }
+        }
         // What's left in the buffer being filled: hand it over if there's
         // room (else it's dropped; close doesn't wait).
         if s.fill > 0 && s.queued() + 1 < BUFS {
