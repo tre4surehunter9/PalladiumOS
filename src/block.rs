@@ -461,11 +461,16 @@ pub fn mount_system_disk() -> bool {
     let _ = crate::filesystem::make_dir("/usr");
     crate::mounts::mount("/usr", Box::new(fs));
     crate::mounts::set_device("/usr", &name);
+    // Programs on it that scripts name by a /bin path (#!/bin/bash).
+    for prog in ["bash"] {
+        let (target, link) = (alloc::format!("/usr/bin/{}", prog), alloc::format!("/bin/{}", prog));
+        if crate::mounts::resolve(&target).is_ok() && crate::mounts::lstat(&link).is_err() {
+            let _ = crate::mounts::symlink(&target, &link);
+        }
+    }
     true
 }
 
-/// Mount an in-memory filesystem at /dev/shm, open to everyone (sticky,
-/// like /tmp): where shm_open and named semaphores keep their files.
 /// The host's shared folder (virtio-9p), mounted at /host. Returns its
 /// mount tag.
 pub fn mount_host() -> Option<alloc::string::String> {
@@ -506,6 +511,8 @@ pub fn mount_sys() {
     }
 }
 
+/// Mount an in-memory filesystem at /dev/shm, open to everyone (sticky,
+/// like /tmp): where shm_open and named semaphores keep their files.
 pub fn mount_shm() {
     crate::mounts::mount("/dev/shm", Box::new(crate::fdfs::Fdfs::new()));
     let _ = crate::filesystem::chmod("/dev/shm", 0o1777);

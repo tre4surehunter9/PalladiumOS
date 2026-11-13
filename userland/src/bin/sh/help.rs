@@ -183,6 +183,7 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
             ("lua", "Lua 5.4"),
             ("luac", "Lua compiler"),
             ("micropython", "MicroPython (Python 3)"),
+            ("bash", "GNU bash, the shell most scripts are written for"),
             ("dash", "the Debian Almquist shell (POSIX sh)"),
             ("sh", "this shell"),
             ("busybox", "400 more tools (see help busybox)"),

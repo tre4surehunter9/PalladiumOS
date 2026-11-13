@@ -49,9 +49,10 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     let _ = palladiumos::virtio_input::init();
     let _ = palladiumos::block::mount_host();
     palladiumos::net::init(); // loopback, and eth0 if QEMU has a card
+    palladiumos::programs::install();
+    // (After /bin is there: it links /bin/bash to /usr/bin/bash.)
     palladiumos::block::mount_system_disk(); // /usr: tcc's headers and libraries, if built
     palladiumos::block::mount_alpine_disk(); // /alpine: a 64 MiB scratch disk (target/test-scratch.img)
-    palladiumos::programs::install();
     for dir in ["/proc", "/dev"] {
         palladiumos::filesystem::make_dir(dir).unwrap();
     }
@@ -2105,6 +2106,31 @@ fn the_hosts_shared_folder_is_at_host() {
     filesystem::write_bytes("/host/big.bin", &big).unwrap();
     assert_eq!(filesystem::read_bytes("/host/big.bin").unwrap(), big);
     assert_eq!(sh("rm /host/big.bin"), 0);
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn bash_port_works() {
+    if palladiumos::mounts::resolve("/usr/bin/bash").is_err() {
+        palladiumos::serial_print!("(skipped: bash not built) ");
+        return;
+    }
+    // A #!/bin/bash script (the kernel links /bin/bash to the system disk's).
+    let _ = filesystem::make_dir("/tmp");
+    let script = "#!/bin/bash\n\
+        arr=(one two three)\n\
+        echo \"${#arr[@]} items: ${arr[*]^^}\"\n\
+        [[ abc == a* ]] && echo glob-ok\n\
+        echo {1..5}\n\
+        declare -A m=([k]=v)\n\
+        echo map:${m[k]}\n\
+        f() { local x=$1; echo $((x * 2)); }\n\
+        echo $(f 21)\n\
+        while read -r line; do echo \"read:$line\"; done <<< \"here-string\"\n\
+        echo ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}\n";
+    filesystem::write_file("/tmp/t.sh", script).unwrap();
+    assert_eq!(sh("chmod +x /tmp/t.sh && /tmp/t.sh > /tmp/bash1 2>&1"), 0, "{}", file("/tmp/bash1"));
+    assert_eq!(file("/tmp/bash1"), "3 items: ONE TWO THREE\nglob-ok\n1 2 3 4 5\nmap:v\n42\nread:here-string\n5.3\n");
     assert!(only_kernel_left(), "{:?}", process::list());
 }
 
