@@ -42,6 +42,9 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     // More CPU cores, if QEMU has them (PALLADIUM_SMP=4 cargo test).
     palladiumos::smp::init(boot_info.rsdp_addr.into_option());
     palladiumos::rtc::init(); // the real date, as at boot (CLOCK_REALTIME)
+    // The screen on the virtio GPU, as at boot (the runner gives this
+    // kernel virtio-vga): X and /dev/fb0 are tested on it.
+    let _ = palladiumos::virtio_gpu::init();
     palladiumos::net::init(); // loopback, and eth0 if QEMU has a card
     palladiumos::block::mount_system_disk(); // /usr: tcc's headers and libraries, if built
     palladiumos::block::mount_alpine_disk(); // /alpine: a 64 MiB scratch disk (target/test-scratch.img)
@@ -2068,6 +2071,15 @@ fn shared_memory_works() {
     assert!(file("/tmp/shm.out").contains("all checks passed"));
     assert!(only_kernel_left(), "{:?}", process::list());
     assert_eq!(frames_in_use(), before, "shared memory was freed");
+}
+
+#[test_case]
+fn the_screen_is_on_the_virtio_gpu() {
+    // (The runner gives this kernel -device virtio-vga.)
+    assert!(palladiumos::virtio_gpu::present(), "the virtio GPU took the screen");
+    assert!(palladiumos::vga_buffer::framebuffer_is_ram(), "its framebuffer is ordinary memory");
+    let (_, len, w, h, stride, bpp, _) = palladiumos::vga_buffer::framebuffer().unwrap();
+    assert!(w >= 640 && h >= 480 && stride == w && bpp == 4 && len >= w * h * 4, "{}x{}", w, h);
 }
 
 #[test_case]

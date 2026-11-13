@@ -146,6 +146,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod serial;
 pub mod vga_buffer;
+pub mod virtio;
+pub mod virtio_gpu;
 pub mod interrupts;
 pub mod gdt;
 pub mod memory;

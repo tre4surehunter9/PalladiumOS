@@ -61,6 +61,19 @@ use noto_sans_mono_bitmap::{get_raster, FontWeight, RasterHeight};
 type Grid = [[ScreenChar; MAX_WIDTH]; MAX_HEIGHT];
 static mut GRID: Grid = [[ScreenChar { ascii_character: b' ', color_code: ColorCode(0x0e) }; MAX_WIDTH]; MAX_HEIGHT];
 
+/// Something was drawn into the framebuffer since the last take_dirty()
+/// (a virtio GPU is only shown what it's told changed).
+static DIRTY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn mark_dirty() {
+    DIRTY.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Has the console drawn anything since the last call?
+pub fn take_dirty() -> bool {
+    DIRTY.swap(false, core::sync::atomic::Ordering::Relaxed)
+}
+
 /// The framebuffer, as the bootloader described it.
 struct Fb {
     buf: *mut u8,
@@ -74,6 +87,9 @@ struct Fb {
     /// Each font pixel is drawn as scale x scale pixels (big screens, like
     /// UEFI's 2560x1600, get bigger text instead of a corner of tiny text).
     scale: usize,
+    /// Ordinary memory (a virtio GPU's), not video memory: programs map it
+    /// cached.
+    ram: bool,
 }
 
 // (Only touched with the WRITER lock held.)
@@ -208,6 +224,7 @@ impl Writer {
             if used <= fb.len {
                 // SAFETY: inside the framebuffer; copy handles the overlap.
                 unsafe { core::ptr::copy(fb.buf.add(row_bytes), fb.buf, used - row_bytes) };
+                mark_dirty();
             }
         }
         self.clear_row(self.height - 1);
@@ -430,6 +447,7 @@ impl Writer {
         if x0 + CELL_W * k > fb.width || y0 + CELL_H * k > fb.height {
             return;
         }
+        mark_dirty();
         for py in 0..CELL_H * k {
             let y = py / k;
             let line = unsafe { fb.buf.add(((y0 + py) * fb.stride + x0) * fb.bpp) };
@@ -474,6 +492,7 @@ impl Writer {
         self.fb = Some(fb);
         self.cursor_at = None;
         self.clear_screen_inner();
+        mark_dirty();
     }
 }
 
@@ -493,8 +512,50 @@ pub fn init_framebuffer(fb: bootloader_api::info::FrameBuffer) {
         gray: matches!(info.pixel_format, PixelFormat::U8),
         // 1x up to about 1280x720, 2x from 2560x1440, and so on.
         scale: (info.width / 1280).min(info.height / 720).max(1),
+        ram: false,
     };
     x86_64::instructions::interrupts::without_interrupts(|| WRITER.lock().use_framebuffer(fb));
+}
+
+/// Move the console to another framebuffer (a virtio GPU's: `width` x
+/// `height`, 4 bytes a pixel, B G R x), keeping its text: it's drawn again
+/// there.
+pub fn switch_framebuffer(buf: *mut u8, len: usize, width: usize, height: usize) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut w = WRITER.lock();
+        let fb = Fb {
+            buf,
+            len,
+            width,
+            height,
+            stride: width,
+            bpp: 4,
+            bgr: true,
+            gray: false,
+            scale: (width / 1280).min(height / 720).max(1),
+            ram: true,
+        };
+        let (rows, cols) = (w.height, w.width);
+        w.width = (width / (CELL_W * fb.scale)).clamp(1, MAX_WIDTH);
+        w.height = (height / (CELL_H * fb.scale)).clamp(1, MAX_HEIGHT);
+        unsafe { core::ptr::write_bytes(buf, 0, len) };
+        w.fb = Some(fb);
+        w.cursor_at = None;
+        if w.row_position >= w.height {
+            w.row_position = w.height - 1;
+        }
+        for row in 0..w.height.min(rows) {
+            for col in 0..w.width.min(cols) {
+                w.draw(row, col);
+            }
+        }
+        mark_dirty();
+    });
+}
+
+/// Is the framebuffer ordinary memory (map it cached), not video memory?
+pub fn framebuffer_is_ram() -> bool {
+    x86_64::instructions::interrupts::without_interrupts(|| WRITER.lock().fb.as_ref().is_some_and(|fb| fb.ram))
 }
 
 /// A program has the screen (KDSETMODE KD_GRAPHICS, an X server): the
@@ -518,6 +579,7 @@ pub fn set_graphics(on: bool, owner: u64) {
             let mut w = WRITER.lock();
             if let Some(fb) = &w.fb {
                 unsafe { core::ptr::write_bytes(fb.buf, 0, fb.len) };
+                mark_dirty();
             }
             for row in 0..w.height {
                 for col in 0..w.width {

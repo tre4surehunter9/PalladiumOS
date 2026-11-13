@@ -36,9 +36,11 @@ const RUN_ARGS: &[&str] = &[
     // 1 GiB of memory: Node.js and other big programs don't fit in
     // QEMU's default 128 MiB.
     "-m", "1G",
-    // The screen tells the firmware it prefers 1280x720 (EDID), and UEFI
-    // booting keeps the firmware's mode: 720p, as with BIOS.
-    "-vga", "none", "-device", "VGA,edid=on,xres=1280,yres=720",
+    // The screen: a virtio GPU (virtio-vga: VGA-compatible for the firmware
+    // and the boot, then PalladiumOS puts the screen on virtio-gpu). It
+    // tells the firmware it prefers 1280x720 (EDID), and UEFI booting keeps
+    // the firmware's mode: 720p, as with BIOS.
+    "-vga", "none", "-device", "virtio-vga,edid=on,xres=1280,yres=720",
     "-drive", "format=raw,file=target/disk.img,index=1,media=disk",
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
     "-drive", "format=raw,file=target/alpine.img,index=3,media=disk",
@@ -280,6 +282,8 @@ fn test_extra_args(kernel: &Path, test: bool) -> &'static [&'static str] {
         &["-machine", "pc"] // its disks on IDE (it tests the IDE driver; KVM would pick q35)
     } else if name.starts_with("smp-") {
         &["-smp", "4"] // four CPU cores
+    } else if name.starts_with("usermode-") {
+        &["-vga", "none", "-device", "virtio-vga"] // the screen on a virtio GPU (X and /dev/fb0 tested there)
     } else if name.starts_with("usb-") {
         &["-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-tablet", "-device", "usb-mouse"]
     } else {

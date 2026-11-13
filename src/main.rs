@@ -127,6 +127,9 @@ extern crate alloc;
         );
         palladiumos::rtc::init();
         boot_ok!("Read the real-time clock: {}", palladiumos::boot::format_date(palladiumos::rtc::now()));
+        if let Some((w, h)) = palladiumos::virtio_gpu::init() {
+            boot_ok!("Found a virtio GPU: the screen is on it ({}x{}, /dev/fb0)", w, h);
+        }
         // Keys pressed before anything reads the keyboard must not be lost.
         palladiumos::task::keyboard::init_queue();
         boot_ok!("Started the keyboard");

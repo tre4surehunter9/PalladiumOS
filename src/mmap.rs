@@ -552,7 +552,10 @@ pub fn detach(addr: u64) -> Result<Arc<SharedMem>, i64> {
 /// Map device memory at `phys` (the framebuffer): eagerly, uncounted.
 fn map_device(addr: u64, len: u64, prot: u64, flags: u64, phys: u64) -> i64 {
     let fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0;
-    let f = flags_for(prot).unwrap_or(F::PRESENT) | memory::DEVICE | F::NO_CACHE | F::WRITE_THROUGH;
+    // Video memory uncached; a virtio GPU's framebuffer is ordinary memory
+    // (the device copies it when told), so cached: much faster to draw in.
+    let caching = if crate::vga_buffer::framebuffer_is_ram() { F::empty() } else { F::NO_CACHE | F::WRITE_THROUGH };
+    let f = flags_for(prot).unwrap_or(F::PRESENT) | memory::DEVICE | caching;
     let mut maps = process::with_current_mm(|mm| core::mem::take(&mut mm.maps));
     let result = (|| {
         let start = if fixed {
