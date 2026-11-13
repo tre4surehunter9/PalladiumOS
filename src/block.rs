@@ -281,7 +281,9 @@ pub fn disk(index: u8) -> Option<Box<dyn BlockDevice>> {
     };
     match ide {
         Some(d) => Some(Box::new(d)),
-        None => crate::ahci::boxed(index),
+        // Then AHCI port N; then virtio disks, after the boot disk (N >= 1:
+        // the (N-1)th).
+        None => crate::ahci::boxed(index).or_else(|| index.checked_sub(1).and_then(|n| crate::virtio_blk::disk(n as usize))),
     }
 }
 
@@ -377,7 +379,11 @@ fn disk_named(index: u8) -> Option<(Box<dyn BlockDevice>, String)> {
     };
     match ide {
         Some(d) => Some((Box::new(d), disk_name(index, true))),
-        None => crate::ahci::boxed(index).map(|d| (d, disk_name(index, false))),
+        None => crate::ahci::boxed(index).map(|d| (d, disk_name(index, false))).or_else(|| {
+            // A virtio disk: /dev/vda, vdb...
+            let n = index.checked_sub(1)?;
+            crate::virtio_blk::disk(n as usize).map(|d| (d, alloc::format!("/dev/vd{}", (b'a' + n) as char)))
+        }),
     }
 }
 

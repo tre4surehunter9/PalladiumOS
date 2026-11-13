@@ -41,9 +41,11 @@ const RUN_ARGS: &[&str] = &[
     // tells the firmware it prefers 1280x720 (EDID), and UEFI booting keeps
     // the firmware's mode: 720p, as with BIOS.
     "-vga", "none", "-device", "virtio-vga,edid=on,xres=1280,yres=720",
-    "-drive", "format=raw,file=target/disk.img,index=1,media=disk",
-    "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
-    "-drive", "format=raw,file=target/alpine.img,index=3,media=disk",
+    // The data, system and Alpine disks as virtio disks (in this order:
+    // PalladiumOS numbers them so; much faster than IDE or AHCI).
+    "-drive", "format=raw,file=target/disk.img,if=virtio",
+    "-drive", "format=raw,file=target/usr.img,if=virtio",
+    "-drive", "format=raw,file=target/alpine.img,if=virtio",
     // A virtio network card (much faster than an emulated RTL8139).
     "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:80", "-device", "virtio-net-pci,netdev=net0",
     // A USB keyboard (QEMU sends the window's keys to it, not to PS/2),
@@ -57,10 +59,7 @@ const RUN_ARGS: &[&str] = &[
 /// QEMU's arguments for test kernels.
 const TEST_ARGS: &[&str] = &[
     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio", "-display", "none",
-    "-drive", "format=raw,file=target/test-disk.img,index=1,media=disk",
-    "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
-    "-drive", "format=raw,file=target/test-scratch.img,index=3,media=disk",
-    // (The network card: test_extra_args.)
+    // (The disks and the network card: test_extra_args.)
     "-netdev", "user,id=net0",
     // A sound card whose sound goes nowhere (it still plays in real time).
     "-audiodev", "none,id=snd0", "-device", "AC97,audiodev=snd0",
@@ -294,7 +293,26 @@ fn test_extra_args(kernel: &Path, test: bool) -> Vec<&'static str> {
     } else {
         Vec::new()
     };
-    let nic = if name.starts_with("usermode-") { "virtio-net-pci,netdev=net0" } else { "rtl8139,netdev=net0" };
+    // The usermode tests on virtio disks and a virtio network card; the
+    // others on IDE/AHCI disks (they test those drivers) and the RTL8139.
+    let virtio = name.starts_with("usermode-");
+    let disks: [&'static str; 3] = if virtio {
+        [
+            "format=raw,file=target/test-disk.img,if=virtio",
+            "format=raw,file=target/usr.img,if=virtio",
+            "format=raw,file=target/test-scratch.img,if=virtio",
+        ]
+    } else {
+        [
+            "format=raw,file=target/test-disk.img,index=1,media=disk",
+            "format=raw,file=target/usr.img,index=2,media=disk",
+            "format=raw,file=target/test-scratch.img,index=3,media=disk",
+        ]
+    };
+    for d in disks {
+        args.extend(["-drive", d]);
+    }
+    let nic = if virtio { "virtio-net-pci,netdev=net0" } else { "rtl8139,netdev=net0" };
     args.extend(["-device", nic]);
     args
 }

@@ -344,6 +344,46 @@ impl Queue {
         Some((id as u16, len))
     }
 
+    /// The queue's own request page: (physical, kernel address), for small
+    /// structures a driver sends with request_chain.
+    pub fn scratch(&self) -> (u64, *mut u8) {
+        self.req
+    }
+
+    /// Hand the device a chain of buffers (physical address, length,
+    /// written by the device?) and wait until it has used it. False if it
+    /// didn't in time.
+    pub fn request_chain(&mut self, parts: &[(u64, u32, bool)]) -> bool {
+        let n = parts.len().min(self.size as usize);
+        for (i, &(phys, len, writable)) in parts.iter().take(n).enumerate() {
+            let last = i + 1 == n;
+            let flags = if writable { DESC_WRITE } else { 0 } | if last { 0 } else { DESC_NEXT };
+            self.set_desc(i as u16, phys, len, flags, if last { 0 } else { i as u16 + 1 });
+        }
+        unsafe {
+            let slot = self.next_avail % self.size;
+            write_volatile(self.avail.add(4 + 2 * slot as usize) as *mut u16, 0);
+            fence(Ordering::SeqCst);
+            self.next_avail = self.next_avail.wrapping_add(1);
+            write_volatile(self.avail.add(2) as *mut u16, self.next_avail);
+        }
+        self.kick();
+        let mut spins = 0u64;
+        loop {
+            let idx = unsafe { read_volatile(self.used.add(2) as *const u16) };
+            if idx != self.last_used {
+                self.last_used = idx;
+                fence(Ordering::SeqCst);
+                return true;
+            }
+            spins += 1;
+            if spins > 2_000_000_000 {
+                return false;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
     /// Send `cmd` (at most a page) and wait for an answer of up to
     /// `resp_len` bytes; returns the answer (empty if none came back in
     /// time).
