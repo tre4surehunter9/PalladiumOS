@@ -154,11 +154,18 @@ AddToMenu "Games" \
   "DOOM (Freedoom)%mini-happy.xpm%" Exec doom
 + "Chess (XBoard)%mini-slon.xpm%"   Exec xboard
 + "Jewels%mini-bball.xpm%"          Exec xjewel
-+ "Mahjongg%mini-happy.xpm%"        Exec xmahjongg
++ "Mahjongg%mini-xmahjongg.xpm%"    Exec xmahjongg
++ "DOS games%mini-cd.xpm%"          Popup DosGames
 + ""                                Nop
 + "Let it snow (xsnow)%mini-xsnow.xpm%" Exec xsnow
 + "Roaches (xroach)%mini-roach.xpm%" Exec xroach
 + "Stop snow and roaches%mini-stop.xpm%" Exec busybox pkill -x "xsnow|xroach"
+
+DestroyMenu "DosGames"
+AddToMenu "DosGames" \
+  "WORDLOS (Wordle)%mini-happy.xpm%" Exec wordlos
++ "Floppy Bird%mini-happy.xpm%"     Exec floppybird
++ "DOSBox (a DOS prompt)%mini-term.xpm%" Exec dosbox
 
 DestroyMenu "SystemTools"
 AddToMenu "SystemTools" \
