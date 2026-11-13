@@ -129,13 +129,19 @@ pub fn init() -> Option<(u32, u32)> {
     let cursor_queue = dev.queue(1, 16);
     let mut gpu = Gpu { dev, control, width: 0, height: 0, cursor: None };
 
-    // The screen's size: the first scanout's (QEMU: xres, yres).
+    // The screen's size: the one the firmware and the bootloader chose
+    // (from the card's EDID: QEMU's xres, yres), else the first scanout's.
+    // (Not the scanout's when there's a choice: with QEMU's window, it's
+    // the window's size at the moment, small at first.)
     let info = gpu.control.request(&header(GET_DISPLAY_INFO), 24 + 16 * 24);
     if answer_type(&info) != RESP_OK_DISPLAY_INFO {
         return None;
     }
     let field = |i: usize| u32::from_le_bytes(info[24 + i * 4..28 + i * 4].try_into().unwrap());
-    let (width, height) = (field(2), field(3));
+    let (width, height) = match crate::vga_buffer::framebuffer() {
+        Some((_, _, w, h, ..)) if w >= 640 && h >= 480 => (w as u32, h as u32),
+        _ => (field(2), field(3)),
+    };
     if width == 0 || height == 0 || width > 7680 || height > 4320 {
         return None;
     }
