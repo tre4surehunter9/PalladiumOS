@@ -50,6 +50,8 @@ const RUN_ARGS: &[&str] = &[
     "-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-tablet",
     // A sound card (AC'97), played through this machine's sound system.
     "-device", "AC97",
+    // The host's randomness, for /dev/random (virtio-rng).
+    "-device", "virtio-rng-pci",
 ];
 
 /// QEMU's arguments for test kernels.
@@ -363,6 +365,9 @@ fn test_extra_args(kernel: &Path, test: bool) -> Vec<&'static str> {
     }
     let nic = if virtio { "virtio-net-pci,netdev=net0" } else { "rtl8139,netdev=net0" };
     args.extend(["-device", nic]);
+    if virtio {
+        args.extend(["-device", "virtio-rng-pci"]);
+    }
     args
 }
 

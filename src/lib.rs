@@ -150,6 +150,7 @@ pub mod virtio;
 pub mod virtio_gpu;
 pub mod virtio_blk;
 pub mod fw_cfg;
+pub mod virtio_rng;
 pub mod interrupts;
 pub mod gdt;
 pub mod memory;

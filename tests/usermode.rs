@@ -45,6 +45,7 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     // The screen on the virtio GPU, as at boot (the runner gives this
     // kernel virtio-vga): X and /dev/fb0 are tested on it.
     let _ = palladiumos::virtio_gpu::init();
+    let _ = palladiumos::virtio_rng::init();
     palladiumos::net::init(); // loopback, and eth0 if QEMU has a card
     palladiumos::block::mount_system_disk(); // /usr: tcc's headers and libraries, if built
     palladiumos::block::mount_alpine_disk(); // /alpine: a 64 MiB scratch disk (target/test-scratch.img)
@@ -2034,6 +2035,26 @@ fn ipv6_sockets_work() {
     assert_eq!(status, 0, "{}", file("/tmp/ipv6.out"));
     assert!(file("/tmp/ipv6.out").contains("all checks passed"), "{}", file("/tmp/ipv6.out"));
     assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn virtio_rng_gives_the_hosts_randomness() {
+    // (The usermode test kernel has QEMU's virtio-rng-pci.)
+    assert!(palladiumos::virtio_rng::present(), "no virtio-rng device");
+    // Mixed into zeros: the device's bytes alone. Two requests, different
+    // and not all zero (a chance of 2^-1024 of failing by luck).
+    let (mut a, mut b) = ([0u8; 128], [0u8; 128]);
+    palladiumos::virtio_rng::mix_into(&mut a);
+    palladiumos::virtio_rng::mix_into(&mut b);
+    assert!(a.iter().any(|&x| x != 0) && a != b);
+    // More than one buffer's worth in one go.
+    let mut big = alloc::vec![0u8; 10000];
+    palladiumos::virtio_rng::mix_into(&mut big);
+    assert!(big[9000..].iter().any(|&x| x != 0), "the end wasn't filled");
+    // And programs get it through /dev/urandom.
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("head -c 64 /dev/urandom | wc -c > /tmp/rng1"), 0);
+    assert_eq!(file("/tmp/rng1").trim(), "64");
 }
 
 #[test_case]

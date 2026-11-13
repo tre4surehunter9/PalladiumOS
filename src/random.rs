@@ -2,7 +2,8 @@
 //! Random numbers for getrandom() and AT_RANDOM (libc's stack-protector
 //! canary and hash seeds). Uses the CPU's RDRAND when it has one, else a
 //! xorshift generator seeded from the time-stamp counter. Not suitable for
-//! cryptography without RDRAND.
+//! cryptography without RDRAND or a virtio-rng device (whose bytes, from
+//! the host, fill() mixes in).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -45,4 +46,6 @@ pub fn fill(buf: &mut [u8]) {
         let v = next_u64().to_le_bytes();
         chunk.copy_from_slice(&v[..chunk.len()]);
     }
+    // And the host's randomness, with a virtio-rng device (mixed in).
+    crate::virtio_rng::mix_into(buf);
 }

@@ -130,6 +130,9 @@ extern crate alloc;
         if let Some((w, h)) = palladiumos::virtio_gpu::init() {
             boot_ok!("Found a virtio GPU: the screen is on it ({}x{}, /dev/fb0)", w, h);
         }
+        if palladiumos::virtio_rng::init() {
+            boot_ok!("Found a virtio random number device: the host's randomness is mixed into /dev/random");
+        }
         // Keys pressed before anything reads the keyboard must not be lost.
         palladiumos::task::keyboard::init_queue();
         boot_ok!("Started the keyboard");
