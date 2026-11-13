@@ -280,16 +280,25 @@ fn unmap_pages(start: u64, end: u64) {
     let mut pages = Vec::new();
     memory::for_each_mapped(p4, start, end, |a| pages.push(a));
     let mut mapper = memory::mapper_for(p4);
-    let mut alloc = FRAME_ALLOCATOR.lock();
-    let frames = alloc.as_mut().unwrap();
+    let mut gone = Vec::new();
     for a in pages {
         let device = matches!(mapper.translate(VirtAddr::new(a)), TranslateResult::Mapped { flags, .. } if flags.contains(memory::DEVICE));
         if let Ok((frame, flush)) = mapper.unmap(page(a)) {
             flush.flush();
             if !device {
-                frames.release(frame); // freed when nothing else uses it
+                gone.push(frame);
             }
         }
+    }
+    // Other cores running this address space forget the pages before
+    // they're freed (they could still write to them through their TLB).
+    if !gone.is_empty() {
+        crate::smp::shootdown(p4.start_address().as_u64());
+    }
+    let mut alloc = FRAME_ALLOCATOR.lock();
+    let frames = alloc.as_mut().unwrap();
+    for frame in gone {
+        frames.release(frame); // freed when nothing else uses it
     }
 }
 
@@ -689,6 +698,8 @@ pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> i64 {
             flush.flush();
         }
     }
+    // (Other cores in this address space drop the old permissions.)
+    crate::smp::shootdown(process::current_p4().start_address().as_u64());
     0
 }
 

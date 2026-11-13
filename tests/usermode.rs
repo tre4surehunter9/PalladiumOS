@@ -2012,6 +2012,17 @@ fn epoll_eventfd_and_big_programs() {
 }
 
 #[test_case]
+fn threads_on_several_cores_see_mapping_changes() {
+    // TLB shootdowns (with PALLADIUM_SMP=4: threads on several cores).
+    let Some(_) = c_program("test_tlb") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let status = sh("test_tlb > /tmp/tlb.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/tlb.out"));
+    assert!(file("/tmp/tlb.out").contains("all checks passed"), "{}", file("/tmp/tlb.out"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn sysv_shared_memory_works() {
     let Some(_) = c_program("test_sysvshm") else { return };
     let _ = filesystem::make_dir("/tmp");
@@ -2077,6 +2088,7 @@ fn soak() {
         ("test_pty", "test_pty"),
         ("test_shm", "test_shm"),
         ("test_sysvshm", "test_sysvshm"),
+        ("test_tlb", "test_tlb"),
         ("test_net", "test_net"),
         ("test_sound", "test_sound --no-timing"), // (QEMU's silent sound output: bursts under load)
     ];

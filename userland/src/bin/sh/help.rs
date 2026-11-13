@@ -187,6 +187,7 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
             ("sh", "this shell"),
             ("busybox", "400 more tools (see help busybox)"),
             ("chello", "hello world in C"),
+            ("bench_threads", "how much faster 4 threads go on all CPU cores than on one"),
             ("hello", "hello world in Rust"),
         ],
     ),

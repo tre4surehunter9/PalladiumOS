@@ -647,21 +647,11 @@ pub fn schedule() {
                     _ => {}
                 }
             }
-            // What this core may run: a ready process, not an address space
-            // another core is in (threads of one process take turns: no
-            // core ever has another's stale mappings), and the kernel task
-            // only on core 0 (it runs on the boot stack).
-            let busy: Vec<u64> = (0..crate::smp::MAX_CPUS)
-                .filter(|&c| c != cpu)
-                .map(|c| crate::smp::PERCPU[c].p4.load(Ordering::Relaxed))
-                .filter(|&p4| p4 != 0)
-                .collect();
-            let may_run = |p: &Process| {
-                p.state == State::Ready
-                    && (p.pid != 0 || cpu == 0)
-                    && p.affinity & (1 << cpu) != 0
-                    && !busy.contains(&p.p4.start_address().as_u64())
-            };
+            // What this core may run: a ready process (threads of one
+            // process too, on several cores at once: changed mappings are
+            // shot down on the others, see smp::shootdown), allowed here,
+            // and the kernel task only on core 0 (it runs on the boot stack).
+            let may_run = |p: &Process| p.state == State::Ready && (p.pid != 0 || cpu == 0) && p.affinity & (1 << cpu) != 0;
             // Round-robin from after the current process, never the
             // current process itself (switching to itself would load its
             // stale saved stack pointer). From idle, after the last one
@@ -701,6 +691,7 @@ pub fn schedule() {
                     unsafe { Cr3::write(memory::kernel_p4(), flags) };
                     here.p4.store(0, Ordering::SeqCst);
                     here.current.store(IDLE, Ordering::SeqCst);
+                    here.tgid.store(0, Ordering::SeqCst);
                     Some((save, here.idle_rsp.load(Ordering::SeqCst)))
                 }
                 Some(next) => {
@@ -733,6 +724,7 @@ pub fn schedule() {
                     }
                     here.p4.store(target.p4.start_address().as_u64(), Ordering::SeqCst);
                     here.current.store(next, Ordering::SeqCst);
+                    here.tgid.store(target.tgid, Ordering::SeqCst);
                     Some((save, target.kernel_rsp))
                 }
             }
@@ -865,8 +857,9 @@ fn other_threads(table: &BTreeMap<u64, Box<Process>>, cur: u64) -> Vec<u64> {
     table.values().filter(|t| t.tgid == tgid && t.pid != cur && !matches!(t.state, State::Zombie(_))).map(|t| t.pid).collect()
 }
 
-/// End another thread now (it isn't running: there's one CPU). Its kernel
-/// stack goes when it's reaped: by the kernel, unless it's the process's
+/// End another thread now (if it's running on another core, it stops at
+/// that core's next trip into the kernel). Its kernel stack goes when it's
+/// reaped (not while a core still runs it: see running_elsewhere): by the kernel, unless it's the process's
 /// first thread, which its parent waits for.
 /// Returns its files, for the caller to drop once the table is unlocked
 /// (see drop_files_of_current).
@@ -976,6 +969,14 @@ fn child_info(table: &BTreeMap<u64, Box<Process>>, child: u64) -> SigInfo {
     SigInfo { code, pid: c.tgid as i32, uid: c.cred.ruid, word: 0, status }
 }
 
+/// Is `pid` still on another core? (A process ended by another core keeps
+/// running there until that core's next trip into the kernel: its kernel
+/// stack and address space must stay until then.)
+fn running_elsewhere(pid: u64) -> bool {
+    let me = crate::smp::cpu_index();
+    (0..crate::smp::MAX_CPUS).any(|c| c != me && crate::smp::PERCPU[c].current.load(Ordering::SeqCst) == pid)
+}
+
 /// Free a reaped process's memory. Its kernel stack is freed when it drops.
 fn free_process(p: Box<Process>) {
     // Threads share the address space: the last one to go frees it.
@@ -1001,10 +1002,18 @@ pub fn wait(pid: i64, nohang: bool) -> Result<Option<(u64, ExitReason)>, i64> {
             }
             let zombie = table
                 .values()
-                .find(|p| matches(p) && matches!(p.state, State::Zombie(_)))
+                .find(|p| matches(p) && matches!(p.state, State::Zombie(_)) && !running_elsewhere(p.pid))
                 .map(|p| p.pid);
+            // (One still leaving another core: soon. Try again.)
+            let leaving = zombie.is_none()
+                && table.values().any(|p| matches(p) && matches!(p.state, State::Zombie(_)));
             match zombie {
                 Some(zpid) => table.remove(&zpid),
+                None if leaving => {
+                    drop(table);
+                    schedule();
+                    continue;
+                }
                 None if nohang => return Ok(None),
                 None if loud_pending_locked(&table, cur) => return Err(EINTR),
                 None => {
@@ -1399,9 +1408,9 @@ pub fn execve(frame: &mut SyscallFrame, path: u64, argv: u64, envp: u64) -> i64 
     apply_exec_ids(setuid, setgid);
     let (_, flags) = Cr3::read();
     unsafe { Cr3::write(image.p4, flags) };
-    // This core is in the new address space now: say so (the scheduler
-    // keeps other cores out of an address space one is in, by this; the
-    // old one's frame is freed below and may become another process's).
+    // This core is in the new address space now: say so (shootdowns go to
+    // the cores in an address space, by this; the old one's frame is freed
+    // below and may become another process's).
     crate::smp::PERCPU[crate::smp::cpu_index()].p4.store(image.p4.start_address().as_u64(), Ordering::SeqCst);
     crate::fpu::reset();
     set_fs_gs(0, 0);
@@ -1555,6 +1564,7 @@ fn wait_core(pid: i64, wait: WaitFor, rusage: u64) -> Result<Option<(u64, u32, u
             // other thread of it is still running.
             let done = |p: &Process| {
                 matches!(p.state, State::Zombie(_))
+                    && !running_elsewhere(p.pid)
                     && !table.values().any(|t| t.tgid == p.pid && t.pid != p.pid && !matches!(t.state, State::Zombie(_)))
             };
             let zombie = if wait.exited { table.values().find(|p| matches(p) && done(p)).map(|p| p.pid) } else { None };
@@ -1585,6 +1595,13 @@ fn wait_core(pid: i64, wait: WaitFor, rusage: u64) -> Result<Option<(u64, u32, u
                         let uid = p.cred.ruid;
                         let e = if wait.nowait { p.wait_event.unwrap() } else { p.wait_event.take().unwrap() };
                         Some((epid, e, uid))
+                    }
+                    // (A child that's done but still leaving another core:
+                    // soon. Look again without waiting.)
+                    None if wait.exited
+                        && table.values().any(|p| matches(p) && matches!(p.state, State::Zombie(_)) && running_elsewhere(p.pid)) =>
+                    {
+                        None
                     }
                     None if wait.nohang => return Ok(None),
                     None if loud_pending_locked(&table, cur) => return Err(EINTR),
@@ -1765,13 +1782,21 @@ pub fn sys_brk(addr: u64) -> i64 {
         }
     } else {
         let mut page_addr = new_end;
+        let mut gone = Vec::new();
         while page_addr < old_end {
             let page = Page::<Size4KiB>::containing_address(VirtAddr::new(page_addr));
             if let Ok((frame, flush)) = mapper.unmap(page) {
                 flush.flush();
-                frames.release(frame); // it may be shared with a fork
+                gone.push(frame);
             }
             page_addr += 4096;
+        }
+        // Freed once other cores running this address space forgot them.
+        if !gone.is_empty() {
+            crate::smp::shootdown(current_p4().start_address().as_u64());
+        }
+        for frame in gone {
+            frames.release(frame); // it may be shared with a fork
         }
     }
     drop(alloc);

@@ -36,6 +36,7 @@ lazy_static! {
     idt[(PIC_1_OFFSET + 11) as usize].set_handler_fn(pci_irq11);
     idt[(PIC_1_OFFSET + 12) as usize].set_handler_fn(mouse_irq12);
     idt[crate::smp::SPURIOUS_VECTOR as usize].set_handler_fn(spurious_interrupt);
+    idt[crate::smp::TLB_VECTOR as usize].set_handler_fn(tlb_interrupt);
     unsafe {
         idt[crate::smp::AP_TIMER_VECTOR as usize]
             .set_handler_addr(x86_64::VirtAddr::new(ap_timer_entry as *const () as u64));
@@ -157,6 +158,12 @@ pub fn load_idt() {
 
 /// A local APIC's spurious interrupt: nothing to do (and no EOI).
 extern "x86-interrupt" fn spurious_interrupt(_f: InterruptStackFrame) {}
+
+/// Another core changed an address space this core is running: flush the
+/// TLB (smp::shootdown). No kernel lock: that core holds it, waiting.
+extern "x86-interrupt" fn tlb_interrupt(_f: InterruptStackFrame) {
+    crate::smp::tlb_interrupt();
+}
 
 /// Let pending interrupts in for a moment. System calls run with interrupts
 /// off, so long work inside one (reading many disk sectors, filling many
@@ -357,6 +364,11 @@ extern "C" fn exception_dispatch(frame: &mut crate::syscall::SyscallFrame, error
                 return finish(took, user);
             }
             if user {
+                // Another thread on another core got there first (mapped the
+                // page, or broke its copy-on-write): just retry.
+                if addr < crate::memory::USER_SPACE_END && crate::memory::fault_already_handled(addr, error) {
+                    return finish(took, user);
+                }
                 // The stack growing, or mmap'd memory touched for the first
                 // time: give it a page, retry.
                 if !present && (crate::usermode::handle_stack_fault(addr) || crate::mmap::fault_in(addr)) {

@@ -15,6 +15,12 @@
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "test_sysvshm: check failed at line %d: %s (errno %d)\n", __LINE__, #c, errno); return __LINE__; } } while (0)
 
+static void on_segv(int sig)
+{
+    (void)sig;
+    _exit(42);
+}
+
 static int nattch(int id)
 {
     struct shmid_ds ds;
@@ -86,17 +92,19 @@ int main(void)
     CHECK(shmdt(c) == 0);
     CHECK(shmctl(k, IPC_STAT, &ds) == -1 && errno == EINVAL);
 
-    /* Read-only: writing kills (SIGSEGV). */
+    /* Read-only: writing faults (SIGSEGV; caught, so the kernel doesn't
+     * log a crash: the soak test counts those). */
     pid = fork();
     CHECK(pid >= 0);
     if (pid == 0) {
+        signal(SIGSEGV, on_segv);
         volatile char *r = shmat(id, NULL, SHM_RDONLY);
         if (r == (void *)-1 || r[0] != 'h')
             _exit(1);
         r[0] = 'x';
         _exit(2);
     }
-    CHECK(waitpid(pid, &status, 0) == pid && WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV);
+    CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 42);
     CHECK(a[0] == 'h');
 
     /* At a given address; over a mapping only with SHM_REMAP. */

@@ -474,6 +474,22 @@ pub fn is_user_range(ptr: u64, len: u64, write: bool) -> bool {
     true
 }
 
+/// Is all of [ptr, ptr + len) mapped for the program (and writable, if
+/// `write`) right now? Unlike is_user_range, it changes nothing (no pages
+/// faulted in, no copy-on-write broken): for system calls answered without
+/// the kernel lock (syscall::fast_syscall).
+pub fn user_range_ready(ptr: u64, len: u64, write: bool) -> bool {
+    let Some(end) = ptr.checked_add(len).filter(|&e| e <= USER_SPACE_END) else { return false };
+    let mut page = ptr & !0xfff;
+    while page < end {
+        if !is_user_page(VirtAddr::new(page), write) {
+            return false;
+        }
+        page += 4096;
+    }
+    true
+}
+
 fn is_user_page(addr: VirtAddr, write: bool) -> bool {
     use x86_64::registers::control::Cr3;
     use x86_64::structures::paging::PageTableFlags as Flags;
@@ -728,8 +744,10 @@ pub fn copy_address_space(src: PhysFrame, frames: &mut BootInfoFrameAllocator) -
             }
         }
     }
-    // The parent's pages just became read-only: drop stale TLB entries.
+    // The parent's pages just became read-only: drop stale TLB entries,
+    // here and on other cores running its other threads.
     x86_64::instructions::tlb::flush_all();
+    crate::smp::shootdown(src.start_address().as_u64());
     match result {
         Ok(()) => Ok(dst),
         Err(e) => {
@@ -778,7 +796,32 @@ pub fn break_cow(addr: u64, frames: &mut BootInfoFrameAllocator) -> bool {
         frames.release(old);
     }
     x86_64::instructions::tlb::flush(VirtAddr::new(addr & !0xfff));
+    // Other threads on other cores: not the old frame or read-only any more.
+    // (The old frame isn't freed: it had another user.)
+    crate::smp::shootdown(x86_64::registers::control::Cr3::read().0.start_address().as_u64());
     true
+}
+
+/// A user fault at `addr` that's already been dealt with: another thread
+/// on another core faulted on the same page first (mapped it, or made it
+/// writable), and this core's TLB had the old entry. The faulting
+/// instruction just runs again.
+/// (`error`: the page fault's error code. A reserved-bit fault, or running
+/// code in a no-execute page, is a real fault however the entry looks.)
+pub fn fault_already_handled(addr: u64, error: u64) -> bool {
+    let (write, reserved, fetch) = (error & 2 != 0, error & 8 != 0, error & 0x10 != 0);
+    if reserved {
+        return false;
+    }
+    let Some(entry) = current_entry(addr) else { return false };
+    let flags = entry.flags();
+    let ok = flags.contains(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE)
+        && (!write || flags.contains(PageTableFlags::WRITABLE))
+        && !(fetch && flags.contains(PageTableFlags::NO_EXECUTE));
+    if ok {
+        x86_64::instructions::tlb::flush(VirtAddr::new(addr & !0xfff));
+    }
+    ok
 }
 
 /// break_cow with the global frame allocator. try_lock: this is also

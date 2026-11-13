@@ -20,9 +20,15 @@
 //! A core takes the big kernel lock (BKL) on its way into the kernel (a
 //! system call, an interrupt or a fault from a program, or waking from idle)
 //! and lets it go on its way back to a program or into idle. So the
-//! kernel's code, written for one CPU, stays as it was. Two threads of one
-//! address space don't run at the same time (each core reloads its page
-//! tables when it switches), so no core ever has stale mappings cached.
+//! kernel's code, written for one CPU, stays as it was.
+//!
+//! Threads of one process run on several cores at once. When the kernel
+//! takes a mapping away or changes it (munmap, mprotect, copy-on-write),
+//! the other cores in that address space may still have the old one in
+//! their TLB: `shootdown` sends them an interrupt (TLB_VECTOR) to flush it
+//! and waits until they have, before the kernel goes on. A core waiting
+//! for the kernel lock does its flush while it waits (it has interrupts
+//! off), so the core asking, which holds the lock, never waits forever.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -63,6 +69,14 @@ pub struct PerCpu {
     pub gdt_base: AtomicU64,
     /// This core's TSS (its RSP0 is the kernel stack for interrupts).
     pub tss: AtomicU64,
+    /// Its local APIC's ID (where IPIs for it go).
+    pub apic_id: AtomicU64,
+    /// The running thread's process (thread group) id: getpid without
+    /// the process table (see syscall::fast_syscall).
+    pub tgid: AtomicU64,
+    /// TLB flushes asked of it, and done (shootdown).
+    pub flush_req: AtomicU64,
+    pub flush_done: AtomicU64,
 }
 
 impl PerCpu {
@@ -76,6 +90,10 @@ impl PerCpu {
             last: AtomicU64::new(0),
             gdt_base: AtomicU64::new(0),
             tss: AtomicU64::new(0),
+            apic_id: AtomicU64::new(0),
+            tgid: AtomicU64::new(0),
+            flush_req: AtomicU64::new(0),
+            flush_done: AtomicU64::new(0),
         }
     }
 }
@@ -111,9 +129,74 @@ pub fn lock_kernel() -> bool {
         return false;
     }
     while BKL.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        // (The holder may be waiting for this core to flush its TLB.)
+        flush_if_asked();
         core::hint::spin_loop();
     }
     true
+}
+
+/// The interrupt asking for a TLB flush.
+pub const TLB_VECTOR: u8 = 0x42;
+
+/// Flush this core's TLB if another core asked (shootdown), and say so.
+pub fn flush_if_asked() {
+    let here = &PERCPU[cpu_index()];
+    let asked = here.flush_req.load(Ordering::Acquire);
+    if here.flush_done.load(Ordering::Relaxed) < asked {
+        // (Reloading CR3 drops every non-global translation.)
+        let (frame, flags) = x86_64::registers::control::Cr3::read();
+        unsafe { x86_64::registers::control::Cr3::write(frame, flags) };
+        here.flush_done.store(asked, Ordering::Release);
+    }
+}
+
+/// TLB_VECTOR's handler (no kernel lock: the core asking holds it).
+pub fn tlb_interrupt() {
+    flush_if_asked();
+    lapic_eoi();
+}
+
+/// Shootdowns done (for /proc/interrupts-style counting and tests).
+static SHOOTDOWNS: AtomicU64 = AtomicU64::new(0);
+
+pub fn shootdowns() -> u64 {
+    SHOOTDOWNS.load(Ordering::Relaxed)
+}
+
+/// After taking away or changing mappings of the address space `p4` (this
+/// core has flushed its own TLB): make every other core running it flush
+/// theirs, and wait until they have. Called with the kernel lock held.
+pub fn shootdown(p4: u64) {
+    if !MULTI.load(Ordering::Relaxed) || p4 == 0 {
+        return;
+    }
+    let me = cpu_index();
+    let mut asked = [0u64; MAX_CPUS];
+    let mut any = false;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        for (c, cpu) in PERCPU.iter().enumerate() {
+            if c != me && cpu.p4.load(Ordering::SeqCst) == p4 {
+                asked[c] = cpu.flush_req.fetch_add(1, Ordering::AcqRel) + 1;
+                send_ipi(cpu.apic_id.load(Ordering::Relaxed) as u8, 0x4000 | TLB_VECTOR as u32);
+                any = true;
+            }
+        }
+    });
+    if !any {
+        return;
+    }
+    SHOOTDOWNS.fetch_add(1, Ordering::Relaxed);
+    for (c, cpu) in PERCPU.iter().enumerate() {
+        if asked[c] == 0 {
+            continue;
+        }
+        // Until it has flushed, or left the address space (loading another
+        // one flushes too).
+        while cpu.flush_done.load(Ordering::Acquire) < asked[c] && cpu.p4.load(Ordering::SeqCst) == p4 {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 /// Let the big kernel lock go (if this core has it).
@@ -458,9 +541,11 @@ pub fn init(rsdp: Option<u64>) -> usize {
 
     let dst = crate::memory::phys_to_virt(page) as *mut u8;
     PERCPU[0].gdt_base.store(x86_64::instructions::tables::sgdt().base.as_u64(), Ordering::SeqCst);
+    PERCPU[0].apic_id.store(bsp as u64, Ordering::SeqCst);
     MULTI.store(true, Ordering::SeqCst);
     for (cpu, &id) in ids.iter().filter(|&&id| id != bsp).enumerate().take(MAX_CPUS - 1) {
         let cpu = cpu + 1;
+        PERCPU[cpu].apic_id.store(id as u64, Ordering::SeqCst);
         let stack = alloc::boxed::Box::leak(alloc::vec![0u8; AP_STACK].into_boxed_slice());
         let top = (stack.as_ptr() as u64 + AP_STACK as u64) & !0xF;
         unsafe {

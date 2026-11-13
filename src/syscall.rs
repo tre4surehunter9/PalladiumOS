@@ -471,8 +471,56 @@ pub fn init_syscalls(idt: &mut InterruptDescriptorTable) {
     }
 }
 
+/// System calls answered without the kernel lock, so threads on several
+/// cores make them at the same moment: the time (programs ask it all the
+/// time: games, SDL, glxgears), and who and where the caller is. They use
+/// only per-core values and atomics, and write their answer only into
+/// memory that's already mapped and writable (else: None, and the call
+/// goes the usual way, which faults pages in). A mapping taken away under
+/// them meanwhile by another core waits for this one (interrupts are off
+/// here, so its shootdown is answered on the way back), and its frames are
+/// freed only after that.
+fn fast_syscall(frame: &SyscallFrame) -> Option<i64> {
+    let write_pair = |ptr: u64, a: u64, b: u64| -> Option<i64> {
+        if !crate::memory::user_range_ready(ptr, 16, true) {
+            return None;
+        }
+        unsafe {
+            core::ptr::write_volatile(ptr as *mut u64, a);
+            core::ptr::write_volatile((ptr + 8) as *mut u64, b);
+        }
+        Some(0)
+    };
+    let (a1, a2) = (frame.rdi, frame.rsi);
+    match frame.rax {
+        SYS_GETTID => Some(process::current_pid() as i64),
+        SYS_GETPID => {
+            let tgid = crate::smp::this().tgid.load(core::sync::atomic::Ordering::SeqCst);
+            (tgid != 0).then_some(tgid as i64)
+        }
+        SYS_CLOCK_GETTIME => {
+            let ns = match a1 {
+                0 | 5 => crate::rtc::now_ns(),
+                1 | 4 | 6 | 7 => process::ticks() * process::TICK_NS,
+                _ => return None, // (CPU time: from the process table)
+            };
+            write_pair(a2, ns / 1_000_000_000, ns % 1_000_000_000)
+        }
+        SYS_GETTIMEOFDAY if a2 == 0 && a1 != 0 => {
+            let ns = crate::rtc::now_ns();
+            write_pair(a1, ns / 1_000_000_000, ns / 1000 % 1_000_000)
+        }
+        SYS_TIME if a1 == 0 => Some(crate::rtc::now() as i64),
+        _ => None,
+    }
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
+    if let Some(ret) = fast_syscall(frame) {
+        frame.rax = ret as u64;
+        return;
+    }
     // Into the kernel (syscall_return lets go on the way back).
     crate::smp::lock_kernel();
     let (a1, a2, a3, a4, a5) = (frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8);
