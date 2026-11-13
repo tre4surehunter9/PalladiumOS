@@ -2138,6 +2138,40 @@ fn sound_card_plays() {
 }
 
 #[test_case]
+fn opengl_draws_under_x() {
+    // Mesa (tools/ports/mesa.sh), drawing in software on the X server.
+    // (Looked up, not read: glxgears is 24 MB.)
+    let exists = |p: &str| palladiumos::mounts::resolve(p).is_ok();
+    if !exists("/usr/bin/glxgears") || !exists("/usr/bin/Xfbdev") {
+        palladiumos::serial_print!("(skipped: no Mesa or X built) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    let warnings = palladiumos::boot::warnings();
+    let status = sh("Xfbdev :0 > /tmp/glx.log 2>&1 & sleep 2; \
+                     DISPLAY=:0 glxinfo > /tmp/glxinfo.txt 2>&1; \
+                     DISPLAY=:0 test_gl > /tmp/test_gl.txt 2>&1; \
+                     DISPLAY=:0 glxgears > /tmp/glxgears.txt 2>&1 & sleep 8; \
+                     pidof glxgears > /tmp/glxalive.txt; pkill glxgears; sleep 1; pkill Xfbdev; wait");
+    // Nothing crashed meanwhile (the kernel logs a warning for each).
+    let new = palladiumos::boot::warnings() - warnings;
+    if new > 0 {
+        let log = palladiumos::boot::log();
+        let lines: Vec<&str> = log.lines().filter(|l| l.contains("WARN")).collect();
+        panic!("status {}; {} new warnings:\n{}\nglxinfo:\n{}\nglxgears:\n{}", status, new,
+            lines[lines.len().saturating_sub(new as usize)..].join("\n"), file("/tmp/glxinfo.txt"), file("/tmp/glxgears.txt"));
+    }
+    let info = file("/tmp/glxinfo.txt");
+    assert!(info.contains("OpenGL renderer string: softpipe") && info.contains("OpenGL version string: 3.3"), "{}", info);
+    // A texture drawn right (read back from what was drawn).
+    assert!(file("/tmp/test_gl.txt").contains("test_gl: ok"), "{}", file("/tmp/test_gl.txt"));
+    // Still drawing after 8 seconds, and it said how fast (every 5 seconds).
+    assert!(!file("/tmp/glxalive.txt").trim().is_empty(), "glxgears stopped:\n{}", file("/tmp/glxgears.txt"));
+    assert!(file("/tmp/glxgears.txt").contains("frames in"), "{}", file("/tmp/glxgears.txt"));
+    assert!(only_kernel_left());
+}
+
+#[test_case]
 fn linux_binaries_run_unchanged() {
     // A static glibc program from the host's gcc, at 0x400000 (only with a
     // system disk built: see build.rs).
