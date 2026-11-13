@@ -296,6 +296,7 @@ Real-world programs are built from their original source by scripts in `tools/po
 * `tools/ports/xterm.sh`: ncurses 6.6 (static, wide characters; in `target/ports/x11`) with a terminfo database in `/usr/share/terminfo` (compiled by the build machine's `tic`), and xterm 412.
 * `tools/ports/tcltk.sh`: Tcl and Tk 8.6.18, static (no loadable extensions): `tclsh` and `wish` in `/usr/bin`, their script libraries and Tk's demos in `/usr/lib`.
 * `tools/ports/vim.sh`: Vim 9.2 (terminal), on ncurses, its runtime in `/usr/share/vim` (without the documentation, spelling and translations).
+* `tools/ports/nano.sh`: GNU nano 9.3 (terminal), on ncurses, with syntax colouring for 39 languages (`/usr/share/nano`, on through `/etc/nanorc`). The release's GPG signature is checked against its maintainer's key.
 * `tools/ports/xfm.sh`: xfm 1.5.4, the X File Manager, on libXaw3d 1.6.6 (the 3-D Athena widgets); PalladiumOS's applications window in `tools/ports/xfm/`.
 * `tools/ports/games.sh`: XBoard 4.6.2 (the last on the Athena widgets alone) with the Fairy-Max 5.0b engine, xjewel 1.6, xsnow 1.42, xroach 4.0, and xmahjongg 3.7 (C++).
 * `tools/ports/dosbox.sh`: DOSBox 0.74-3 (on SDL 1.2 through sdl12-compat; C++), and two MIT-licensed DOS games built from source with NASM (3.02, built for the build machine only): WORDLOS (git 455d70f, Wordle) and Floppy Bird (git 511ffa5, 2014), in `/usr/share/games/dos`, which `dosbox` mounts as `C:`. `wordlos` and `floppybird` start them (Start, Programs, Games, DOS games).

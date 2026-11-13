@@ -202,6 +202,9 @@ pub fn init_default_files() {
         ("/etc/hostname", "palladium\n"),
         // Login shells (SSH servers only let users with one of these in).
         ("/etc/shells", "/bin/sh\n/bin/dash\n/usr/bin/ash\n/bin/busybox\n"),
+        // nano's settings for everyone: syntax colouring (its files are
+        // on the system disk, from tools/ports/nano.sh).
+        ("/etc/nanorc", "# nano's settings for everyone (yours: ~/.nanorc). See nanorc(5).\ninclude \"/usr/share/nano/*.nanorc\"\n"),
     ];
     let _ = make_dir("/etc");
     for dir in ["/etc/xdg", "/etc/xdg/fastfetch", "/etc/dropbear"] {

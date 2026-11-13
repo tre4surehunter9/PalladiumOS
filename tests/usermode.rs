@@ -2036,6 +2036,22 @@ fn ipv6_sockets_work() {
 }
 
 #[test_case]
+fn nano_port_works() {
+    if palladiumos::mounts::resolve("/usr/bin/nano").is_err() {
+        palladiumos::serial_print!("(skipped: nano not built) ");
+        return;
+    }
+    filesystem::init_default_files(); // /etc/nanorc
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("nano --version > /tmp/nano1 2>&1"), 0, "{}", file("/tmp/nano1"));
+    assert!(file("/tmp/nano1").contains("GNU nano, version 9.3"), "{}", file("/tmp/nano1"));
+    // Its syntax files are where /etc/nanorc says.
+    assert!(file("/etc/nanorc").contains("include \"/usr/share/nano/*.nanorc\""));
+    assert!(palladiumos::mounts::resolve("/usr/share/nano/c.nanorc").is_ok());
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn ifconfig_shows_and_changes_interfaces() {
     // BusyBox's ifconfig: /proc/net/dev, SIOCGIFCONF and the interface
     // ioctls (get and set).
