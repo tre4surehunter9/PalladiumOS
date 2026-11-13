@@ -18,6 +18,19 @@
 //! USB keyboards don't repeat keys themselves, so this does it. Events are
 //! polled from the timer interrupt (100 Hz), and transfers stay queued in
 //! between, so no key is lost.
+//!
+//! USB pointers feed /dev/input/mice (as PS/2 packets, like the PS/2
+//! mouse): a boot-protocol mouse moves the pointer by its own reports; an
+//! absolute pointer (a tablet: QEMU's -device usb-tablet, which follows the
+//! host's cursor without grabbing it), found from its HID report
+//! descriptor, is turned into moves from where the pointer was. X
+//! accelerates moves of more than 4 pixels, so those are sent in steps of
+//! at most 2 pixels a side (applied exactly), and the pointer is first put
+//! in the top left corner (X stops it there; moves of at most 45 pixels,
+//! which X's protocol detection accepts), and again whenever the tablet
+//! reaches the left or top edge, or a program sets the mouse up (X's
+//! driver does, more than once, dropping moves meanwhile), so it stays
+//! where the tablet says.
 
 use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};
@@ -202,6 +215,45 @@ struct Keyboard {
     prev: [u8; 8],
     /// The key held longest (a HID usage), and for how many ticks.
     held: Option<(u8, u32)>,
+    /// Not a keyboard but a pointer.
+    pointer: Option<Pointer>,
+}
+
+/// A USB pointer: a boot-protocol mouse (relative moves), or an absolute
+/// pointer laid out by its HID report descriptor.
+struct Pointer {
+    layout: Layout,
+    /// The screen's size (for absolute pointers).
+    screen: (i32, i32),
+    /// Where the pointer is now, as far as programs were told (absolute
+    /// pointers; None until it's been put in the corner once).
+    at: Option<(i32, i32)>,
+    buttons: u8,
+}
+
+enum Layout {
+    Boot,
+    Absolute(Absolute),
+}
+
+/// A field of an input report: bits `offset..offset + size`, with values
+/// from `min` to `max`.
+#[derive(Clone, Copy)]
+struct Field {
+    offset: u32,
+    size: u32,
+    min: i32,
+    max: i32,
+}
+
+/// Where an absolute pointer's report keeps its values (report_id 0: the
+/// device numbers no reports).
+struct Absolute {
+    report_id: u8,
+    x: Field,
+    y: Field,
+    buttons: [Option<Field>; 3],
+    wheel: Option<Field>,
 }
 
 struct Xhci {
@@ -220,8 +272,8 @@ unsafe impl Send for Xhci {}
 
 static XHCI: Mutex<Option<Xhci>> = Mutex::new(None);
 
-/// Find the USB controller, set it up and look for keyboards. Returns how
-/// many keyboards were found (None: no xHCI controller).
+/// Find the USB controller, set it up and look for keyboards, mice and
+/// tablets. Returns how many devices were set up (None: no xHCI controller).
 pub fn init() -> Option<usize> {
     let pci = crate::net::pci::scan().into_iter().find(|d| {
         d.class == 0x0C && d.subclass == 0x03 && (crate::net::pci::read32(d.bus, d.slot, d.func, 0x08) >> 8) & 0xFF == 0x30
@@ -479,10 +531,24 @@ impl Xhci {
         let got = self.control(&mut dev, 0x80, 6, 0x0200, 0, total)?;
         let desc = unsafe { core::slice::from_raw_parts(dev.buf.1 as *const u8, got) }.to_vec();
         let config_value = desc[5];
-        let (iface, ep_addr, maxp, interval) = find_keyboard(&desc)?;
+        let hid = find_hid(&desc)?;
+        let (iface, ep_addr, maxp, interval) = (hid.iface, hid.endpoint, hid.max_packet, hid.interval);
 
         self.control(&mut dev, 0x00, 9, u16::from(config_value), 0, 0)?; // SET_CONFIGURATION
-        self.control(&mut dev, 0x21, 0x0B, 0, u16::from(iface), 0)?; // SET_PROTOCOL: boot
+        let pointer = match hid.protocol {
+            1 => None, // a keyboard
+            2 => Some(Layout::Boot),
+            _ => {
+                // Its report descriptor: an absolute pointer, or nothing used here.
+                let len = hid.report_len.clamp(1, 4096);
+                let got = self.control(&mut dev, 0x81, 6, 0x2200, u16::from(iface), len)?;
+                let rd = unsafe { core::slice::from_raw_parts(dev.buf.1 as *const u8, got) };
+                Some(Layout::Absolute(parse_absolute(rd)?))
+            }
+        };
+        if hid.protocol != 0 {
+            self.control(&mut dev, 0x21, 0x0B, 0, u16::from(iface), 0)?; // SET_PROTOCOL: boot
+        }
         let _ = self.control(&mut dev, 0x21, 0x0A, 0, u16::from(iface), 0); // SET_IDLE: only on changes
 
         // Configure the interrupt IN endpoint.
@@ -519,6 +585,12 @@ impl Xhci {
             length: u32::from(maxp.clamp(8, REPORT_SIZE as u16)),
             prev: [0; 8],
             held: None,
+            pointer: pointer.map(|layout| Pointer {
+                layout,
+                screen: crate::vga_buffer::framebuffer().map_or((1280, 720), |f| (f.2 as i32, f.3 as i32)),
+                at: None,
+                buttons: 0,
+            }),
         })
     }
 
@@ -556,9 +628,13 @@ impl Xhci {
             let index = ((trb_param(&ev).wrapping_sub(kbd.ring.phys)) / 16) as usize;
             let buffer = kbd.slot_of_trb[index.min(RING_TRBS - 1)] as usize;
             if cc == CC_SUCCESS || cc == CC_SHORT_PACKET {
-                let mut report = [0u8; 8];
-                unsafe { core::ptr::copy_nonoverlapping(kbd.reports.1.add(buffer * REPORT_SIZE), report.as_mut_ptr(), 8) };
-                kbd.report(report);
+                let mut report = [0u8; REPORT_SIZE];
+                unsafe { core::ptr::copy_nonoverlapping(kbd.reports.1.add(buffer * REPORT_SIZE), report.as_mut_ptr(), REPORT_SIZE) };
+                let len = (kbd.length as usize).saturating_sub((ev[2] & 0xFF_FFFF) as usize).min(REPORT_SIZE);
+                match kbd.pointer.as_mut() {
+                    Some(p) => p.report(&report[..len]),
+                    None => kbd.report(report[..8].try_into().unwrap()),
+                }
             }
             self.queue_report(k, buffer);
         }
@@ -571,27 +647,66 @@ impl Xhci {
     }
 }
 
-/// In a configuration descriptor, the first keyboard interface (HID class,
-/// boot protocol 1) and its interrupt IN endpoint: (interface number,
-/// endpoint address, max packet size, interval).
-fn find_keyboard(desc: &[u8]) -> Option<(u8, u8, u16, u8)> {
+/// The largest move of an absolute pointer's pins (see Pointer::move_to).
+const PIN_STEP: i32 = 45;
+
+/// A HID interface of a configuration descriptor.
+struct HidInterface {
+    iface: u8,
+    /// 1 a keyboard, 2 a mouse (boot protocol), 0 neither (a tablet...).
+    protocol: u8,
+    endpoint: u8,
+    max_packet: u16,
+    interval: u8,
+    /// The length of its report descriptor.
+    report_len: u16,
+}
+
+/// In a configuration descriptor, the HID interface to use (a keyboard if
+/// there's one, else the first pointer-ish one) with its interrupt IN
+/// endpoint.
+fn find_hid(desc: &[u8]) -> Option<HidInterface> {
     let mut i = 0;
-    let mut iface = None;
+    let mut cur: Option<HidInterface> = None;
+    let mut best: Option<HidInterface> = None;
     while i + 2 <= desc.len() {
         let (len, kind) = (desc[i] as usize, desc[i + 1]);
         if len < 2 || i + len > desc.len() {
             break;
         }
+        let d = &desc[i..i + len];
         match kind {
             4 if len >= 9 => {
-                let d = &desc[i..i + len];
-                iface = (d[5] == 3 && d[7] == 1).then_some(d[2]);
+                cur = (d[5] == 3 && d[7] <= 2).then_some(HidInterface {
+                    iface: d[2],
+                    protocol: if d[6] == 1 { d[7] } else { 0 },
+                    endpoint: 0,
+                    max_packet: 0,
+                    interval: 0,
+                    report_len: 0,
+                });
+            }
+            0x21 if len >= 9 => {
+                if let Some(c) = cur.as_mut() {
+                    if d[6] == 0x22 {
+                        c.report_len = u16::from_le_bytes([d[7], d[8]]);
+                    }
+                }
             }
             5 if len >= 7 => {
-                let d = &desc[i..i + len];
-                if let Some(n) = iface {
+                if let Some(mut c) = cur.take() {
                     if d[2] & 0x80 != 0 && d[3] & 3 == 3 {
-                        return Some((n, d[2], u16::from_le_bytes([d[4], d[5]]) & 0x7FF, d[6]));
+                        c.endpoint = d[2];
+                        c.max_packet = u16::from_le_bytes([d[4], d[5]]) & 0x7FF;
+                        c.interval = d[6];
+                        if c.protocol == 1 {
+                            return Some(c);
+                        }
+                        if best.is_none() {
+                            best = Some(c);
+                        }
+                    } else {
+                        cur = Some(c);
                     }
                 }
             }
@@ -599,7 +714,189 @@ fn find_keyboard(desc: &[u8]) -> Option<(u8, u8, u16, u8)> {
         }
         i += len;
     }
-    None
+    best
+}
+
+/// From a HID report descriptor, where an absolute pointer's input report
+/// keeps X, Y (absolute), the first three buttons and the wheel; None if
+/// it isn't one.
+fn parse_absolute(d: &[u8]) -> Option<Absolute> {
+    let (mut page, mut lmin, mut lmax, mut size, mut count, mut id) = (0u32, 0i32, 0i32, 0u32, 0u32, 0u8);
+    let mut usages: Vec<u32> = Vec::new();
+    let mut usage_min: Option<u32> = None;
+    let mut offset = 0u32; // bits into the current input report
+    let (mut x, mut y, mut wheel, mut buttons) = (None, None, None, [None; 3]);
+    let (mut x_id, mut absolute) = (0u8, false);
+    let mut i = 0;
+    while i < d.len() {
+        let b = d[i];
+        if b == 0xFE {
+            // A long item: skipped.
+            i += 3 + usize::from(*d.get(i + 1)?);
+            continue;
+        }
+        let n = [0, 1, 2, 4][usize::from(b & 3)];
+        if i + 1 + n > d.len() {
+            break;
+        }
+        let raw = d[i + 1..i + 1 + n].iter().rev().fold(0u32, |a, &c| a << 8 | u32::from(c));
+        let signed = match n {
+            1 => i32::from(raw as u8 as i8),
+            2 => i32::from(raw as u16 as i16),
+            _ => raw as i32,
+        };
+        let usage = |raw: u32| if n == 4 { raw } else { page << 16 | raw };
+        match ((b >> 2) & 3, b >> 4) {
+            (1, 0) => page = raw,
+            (1, 1) => lmin = signed,
+            // (A maximum is unsigned unless the minimum is negative.)
+            (1, 2) => lmax = if lmin >= 0 && n < 4 { raw as i32 } else { signed },
+            (1, 7) => size = raw,
+            (1, 8) => {
+                id = raw as u8;
+                offset = 0;
+            }
+            (1, 9) => count = raw,
+            (2, 0) => usages.push(usage(raw)),
+            (2, 1) => usage_min = Some(usage(raw)),
+            (0, 8) => {
+                // An input item: `count` fields of `size` bits.
+                for k in 0..count {
+                    let u = match usages.get(k as usize).or(usages.last()) {
+                        Some(&u) => u,
+                        None => usage_min.map_or(0, |m| m + k),
+                    };
+                    let f = Field { offset, size, min: lmin, max: lmax };
+                    if raw & 1 == 0 {
+                        // (Not a constant: padding.)
+                        match u {
+                            0x0001_0030 => {
+                                x = Some(f);
+                                x_id = id;
+                                absolute = raw & 4 == 0;
+                            }
+                            0x0001_0031 => y = Some(f),
+                            0x0001_0038 => wheel = Some(f),
+                            0x0009_0001..=0x0009_0003 => buttons[(u & 0xFFFF) as usize - 1] = Some(f),
+                            _ => {}
+                        }
+                    }
+                    offset += size;
+                }
+                usages.clear();
+                usage_min = None;
+            }
+            (0, _) => {
+                // Output, feature, collections: their usages are used up.
+                usages.clear();
+                usage_min = None;
+            }
+            _ => {}
+        }
+        i += 1 + n;
+    }
+    let (x, y) = (x?, y?);
+    (absolute && x.max > x.min && y.max > y.min).then_some(Absolute { report_id: x_id, x, y, buttons, wheel })
+}
+
+/// The value of field `f` of a report.
+fn field(data: &[u8], f: Field) -> i32 {
+    let mut v = 0u32;
+    for i in 0..f.size.min(32) {
+        let bit = f.offset + i;
+        if data.get((bit / 8) as usize).is_some_and(|&byte| byte >> (bit % 8) & 1 != 0) {
+            v |= 1 << i;
+        }
+    }
+    if f.min < 0 && (1..32).contains(&f.size) && v & (1 << (f.size - 1)) != 0 {
+        (v | !0 << f.size) as i32
+    } else {
+        v as i32
+    }
+}
+
+impl Pointer {
+    fn report(&mut self, data: &[u8]) {
+        match &self.layout {
+            Layout::Boot => {
+                // Buttons, then moves right and down, and maybe the wheel (up: positive).
+                if data.len() >= 3 {
+                    let wheel = data.get(3).map_or(0, |&w| i32::from(w as i8));
+                    crate::mouse::report(data[0] & 7, i32::from(data[1] as i8), -i32::from(data[2] as i8), -wheel);
+                }
+            }
+            Layout::Absolute(l) => {
+                let data = match l.report_id {
+                    0 => data,
+                    id if data.first() == Some(&id) => &data[1..],
+                    _ => return, // another report
+                };
+                let scale = |f: Field, extent: i32| {
+                    let v = field(data, f).clamp(f.min, f.max);
+                    (i64::from(v - f.min) * i64::from(extent - 1) / i64::from(f.max - f.min)) as i32
+                };
+                let (tx, ty) = (scale(l.x, self.screen.0), scale(l.y, self.screen.1));
+                let mut buttons = 0;
+                for (bit, f) in l.buttons.iter().enumerate() {
+                    if f.is_some_and(|f| field(data, f) != 0) {
+                        buttons |= 1 << bit;
+                    }
+                }
+                let wheel = l.wheel.map_or(0, |f| field(data, f));
+                if crate::mouse::take_resync() {
+                    self.at = None; // (a program set the mouse up: where X put the pointer isn't known)
+                }
+                self.move_to(tx, ty);
+                if buttons != self.buttons || wheel != 0 {
+                    // (After the move: a click lands where the pointer went.)
+                    self.buttons = buttons;
+                    crate::mouse::report(buttons, 0, 0, -wheel);
+                }
+            }
+        }
+    }
+
+    /// Move the pointer to (x, y) on the screen with relative moves.
+    fn move_to(&mut self, x: i32, y: i32) {
+        let b = self.buttons;
+        // Into a corner or against an edge: moves past it (X stops the
+        // pointer there). At most 45 pixels each: while X's mouse driver
+        // is still working out the protocol, a move of more than 50 makes
+        // it give up on the right one.
+        let pin = |dx: i32, dy: i32, extent: i32| {
+            for _ in 0..=extent / PIN_STEP {
+                crate::mouse::report(b, dx, dy, 0);
+            }
+        };
+        let (mut cx, mut cy) = match self.at {
+            Some(at) => at,
+            None => {
+                pin(-PIN_STEP, 0, self.screen.0);
+                pin(0, PIN_STEP, self.screen.1);
+                (0, 0)
+            }
+        };
+        if x == 0 && cx != 0 {
+            pin(-PIN_STEP, 0, self.screen.0);
+            cx = 0;
+        }
+        if y == 0 && cy != 0 {
+            pin(0, PIN_STEP, self.screen.1);
+            cy = 0;
+        }
+        // Then steps of at most 2 pixels a side (at most 2.9 long: X
+        // accelerates moves of more than 4).
+        let (dx, dy) = (x - cx, y - cy);
+        let n = (dx.abs().max(dy.abs()) + 1) / 2;
+        let (mut px, mut py) = (0, 0);
+        for i in 1..=n {
+            let (sx, sy) = (dx * i / n, dy * i / n);
+            crate::mouse::report(b, sx - px, -(sy - py), 0); // (PS/2: up is positive)
+            px = sx;
+            py = sy;
+        }
+        self.at = Some((x, y));
+    }
 }
 
 impl Keyboard {
@@ -740,5 +1037,10 @@ pub fn poll() {
 
 /// How many USB keyboards are set up.
 pub fn keyboards() -> usize {
-    XHCI.try_lock().and_then(|g| g.as_ref().map(|h| h.keyboards.len())).unwrap_or(0)
+    XHCI.try_lock().and_then(|g| g.as_ref().map(|h| h.keyboards.iter().filter(|k| k.pointer.is_none()).count())).unwrap_or(0)
+}
+
+/// How many USB pointers (mice, tablets) are set up.
+pub fn pointers() -> usize {
+    XHCI.try_lock().and_then(|g| g.as_ref().map(|h| h.keyboards.iter().filter(|k| k.pointer.is_some()).count())).unwrap_or(0)
 }

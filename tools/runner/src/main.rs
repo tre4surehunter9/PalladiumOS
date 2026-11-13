@@ -43,8 +43,10 @@ const RUN_ARGS: &[&str] = &[
     "-drive", "format=raw,file=target/usr.img,index=2,media=disk",
     "-drive", "format=raw,file=target/alpine.img,index=3,media=disk",
     "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:80", "-device", "rtl8139,netdev=net0",
-    // A USB keyboard (QEMU sends the window's keys to it, not to PS/2).
-    "-device", "qemu-xhci", "-device", "usb-kbd",
+    // A USB keyboard (QEMU sends the window's keys to it, not to PS/2),
+    // and a USB tablet: the pointer follows yours in QEMU's window, without
+    // it grabbing the mouse.
+    "-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-tablet",
     // A sound card (AC'97), played through this machine's sound system.
     "-device", "AC97",
 ];
@@ -279,7 +281,7 @@ fn test_extra_args(kernel: &Path, test: bool) -> &'static [&'static str] {
     } else if name.starts_with("smp-") {
         &["-smp", "4"] // four CPU cores
     } else if name.starts_with("usb-") {
-        &["-device", "qemu-xhci", "-device", "usb-kbd"]
+        &["-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-tablet", "-device", "usb-mouse"]
     } else {
         &[]
     }

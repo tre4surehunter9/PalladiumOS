@@ -6,7 +6,11 @@
 //! 3-byte packets (buttons and signs, dx, dy), or 4 bytes (a wheel) once a
 //! program switches it to the IntelliMouse protocol the usual way (sample
 //! rates 200, 100, 80). Commands written to it are answered as a PS/2 mouse
-//! would (0xFA, and the reply to "get ID", "reset", "status").
+//! would (0xFA, and the reply to "get ID", "reset", "status"), and, as a
+//! mouse stops to answer (and Linux's mousedev does), the answers come
+//! before any movement, and movement not yet read is dropped: X's mouse
+//! driver sends its setup commands again while a USB tablet's moves stream
+//! in, and finding its answers among them confused it.
 
 use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +20,8 @@ use x86_64::instructions::port::Port;
 struct Mice {
     /// Bytes waiting to be read.
     queue: VecDeque<u8>,
+    /// Answers to commands written: read before the queue.
+    replies: VecDeque<u8>,
     /// The packet being received from the mouse.
     packet: [u8; 3],
     got: usize,
@@ -28,8 +34,24 @@ struct Mice {
 }
 
 static MICE: Mutex<Mice> =
-    Mutex::new(Mice { queue: VecDeque::new(), packet: [0; 3], got: 0, imps2: false, rates: [0; 3], rate_next: false });
+    Mutex::new(Mice {
+        queue: VecDeque::new(),
+        replies: VecDeque::new(),
+        packet: [0; 3],
+        got: 0,
+        imps2: false,
+        rates: [0; 3],
+        rate_next: false,
+    });
 static PRESENT: AtomicBool = AtomicBool::new(false);
+/// A program sent the mouse commands (set it up) since a USB tablet last
+/// looked: its moves meanwhile may have been dropped.
+static RESYNC: AtomicBool = AtomicBool::new(false);
+
+/// For absolute pointers: whether to put the pointer back in step.
+pub fn take_resync() -> bool {
+    RESYNC.swap(false, Ordering::SeqCst)
+}
 const MAX_QUEUED: usize = 4096;
 
 fn wait_write() {
@@ -142,7 +164,8 @@ pub fn report(buttons: u8, dx: i32, dy: i32, wheel: i32) {
 }
 
 pub fn readable() -> bool {
-    !MICE.lock().queue.is_empty()
+    let m = MICE.lock();
+    !m.queue.is_empty() || !m.replies.is_empty()
 }
 
 /// read(): queued bytes, waiting for some unless non-blocking.
@@ -153,10 +176,15 @@ pub fn read(buf: &mut [u8], nonblocking: bool) -> i64 {
     loop {
         {
             let mut m = MICE.lock();
-            if !m.queue.is_empty() {
-                let n = buf.len().min(m.queue.len());
-                for (dst, src) in buf.iter_mut().zip(m.queue.drain(..n)) {
-                    *dst = src;
+            let m = &mut *m;
+            if !m.replies.is_empty() || !m.queue.is_empty() {
+                let mut n = 0;
+                for q in [&mut m.replies, &mut m.queue] {
+                    let k = (buf.len() - n).min(q.len());
+                    for (dst, src) in buf[n..].iter_mut().zip(q.drain(..k)) {
+                        *dst = src;
+                    }
+                    n += k;
                 }
                 return n as i64;
             }
@@ -174,6 +202,10 @@ pub fn read(buf: &mut [u8], nonblocking: bool) -> i64 {
 /// write(): PS/2 commands, answered as a mouse would.
 pub fn write(bytes: &[u8]) -> i64 {
     let mut m = MICE.lock();
+    if !bytes.is_empty() {
+        m.queue.clear(); // (the mouse stops to answer)
+        RESYNC.store(true, Ordering::SeqCst);
+    }
     for &b in bytes {
         if m.rate_next {
             m.rate_next = false;
@@ -181,21 +213,21 @@ pub fn write(bytes: &[u8]) -> i64 {
             if m.rates == [200, 100, 80] {
                 m.imps2 = true;
             }
-            m.queue.push_back(0xFA);
+            m.replies.push_back(0xFA);
             continue;
         }
-        m.queue.push_back(0xFA);
+        m.replies.push_back(0xFA);
         match b {
             0xF3 => m.rate_next = true, // set sample rate: the rate follows
             0xF2 => {
                 let id = if m.imps2 { 3 } else { 0 };
-                m.queue.push_back(id); // get device ID
+                m.replies.push_back(id); // get device ID
             }
             0xFF => {
                 m.imps2 = false;
-                m.queue.extend([0xAA, 0x00]); // reset: self-test passed, ID 0
+                m.replies.extend([0xAA, 0x00]); // reset: self-test passed, ID 0
             }
-            0xE9 => m.queue.extend([0x00, 0x02, 0x64]), // status: 2 counts/mm, 100/s
+            0xE9 => m.replies.extend([0x00, 0x02, 0x64]), // status: 2 counts/mm, 100/s
             0xF6 => m.imps2 = false, // defaults
             _ => {}
         }

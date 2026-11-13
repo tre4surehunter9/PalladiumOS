@@ -133,10 +133,20 @@ use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
         if palladiumos::mouse::init() {
             boot_ok!("Started the PS/2 mouse (/dev/input/mice)");
         }
-        match palladiumos::xhci::init() {
-            Some(0) => boot_ok!("Found a USB controller (xHCI): no keyboard"),
-            Some(n) => boot_ok!("Found a USB controller (xHCI): {} USB keyboard{}", n, if n == 1 { "" } else { "s" }),
-            None => {}
+        if palladiumos::xhci::init().is_some() {
+            let (k, p) = (palladiumos::xhci::keyboards(), palladiumos::xhci::pointers());
+            let plural = |n: usize| if n == 1 { "" } else { "s" };
+            match (k, p) {
+                (0, 0) => boot_ok!("Found a USB controller (xHCI): no keyboard"),
+                (k, 0) => boot_ok!("Found a USB controller (xHCI): {} USB keyboard{}", k, plural(k)),
+                (k, p) => boot_ok!(
+                    "Found a USB controller (xHCI): {} USB keyboard{}, {} USB mouse/tablet{} (/dev/input/mice)",
+                    k,
+                    plural(k),
+                    p,
+                    plural(p)
+                ),
+            }
         }
         if let Some(card) = palladiumos::sound::init() {
             boot_ok!("Found a sound card: {} (/dev/dsp, /dev/mixer)", card);

@@ -1,7 +1,8 @@
 // Copyright (c) 2026 tre4surehunter9
-//! Tests for the USB keyboard driver. The runner boots this test kernel
-//! with QEMU's xHCI controller and a USB keyboard (-device qemu-xhci
-//! -device usb-kbd).
+//! Tests for the USB keyboard and pointer driver. The runner boots this
+//! test kernel with QEMU's xHCI controller, a USB keyboard, a tablet and a
+//! mouse (-device qemu-xhci -device usb-kbd -device usb-tablet -device
+//! usb-mouse).
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
@@ -42,9 +43,12 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 #[test_case]
-fn finds_the_usb_keyboard() {
-    assert_eq!(xhci::init(), Some(1), "one USB keyboard on the xHCI controller");
+fn finds_the_usb_keyboard_and_pointers() {
+    assert_eq!(xhci::init(), Some(3), "a keyboard, a tablet and a mouse on the xHCI controller");
     assert_eq!(xhci::keyboards(), 1);
+    // The tablet (an absolute pointer, from its report descriptor) and the
+    // mouse (boot protocol).
+    assert_eq!(xhci::pointers(), 2);
     // Polling with no keys pressed: nothing typed, nothing breaks.
     palladiumos::task::keyboard::init_queue();
     for _ in 0..100 {
