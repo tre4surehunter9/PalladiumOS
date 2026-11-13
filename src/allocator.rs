@@ -1,7 +1,4 @@
 // Copyright (c) 2026 tre4surehunter9
-use alloc::alloc::{GlobalAlloc, Layout};
-use core::ptr::null_mut;
-
 /// In the higher half, with the rest of the kernel.
 pub const HEAP_START: usize = 0xFFFF_9000_0000_0000;
 /// 32 MiB: each process needs a 16 KiB kernel stack, and /bin (an in-memory
@@ -46,8 +43,6 @@ pub fn init_heap(
 }
 
 
-use linked_list_allocator::LockedHeap;
-
 
 // Mutex Wrapper
 pub struct Locked<A> {
@@ -61,30 +56,16 @@ impl<A> Locked<A> {
         }
     }
 
-    pub fn lock(&self) -> spin::MutexGuard<A> {
+    pub fn lock(&self) -> spin::MutexGuard<'_, A> {
         self.inner.lock()
     }
 }
 
-/// Align the given address `addr` upwards to alignment `align`.
-fn align_up(addr: usize, align: usize) -> usize {
-    let remainder = addr % align;
-    if remainder == 0 {
-        addr // addr already aligned
-    } else {
-        addr - remainder + align
-    }
-}
-
-use bump::BumpAllocator;
 use fixed_size_block::FixedSizeBlockAllocator;
-use linked_list::LinkedListAllocator;
 
 #[global_allocator]
 static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(
     FixedSizeBlockAllocator::new());
 
-pub mod bump;
-pub mod linked_list;
 pub mod fixed_size_block;
 

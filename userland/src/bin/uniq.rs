@@ -28,7 +28,7 @@ fn main(args: Args) -> i32 {
         }
     }
     let mut out = Out::new();
-    let mut emit = |line: &[u8], n: usize, out: &mut Out| {
+    let emit = |line: &[u8], n: usize, out: &mut Out| {
         if dups && n < 2 {
             return;
         }

@@ -78,7 +78,7 @@ fn all() -> i32 {
     check!(signal(SIGUSR1, count) == 0);
     check!(raise(SIGUSR1) == 0);
     check!(COUNT.load(SeqCst) == 1 && LAST.load(SeqCst) == SIGUSR1);
-    check!(get_sigaction(SIGUSR1).is_ok_and(|a| a.handler == count as usize as u64 && a.flags & SA_RESTART != 0));
+    check!(get_sigaction(SIGUSR1).is_ok_and(|a| a.handler == count as *const () as u64 && a.flags & SA_RESTART != 0));
     raise(SIGUSR1);
     check!(COUNT.load(SeqCst) == 2); // still installed
     // SIGKILL and SIGSTOP can't be caught.
@@ -109,7 +109,7 @@ fn all() -> i32 {
 
     // ---- while a handler runs, its signal (and sa_mask) are blocked ----
     reset();
-    check!(sigaction(SIGUSR1, &SigAction { handler: record_mask as usize as u64, flags: 0, restorer: 0, mask: sigmask(SIGHUP) }).is_ok());
+    check!(sigaction(SIGUSR1, &SigAction { handler: record_mask as *const () as u64, flags: 0, restorer: 0, mask: sigmask(SIGHUP) }).is_ok());
     raise(SIGUSR1);
     let seen = MASK_SEEN.load(SeqCst);
     check!(seen & sigmask(SIGUSR1) != 0 && seen & sigmask(SIGHUP) != 0);

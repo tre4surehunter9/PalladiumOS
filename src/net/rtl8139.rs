@@ -108,9 +108,6 @@ impl Rtl8139 {
     unsafe fn out16(&self, r: u16, v: u16) {
         unsafe { Port::<u16>::new(self.io + r).write(v) }
     }
-    unsafe fn in16(&self, r: u16) -> u16 {
-        unsafe { Port::<u16>::new(self.io + r).read() }
-    }
     unsafe fn out32(&self, r: u16, v: u32) {
         unsafe { Port::<u32>::new(self.io + r).write(v) }
     }

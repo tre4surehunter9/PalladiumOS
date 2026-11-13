@@ -83,9 +83,6 @@ impl Ac97 {
     fn in16(&self, r: u16) -> u16 {
         unsafe { Port::<u16>::new(self.nabm + r).read() }
     }
-    fn out16(&self, r: u16, v: u16) {
-        unsafe { Port::<u16>::new(self.nabm + r).write(v) }
-    }
     fn in32(&self, r: u16) -> u32 {
         unsafe { Port::<u32>::new(self.nabm + r).read() }
     }

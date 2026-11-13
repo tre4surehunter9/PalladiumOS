@@ -14,10 +14,6 @@ fn kernel_main(_boot_info: &'static mut bootloader_api::BootInfo) -> ! {
     loop {}
 }
 
-use palladiumos::exit_qemu;
-use palladiumos::Testable;
-use palladiumos::QemuExitCode;
-use palladiumos::serial_println;
 
 
 

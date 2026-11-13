@@ -332,13 +332,9 @@ pub fn lstat(abs: &str) -> FsResult<(Loc, Meta)> {
     resolve_full(abs, false).map(|(loc, meta, _)| (loc, meta))
 }
 
-/// Split "/a/b/c" into the parent directory (symlinks followed) and "c".
-/// Fails for "/" and for mount points (which can't be created or removed).
-fn parent_of(abs: &str) -> FsResult<(Loc, String, String)> {
-    parent_full(abs).map(|(loc, _, name, real)| (loc, name, real))
-}
-
-/// parent_of, also returning the parent directory's metadata.
+/// Split "/a/b/c" into the parent directory (symlinks followed), its
+/// metadata and "c". Fails for "/" and for mount points (which can't be
+/// created or removed).
 fn parent_full(abs: &str) -> FsResult<(Loc, Meta, String, String)> {
     ensure_root();
     if abs == "/" {

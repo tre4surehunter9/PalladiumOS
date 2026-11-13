@@ -51,7 +51,6 @@ pub fn init_test_idt() {
 
 use palladiumos::{exit_qemu, QemuExitCode, serial_println};
 use x86_64::structures::idt::InterruptStackFrame;
-use x86_64::structures::gdt::SegmentSelector;
 use x86_64::structures::idt::InterruptDescriptorTable;
 
 

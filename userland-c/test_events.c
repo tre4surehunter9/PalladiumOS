@@ -180,6 +180,7 @@ static int misc(void)
     struct tms t;
     volatile unsigned long spin = 0;
     for (unsigned long i = 0; i < 50000000; i++) spin += i;
+    (void)spin; /* (only there to use CPU time) */
     clock_t now = times(&t);
     CHECK(now > 0 && t.tms_utime > 0 && t.tms_utime <= now && t.tms_cutime == 0);
 

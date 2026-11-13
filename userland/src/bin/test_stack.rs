@@ -7,6 +7,7 @@
 userlib::entry!(main);
 
 #[inline(never)]
+#[allow(unconditional_recursion)] // (on purpose: it overflows the stack)
 fn recurse(n: u64) -> u64 {
     let buf = [n; 64];
     core::hint::black_box(&buf);

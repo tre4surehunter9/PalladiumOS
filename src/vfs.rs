@@ -120,7 +120,8 @@ enum Kind {
     /// /dev/input/mice: the mouse.
     Mouse,
     /// /dev/dsp: sound output (closing it lets the sound finish).
-    Dsp(Arc<crate::sound::Dsp>),
+    /// (Held, not read: dropping it closes the sound card.)
+    Dsp(#[allow(dead_code)] Arc<crate::sound::Dsp>),
     /// /dev/mixer: volumes.
     Mixer,
 }

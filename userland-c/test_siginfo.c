@@ -159,7 +159,9 @@ static int faults(void)
             } else {
                 signal(SIGSEGV, SIG_DFL);
             }
-            *(volatile int *)8 = 1;
+            /* (The address from a variable: GCC sees through a constant.) */
+            static volatile uintptr_t bad = 8;
+            *(volatile int *)bad = 1;
             _exit(0);
         }
         int st;

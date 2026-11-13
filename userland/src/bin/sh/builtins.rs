@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use userlib::*;
 
 use crate::shell::{Shell, Var};
-use crate::{print_wrapped, shell_status};
+use crate::shell_status;
 
 pub const BUILTINS: &[&str] = &[
     ".", ":", "[", "alias", "bg", "break", "cd", "continue", "eval", "exit", "export", "false", "fg", "help", "jobs",

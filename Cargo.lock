@@ -100,15 +100,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fatfs"
-version = "0.4.0"
-source = "git+https://github.com/rafalh/rust-fatfs#c4b88477b22ca7e5131fbd8891f62a5deaa88e6e"
-dependencies = [
- "bitflags 2.11.1",
- "log",
-]
-
-[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -179,12 +170,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "log"
-version = "0.4.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "113b30b4cd05f7c06868fdb2854f66a7b9fece9a48425351cd532e810d74024f"
-
-[[package]]
 name = "managed"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -203,7 +188,6 @@ dependencies = [
  "bootloader_api",
  "conquer-once",
  "crossbeam-queue",
- "fatfs",
  "futures-util",
  "lazy_static",
  "linked_list_allocator",

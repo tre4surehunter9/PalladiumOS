@@ -1116,7 +1116,7 @@ impl FileSystem for Ext2 {
         if self.read_only {
             return Err(EROFS);
         }
-        let mut inode = self.inode(target)?;
+        let inode = self.inode(target)?;
         if inode.is_dir() {
             return Err(EPERM);
         }

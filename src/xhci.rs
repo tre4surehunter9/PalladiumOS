@@ -196,7 +196,6 @@ fn completion(trb: &[u32; 4]) -> u32 {
 struct Device {
     slot: u8,
     port: u8,
-    speed: u32,
     input: (u64, *mut u32),
     ep0: Ring,
     /// A page for descriptors.
@@ -492,7 +491,7 @@ impl Xhci {
         let slot = (ev[3] >> 24) as u8;
         let (out_phys, _) = dma_page()?;
         unsafe { write_volatile(self.dcbaa.add(slot as usize), out_phys) };
-        let mut dev = Device { slot, port, speed, input: dma_page()?, ep0: Ring::new()?, buf: dma_page()? };
+        let mut dev = Device { slot, port, input: dma_page()?, ep0: Ring::new()?, buf: dma_page()? };
 
         // Address it: slot context and endpoint 0.
         let mps: u32 = match speed {
@@ -948,7 +947,7 @@ fn emit(code: u16, press: bool) {
     if code == 0 {
         return;
     }
-    let mut send = |b: u8| {
+    let send = |b: u8| {
         if !crate::tty::intercept_scancode(b) {
             crate::task::keyboard::add_scancode(b);
         }

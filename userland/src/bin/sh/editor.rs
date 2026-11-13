@@ -135,12 +135,6 @@ impl LineEditor {
     }
 }
 
-fn move_left(n: usize) {
-    if n > 0 {
-        print!("\x1b[{}D", n);
-    }
-}
-
 fn move_right(n: usize) {
     if n > 0 {
         print!("\x1b[{}C", n);

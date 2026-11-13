@@ -53,15 +53,15 @@ T: Fn(),
 
 // Use the library's modules: declaring them again here (`mod vga_buffer;`)
 // would create a second screen writer with its own cursor position.
-use palladiumos::{println, serial_print, serial_println};
+use palladiumos::{serial_print, serial_println};
+#[cfg_attr(test, allow(unused_imports))] // (the test build prints only to the serial port)
+use palladiumos::println;
 
 use bootloader_api::{BootInfo, entry_point};
-use palladiumos::hlt_loop;
-use palladiumos::task::{Task, simple_executor::SimpleExecutor};
+use palladiumos::task::Task;
 
 entry_point!(kernel_main, config = &palladiumos::BOOTLOADER_CONFIG);
 extern crate alloc;
-use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
 
     // start function
     fn kernel_main(boot_info: &'static mut BootInfo) -> ! {

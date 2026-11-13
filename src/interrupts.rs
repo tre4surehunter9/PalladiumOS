@@ -2,7 +2,6 @@
 
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use crate::println;
-use crate::print;
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -49,7 +48,6 @@ lazy_static! {
    };
 }
 
-use x86_64::structures::idt::PageFaultErrorCode;
 use crate::hlt_loop;
 
 
@@ -423,8 +421,6 @@ fn finish(took: bool, user: bool) {
 }
 
 // Signal numbers (Linux), used for "killed by signal" exit statuses.
-const SIGILL: i32 = 4;
-const SIGSEGV: i32 = 11;
 
 use crate::gdt;
 

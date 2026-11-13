@@ -53,7 +53,7 @@ pub fn kernel_stack_top() -> u64 {
 
 pub fn init() {
     use x86_64::instructions::tables::load_tss;
-    use x86_64::instructions::segmentation::{CS, DS, SS, Segment};
+    use x86_64::instructions::segmentation::{CS, SS, Segment};
 
     GDT.0.load();
     unsafe {

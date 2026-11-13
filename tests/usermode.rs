@@ -311,7 +311,7 @@ fn the_lower_half_is_all_for_programs() {
     // kernel's is mapped there.
     assert!((0..256).all(palladiumos::memory::is_user_slot), "a lower-half slot is in use by the kernel");
     assert!((256..512).any(|i| !palladiumos::memory::is_user_slot(i)));
-    assert!((kernel_address as usize as u64) >= 0xffff_8000_0000_0000, "the kernel's code is in the higher half");
+    assert!((kernel_address as *const () as u64) >= 0xffff_8000_0000_0000, "the kernel's code is in the higher half");
     assert_eq!(launch_program(hello()), 0);
 }
 
