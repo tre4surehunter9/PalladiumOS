@@ -247,7 +247,13 @@ fn repo_root(kernel: &Path) -> PathBuf {
 /// GPU reports the window's size instead, smaller when the window manager
 /// shrinks the window to fit the desktop. PALLADIUM_FOLLOW_WINDOW=1 leaves
 /// the fw_cfg file out: the screen takes the window's size (at boot).
-fn display_args() -> Vec<String> {
+///
+/// And QEMU's GTK window with Zoom To Fit off (unless the arguments choose
+/// a display): for a GPU that can be told the window's size, QEMU turns it
+/// on by default, and then never makes the window as big as the screen
+/// (it scales the screen into whatever size the window has: small, at
+/// first). Off, the window takes the screen's size, as with VGA.
+fn display_args(extra: &[String]) -> Vec<String> {
     let wanted = std::env::var("PALLADIUM_RESOLUTION").ok();
     let (w, h) = wanted
         .as_deref()
@@ -270,7 +276,20 @@ fn display_args() -> Vec<String> {
         args.push("-fw_cfg".to_string());
         args.push(format!("name=opt/palladium/resolution,string={}x{}", w, h));
     }
+    let chose_display = extra.iter().any(|a| matches!(a.as_str(), "-display" | "-nographic" | "-vnc" | "-spice" | "-sdl" | "-curses"));
+    if !chose_display && gtk_display() {
+        args.push("-display".to_string());
+        args.push("gtk,zoom-to-fit=off".to_string());
+    }
     args
+}
+
+/// Whether this QEMU has the GTK display (its default when it does).
+fn gtk_display() -> bool {
+    Command::new("qemu-system-x86_64")
+        .args(["-display", "help"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim() == "gtk" || l.split_whitespace().any(|w| w == "gtk")))
 }
 
 fn is_test_kernel(kernel: &Path) -> bool {
@@ -384,7 +403,7 @@ fn run(kernel: &Path, extra: &[String], uefi: bool) {
         .arg(format!("format=raw,file={}", image.canonicalize().unwrap_or(image.clone()).display()))
         .arg("-no-reboot")
         .args(if test { TEST_ARGS } else { RUN_ARGS })
-        .args(if test { Vec::new() } else { display_args() })
+        .args(if test { Vec::new() } else { display_args(&extra) })
         .args(test_extra_args(kernel, test))
         .args(kvm_args(&test_extra_args(kernel, test).iter().copied().chain(extra.iter().map(String::as_str)).collect::<Vec<_>>()))
         .args(extra);
