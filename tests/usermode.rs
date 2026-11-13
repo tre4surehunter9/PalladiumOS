@@ -2036,6 +2036,39 @@ fn ipv6_sockets_work() {
 }
 
 #[test_case]
+fn ifconfig_shows_and_changes_interfaces() {
+    // BusyBox's ifconfig: /proc/net/dev, SIOCGIFCONF and the interface
+    // ioctls (get and set).
+    if palladiumos::mounts::resolve("/usr/bin/ifconfig").is_err() {
+        palladiumos::serial_print!("(skipped: busybox not built) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("ifconfig -a > /tmp/if1 2>&1; cat /proc/net/dev > /tmp/if2"), 0, "{}", file("/tmp/if1"));
+    let all = file("/tmp/if1");
+    for want in ["lo        Link encap:Local Loopback", "inet addr:127.0.0.1  Mask:255.0.0.0", "UP LOOPBACK RUNNING  MTU:65536"] {
+        assert!(all.contains(want), "{:?} missing from:\n{}", want, all);
+    }
+    let dev = file("/tmp/if2");
+    assert!(dev.starts_with("Inter-|   Receive") && dev.contains("    lo:"), "{}", dev);
+    if !all.contains("eth0") {
+        return; // (no network card)
+    }
+    assert!(dev.contains("  eth0:"), "{}", dev);
+    let status = sh("ifconfig eth0 down && ifconfig eth0 > /tmp/if3 && ifconfig eth0 up && ifconfig eth0 > /tmp/if4 \
+         && ifconfig eth0 netmask 255.255.0.0 && ifconfig eth0 > /tmp/if5 && ifconfig eth0 netmask 255.255.255.0");
+    assert_eq!(status, 0);
+    assert!(!file("/tmp/if3").contains(" UP "), "{}", file("/tmp/if3"));
+    assert!(file("/tmp/if4").contains("UP BROADCAST RUNNING MULTICAST"), "{}", file("/tmp/if4"));
+    assert!(file("/tmp/if5").contains("Mask:255.255.0.0"), "{}", file("/tmp/if5"));
+    // An ordinary user may look, not change (BusyBox's setuidgid: run as user).
+    setup_users();
+    assert_eq!(sh("setuidgid user ifconfig eth0 > /dev/null"), 0);
+    assert_ne!(sh("setuidgid user ifconfig eth0 down 2>/dev/null"), 0);
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn threads_on_several_cores_see_mapping_changes() {
     // TLB shootdowns (with PALLADIUM_SMP=4: threads on several cores).
     let Some(_) = c_program("test_tlb") else { return };

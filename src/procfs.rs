@@ -11,7 +11,8 @@
 //!   /proc/PID/fd/N     symlink to what fd N is (a path, /dev/tty, pipe:[id])
 //!   /proc/self         symlink to the reading process's directory
 //! System: meminfo, uptime, loadavg, mounts, version, cpuinfo, and
-//! /proc/net/if_inet6 (the IPv6 addresses, for ifconfig and ip).
+//! /proc/net/if_inet6 (the IPv6 addresses, for ifconfig and ip), /proc/net/dev
+//! (each interface's traffic, for ifconfig).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -25,7 +26,7 @@ const ROOT: Ino = 1;
 const SELF: Ino = 2;
 /// /proc/net and its files: (name, inode).
 const NET_DIR: Ino = 13;
-const NET_FILES: &[(&str, Ino)] = &[("if_inet6", 14)];
+const NET_FILES: &[(&str, Ino)] = &[("if_inet6", 14), ("dev", 15)];
 /// System files: (name, inode).
 const SYSTEM: &[(&str, Ino)] =
     &[("cmdline", 11), ("cpuinfo", 3), ("kmsg", 9), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("sound", 12), ("stat", 10), ("uptime", 7), ("version", 8)];
@@ -109,6 +110,7 @@ impl ProcFs {
             11 => String::from("BOOT_IMAGE=palladiumos\n"), // the kernel's command line
             12 => crate::sound::status(), // the sound card (as old Linux's /proc/sound)
             14 => if_inet6(),
+            15 => net_dev(),
             _ => return Err(EINVAL),
         })
     }
@@ -431,6 +433,30 @@ impl FileSystem for ProcFs {
     fn remove(&mut self, _dir: Ino, _name: &str, _is_dir: bool) -> FsResult<()> {
         Err(EPERM)
     }
+}
+
+/// /proc/net/dev, as Linux writes it: per interface, what it received
+/// (bytes, packets, errors, drops, FIFO, frame errors, compressed,
+/// multicast) and sent (bytes, packets, errors, drops, FIFO, collisions,
+/// carrier, compressed).
+fn net_dev() -> String {
+    use core::sync::atomic::Ordering::Relaxed;
+    let mut out = String::from(
+        "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n",
+    );
+    for (name, index) in crate::net::netlink::link_names() {
+        let s = &crate::net::STATS[if index == 1 { 0 } else { 1 }];
+        out.push_str(&format!(
+            "{:>6}: {:>7} {:>7}    0    0    0     0          0         0 {:>8} {:>7}    0 {:>4}    0     0       0          0\n",
+            name,
+            s.rx_bytes.load(Relaxed),
+            s.rx_packets.load(Relaxed),
+            s.tx_bytes.load(Relaxed),
+            s.tx_packets.load(Relaxed),
+            s.tx_dropped.load(Relaxed),
+        ));
+    }
+    out
 }
 
 /// /proc/net/if_inet6, as Linux writes it: per IPv6 address, the address

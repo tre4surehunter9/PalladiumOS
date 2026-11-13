@@ -52,7 +52,7 @@ pub struct Eth {
 
 pub struct Lo {
     pub iface: Interface,
-    pub dev: Loopback,
+    pub dev: card::Counted<Loopback>,
     pub sockets: SocketSet<'static>,
 }
 
@@ -64,6 +64,66 @@ pub struct Net {
 }
 
 pub static NET: Mutex<Option<Net>> = Mutex::new(None);
+
+/// Each interface's traffic (0 lo, 1 eth0): frames and bytes received and
+/// sent, and frames dropped, for /proc/net/dev (ifconfig, ip -s).
+pub struct Stats {
+    pub rx_packets: AtomicU64,
+    pub rx_bytes: AtomicU64,
+    pub tx_packets: AtomicU64,
+    pub tx_bytes: AtomicU64,
+    pub tx_dropped: AtomicU64,
+}
+
+impl Stats {
+    const fn new() -> Stats {
+        Stats {
+            rx_packets: AtomicU64::new(0),
+            rx_bytes: AtomicU64::new(0),
+            tx_packets: AtomicU64::new(0),
+            tx_bytes: AtomicU64::new(0),
+            tx_dropped: AtomicU64::new(0),
+        }
+    }
+
+    pub fn received(&self, bytes: usize) {
+        self.rx_packets.fetch_add(1, Ordering::Relaxed);
+        self.rx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    pub fn sent(&self, bytes: usize) {
+        self.tx_packets.fetch_add(1, Ordering::Relaxed);
+        self.tx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+}
+
+pub static STATS: [Stats; 2] = [Stats::new(), Stats::new()];
+
+/// eth0 is up (ifconfig eth0 down: no frames in or out until it's up again).
+pub static ETH_UP: AtomicBool = AtomicBool::new(true);
+
+/// Set eth0's IPv4 address and prefix length by hand (ifconfig eth0 ADDR
+/// netmask MASK), keeping its gateway and DNS server if still on the
+/// network. False: no eth0.
+pub fn set_ipv4(addr: Option<[u8; 4]>, prefix: Option<u8>) -> bool {
+    let mut guard = NET.lock();
+    let Some(eth) = guard.as_mut().and_then(|n| n.eth.as_mut()) else { return false };
+    let old = eth.config;
+    let a = addr.map(Ipv4Address::from_octets).or(old.map(|c| c.address.address())).unwrap_or(Ipv4Address::UNSPECIFIED);
+    // Without a netmask: the old one, or the address class's (as Linux).
+    let p = prefix.or(old.map(|c| c.address.prefix_len())).unwrap_or(match a.octets()[0] {
+        0..=127 => 8,
+        128..=191 => 16,
+        _ => 24,
+    });
+    let cidr = Ipv4Cidr::new(a, p);
+    let gateway = old.and_then(|c| c.gateway).filter(|g| cidr.contains_addr(g));
+    if gateway.is_none() {
+        eth.iface.routes_mut().remove_default_ipv4_route();
+    }
+    apply(eth, IpConfig { address: cidr, gateway, dns: old.and_then(|c| c.dns) });
+    true
+}
 /// Set by the card's interrupt: there's something to poll for.
 static IRQ: AtomicBool = AtomicBool::new(false);
 /// The card's IRQ line (0 = none) and I/O ports, for the interrupt handler.
@@ -112,7 +172,7 @@ pub fn init() -> Option<([u8; 6], u8, &'static str)> {
         crate::interrupts::unmask_irq(irq);
     }
 
-    let mut dev = Loopback::new(Medium::Ip);
+    let mut dev = card::Counted(Loopback::new(Medium::Ip), &STATS[0]);
     let mut config = Config::new(HardwareAddress::Ip);
     config.random_seed = seed();
     let mut iface = Interface::new(config, &mut dev, now());

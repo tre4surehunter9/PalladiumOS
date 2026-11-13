@@ -82,7 +82,11 @@ fn links() -> Vec<Link> {
         v.push(Link {
             index: 2,
             name: b"eth0",
-            flags: IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST | IFF_LOWER_UP,
+            flags: if super::ETH_UP.load(core::sync::atomic::Ordering::Relaxed) {
+                IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST | IFF_LOWER_UP
+            } else {
+                IFF_BROADCAST | IFF_MULTICAST | IFF_LOWER_UP
+            },
             kind: 1, // ARPHRD_ETHER
             mtu: 1500,
             mac,
@@ -242,9 +246,63 @@ pub fn interface_ioctl(request: u64, req: &mut [u8; 40]) -> Option<Result<(), i6
     const SIOCGIFHWADDR: u64 = 0x8927;
     const SIOCGIFINDEX: u64 = 0x8933;
     const SIOCGIFTXQLEN: u64 = 0x8942;
+    const SIOCGIFDSTADDR: u64 = 0x8917;
+    const SIOCGIFBRDADDR: u64 = 0x8919;
+    const SIOCGIFMETRIC: u64 = 0x891d;
+    const SIOCGIFMAP: u64 = 0x8970;
+    // Changes (ifconfig eth0 up/down, ADDR, netmask MASK): root only.
+    const SIOCSIFFLAGS: u64 = 0x8914;
+    const SIOCSIFADDR: u64 = 0x8916;
+    const SIOCSIFNETMASK: u64 = 0x891c;
     const ENODEV: i64 = 19;
+    const EPERM: i64 = 1;
+    const EINVAL: i64 = 22;
     const EADDRNOTAVAIL: i64 = 99;
-    if ![SIOCGIFNAME, SIOCGIFFLAGS, SIOCGIFADDR, SIOCGIFNETMASK, SIOCGIFMTU, SIOCGIFHWADDR, SIOCGIFINDEX, SIOCGIFTXQLEN].contains(&request) {
+    const GETS: [u64; 12] = [
+        SIOCGIFNAME, SIOCGIFFLAGS, SIOCGIFADDR, SIOCGIFNETMASK, SIOCGIFMTU, SIOCGIFHWADDR, SIOCGIFINDEX, SIOCGIFTXQLEN,
+        SIOCGIFDSTADDR, SIOCGIFBRDADDR, SIOCGIFMETRIC, SIOCGIFMAP,
+    ];
+    if [SIOCSIFFLAGS, SIOCSIFADDR, SIOCSIFNETMASK].contains(&request) {
+        let end = req[..16].iter().position(|&c| c == 0).unwrap_or(16);
+        let name = &req[..end];
+        if name != b"lo" && name != b"eth0" {
+            return Some(Err(ENODEV));
+        }
+        if !crate::process::current_cred().is_root() {
+            return Some(Err(EPERM));
+        }
+        let ipv4 = |req: &[u8; 40]| -> Option<[u8; 4]> {
+            (u16::from_le_bytes([req[16], req[17]]) == AF_INET as u16).then(|| req[20..24].try_into().unwrap())
+        };
+        return Some(match (request, name) {
+            (SIOCSIFFLAGS, b"eth0") => {
+                let up = u16::from_le_bytes([req[16], req[17]]) & 1 != 0;
+                super::ETH_UP.store(up, core::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            (SIOCSIFFLAGS, _) => Ok(()), // (lo stays up)
+            (_, b"lo") => Err(EPERM), // (lo's address is fixed)
+            (SIOCSIFADDR, _) => match ipv4(req) {
+                Some(a) if super::set_ipv4(Some(a), None) => Ok(()),
+                Some(_) => Err(ENODEV),
+                None => Err(EINVAL),
+            },
+            _ => match ipv4(req) {
+                Some(m) => {
+                    let m = u32::from_be_bytes(m);
+                    if m.leading_ones() + m.trailing_zeros() != 32 {
+                        Err(EINVAL) // not a netmask
+                    } else if super::set_ipv4(None, Some(m.leading_ones() as u8)) {
+                        Ok(())
+                    } else {
+                        Err(ENODEV)
+                    }
+                }
+                None => Err(EINVAL),
+            },
+        });
+    }
+    if !GETS.contains(&request) {
         return None;
     }
     let all = links();
@@ -275,6 +333,17 @@ pub fn interface_ioctl(request: u64, req: &mut [u8; 40]) -> Option<Result<(), i6
         SIOCGIFFLAGS => answer[..2].copy_from_slice(&(l.flags as u16).to_le_bytes()),
         SIOCGIFMTU => answer[..4].copy_from_slice(&l.mtu.to_le_bytes()),
         SIOCGIFTXQLEN => answer[..4].copy_from_slice(&1000u32.to_le_bytes()),
+        SIOCGIFMETRIC | SIOCGIFMAP => {} // (metric 0; no I/O ports or memory to tell)
+        SIOCGIFDSTADDR => return Some(Err(EADDRNOTAVAIL)), // (not a point-to-point link)
+        SIOCGIFBRDADDR => {
+            let Some((addr, prefix)) = l.addr else { return Some(Err(EADDRNOTAVAIL)) };
+            if l.flags & 0x2 == 0 {
+                return Some(Err(EADDRNOTAVAIL)); // (no broadcast on lo)
+            }
+            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix as u32) };
+            let b = (u32::from_be_bytes(addr) | !mask).to_be_bytes();
+            answer[..16].copy_from_slice(&sockaddr_in(b));
+        }
         SIOCGIFHWADDR => {
             answer[..2].copy_from_slice(&l.kind.to_le_bytes()); // sa_family = ARPHRD_*
             answer[2..8].copy_from_slice(&l.mac);
@@ -401,4 +470,27 @@ impl NetlinkSocket {
     pub fn pending_bytes(&self) -> usize {
         self.replies.lock().front().map_or(0, Vec::len)
     }
+}
+
+/// SIOCGIFCONF's answer: an ifreq (name, IPv4 address) per interface with
+/// an IPv4 address, at most `room` bytes of them.
+pub fn interface_list(room: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for l in links() {
+        let Some((addr, _)) = l.addr else { continue };
+        if out.len() + 40 > room {
+            break;
+        }
+        let mut r = [0u8; 40];
+        r[..l.name.len()].copy_from_slice(l.name);
+        r[16] = AF_INET;
+        r[20..24].copy_from_slice(&addr);
+        out.extend_from_slice(&r);
+    }
+    out
+}
+
+/// The interfaces, for /proc/net/dev: (name, interface index).
+pub fn link_names() -> Vec<(&'static str, u32)> {
+    links().iter().map(|l| (core::str::from_utf8(l.name).unwrap_or("?"), l.index)).collect()
 }

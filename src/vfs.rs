@@ -606,6 +606,21 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
             // Sockets: non-blocking mode, bytes waiting, and the
             // interfaces (name, index, address, MTU, MAC...).
             let Kind::Socket(s) = &h.lock().kind else { return -ENOTTY };
+            const SIOCGIFCONF: u64 = 0x8912;
+            if request == SIOCGIFCONF {
+                // struct ifconf: the buffer's length (in and out), then the
+                // buffer (NULL: just how much room the list needs).
+                let Some(ifc) = (unsafe { user_slice_mut(arg, 16) }) else { return -EFAULT };
+                let room = i32::from_le_bytes(ifc[..4].try_into().unwrap()).max(0) as usize;
+                let buf = u64::from_le_bytes(ifc[8..16].try_into().unwrap());
+                let list = crate::net::netlink::interface_list(if buf == 0 { usize::MAX } else { room });
+                if buf != 0 {
+                    let Some(out) = (unsafe { user_slice_mut(buf, list.len() as u64) }) else { return -EFAULT };
+                    out.copy_from_slice(&list);
+                }
+                ifc[..4].copy_from_slice(&(list.len() as i32).to_le_bytes());
+                return 0;
+            }
             if let Some(req) = unsafe { user_slice_mut(arg, 40) } {
                 let mut ifreq = [0u8; 40];
                 ifreq.copy_from_slice(req);
