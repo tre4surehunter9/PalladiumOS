@@ -154,17 +154,19 @@ pub fn init() -> Option<(u32, u32)> {
     let cursor_queue = dev.queue(1, 16);
     let mut gpu = Gpu { dev, control, width: 0, height: 0, cursor: None };
 
-    // The screen's size: the EDID's preferred mode (QEMU: xres x yres),
-    // else the firmware's, else the first scanout's. (Not the scanout's
-    // when there's a choice: with QEMU's window it's the window's size at
-    // the moment, small at first; the firmware may have taken that too.)
+    // The screen's size: the one the runner asked for (fw_cfg), else the
+    // EDID's preferred mode, else the firmware's, else the first
+    // scanout's. (With QEMU's window, the EDID and the scanout both say
+    // the window's size at the moment: smaller than asked for when the
+    // window manager shrinks the window to fit the desktop.)
     let info = gpu.control.request(&header(GET_DISPLAY_INFO), 24 + 16 * 24);
     if answer_type(&info) != RESP_OK_DISPLAY_INFO {
         return None;
     }
     let field = |i: usize| u32::from_le_bytes(info[24 + i * 4..28 + i * 4].try_into().unwrap());
     let edid = if features & F_EDID != 0 { preferred_mode(&mut gpu) } else { None };
-    let (width, height) = match (edid, crate::vga_buffer::framebuffer()) {
+    // (fw_cfg first, below: it's what the runner asked for.)
+    let (width, height) = match (crate::fw_cfg::resolution().or(edid), crate::vga_buffer::framebuffer()) {
         (Some(mode), _) => mode,
         (None, Some((_, _, w, h, ..))) if w >= 640 && h >= 480 => (w as u32, h as u32),
         _ => (field(2), field(3)),

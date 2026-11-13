@@ -41,6 +41,10 @@ const RUN_ARGS: &[&str] = &[
     // tells the firmware it prefers 1280x720 (EDID), and UEFI booting keeps
     // the firmware's mode: 720p, as with BIOS.
     "-vga", "none", "-device", "virtio-vga,edid=on,xres=1280,yres=720",
+    // The same size, told to the kernel directly: with QEMU's window, the
+    // GPU reports the window's size instead (smaller when the window
+    // manager shrinks it to fit the desktop).
+    "-fw_cfg", "name=opt/palladium/resolution,string=1280x720",
     // The data, system and Alpine disks as virtio disks (in this order:
     // PalladiumOS numbers them so; much faster than IDE or AHCI).
     "-drive", "format=raw,file=target/disk.img,if=virtio",
