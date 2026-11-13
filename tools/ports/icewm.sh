@@ -4,13 +4,14 @@
 # manager startx starts: a taskbar with a menu, a clock and the windows'
 # buttons, themes) and icewmbg (the desktop background), with its themes
 # and PalladiumOS's menu in /usr/share/icewm. C++ (palladium-c++), on the
-# X core fonts and XPM and PNG images; with libXcomposite and libXdamage,
-# built here (the rest of X is tinyx.sh's and x11-apps.sh's).
+# X core fonts and XPM, PNG and JPEG images (libpng and libjpeg: links.sh's);
+# with libXcomposite and libXdamage, built here (the rest of X is tinyx.sh's
+# and x11-apps.sh's).
 . "$(dirname "$0")/common.sh"
 
 X="$PORTS/x11"
-if [ ! -f "$X/lib/libXrender.a" ] || [ ! -x "$ROOT/target/musl/bin/palladium-c++" ]; then
-    echo "run tools/ports/x11-apps.sh and tools/ports/cxx.sh first" >&2
+if [ ! -f "$X/lib/libXrender.a" ] || [ ! -x "$ROOT/target/musl/bin/palladium-c++" ] || [ ! -f "$X/lib/libjpeg.a" ]; then
+    echo "run tools/ports/x11-apps.sh, tools/ports/links.sh and tools/ports/cxx.sh first" >&2
     exit 1
 fi
 PKG_CONFIG_LIBDIR="$X/lib/pkgconfig:$X/share/pkgconfig"
@@ -33,7 +34,7 @@ fetch icewm-4.1.0 https://github.com/ice-wm/icewm/archive/refs/tags/4.1.0.tar.gz
 sed -i '/icecursor/d' src/CMakeLists.txt
 # Static: every library at the end of the link (CMake's pkg-config gives
 # the shared-library flags).
-XLIBS="$(pkg-config --static --libs xcomposite xdamage xrender xcursor xfixes xpm libpng sm ice xext x11) -lz -lm"
+XLIBS="$(pkg-config --static --libs xcomposite xdamage xrender xcursor xfixes xpm libpng libjpeg sm ice xext x11) -lz -lm"
 rm -rf build
 mkdir build
 cd build
@@ -44,7 +45,7 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
     -DCONFIG_IMLIB2=OFF -DCONFIG_XPM=ON -DCONFIG_LIBPNG=ON -DCONFIG_LIBRSVG=OFF -DCONFIG_NANOSVG=OFF \
     -DCONFIG_COREFONTS=ON -DCONFIG_XFREETYPE=OFF -DCONFIG_I18N=OFF -DENABLE_NLS=OFF -DCONFIG_FRIBIDI=OFF \
     -DXINERAMA=OFF -DCONFIG_XRANDR=OFF -DHAVE_XRES=OFF -DCONFIG_FDO_MENUS=OFF -DENABLE_ALSA=OFF \
-    -DENABLE_AO=OFF -DCONFIG_GDK_PIXBUF_XLIB=OFF -DCONFIG_LIBJPEG=OFF -DBUILD_TESTING=OFF \
+    -DENABLE_AO=OFF -DCONFIG_GDK_PIXBUF_XLIB=OFF -DCONFIG_LIBJPEG=ON -DBUILD_TESTING=OFF \
     >cmake.log 2>&1 || { tail -30 cmake.log; exit 1; }
 make -j"$(nproc)" >make.log 2>&1 || { grep -B2 -A8 "error" make.log | tail -40; exit 1; }
 rm -rf stage
@@ -55,9 +56,9 @@ for p in icewm icewmbg icewm-session icesh icehelp; do
 done
 rm -rf "$SYSROOT/share/icewm"
 cp -a stage/usr/share/icewm "$SYSROOT/share/"
-# (Not its sounds, LED clock digits or JPEG background: no sound daemon,
-# a text clock, no JPEG loader here.)
-rm -rf "$SYSROOT/share/icewm/sounds" "$SYSROOT/share/icewm/ledclock" "$SYSROOT/share/icewm/IceWM.jpg"
+# (Not its sounds or LED clock digits: no sound daemon, a text clock.
+# IceWM.jpg stays: its splash picture at startup.)
+rm -rf "$SYSROOT/share/icewm/sounds" "$SYSROOT/share/icewm/ledclock"
 # PalladiumOS's menu, toolbar and settings (tools/ports/icewm/).
 install -m 644 "$ROOT/tools/ports/icewm/"* "$SYSROOT/share/icewm/"
 echo "icewm installed in $SYSROOT/bin; themes: $(ls "$SYSROOT/share/icewm/themes" | tr '\n' ' ')"
