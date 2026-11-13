@@ -55,6 +55,8 @@ const BD_BUP: u16 = 1 << 14;
 pub const AFMT_U8: u32 = 0x08;
 pub const AFMT_S16_LE: u32 = 0x10;
 pub const AFMT_S8: u32 = 0x40;
+/// 32-bit samples (played as their top 16 bits: the card's is 16-bit).
+pub const AFMT_S32_LE: u32 = 0x1000;
 
 struct Ac97 {
     nam: u16,
@@ -150,7 +152,7 @@ struct Sound {
     /// The card has been started (CR_RUN) since the last reset.
     running: bool,
     /// A partial frame of the program's data (between writes).
-    partial: [u8; 4],
+    partial: [u8; 8],
     partial_len: usize,
     /// Resampling: 16.16 fixed-point position between input frames.
     phase: u32,
@@ -173,7 +175,7 @@ static SOUND: Mutex<Sound> = Mutex::new(Sound {
     tail: 0,
     fill: 0,
     running: false,
-    partial: [0; 4],
+    partial: [0; 8],
     partial_len: 0,
     phase: 0,
     submitted: 0,
@@ -256,7 +258,7 @@ pub fn status() -> alloc::string::String {
         s.open,
         s.rate,
         s.channels,
-        match s.format { AFMT_S16_LE => "16-bit", AFMT_S8 => "signed 8-bit", _ => "unsigned 8-bit" },
+        match s.format { AFMT_S32_LE => "32-bit", AFMT_S16_LE => "16-bit", AFMT_S8 => "signed 8-bit", _ => "unsigned 8-bit" },
         s.dev_rate,
         s.frag(),
         s.max_queued(),
@@ -378,7 +380,15 @@ impl Sound {
     }
 
     fn frame_bytes(&self) -> usize {
-        self.channels as usize * if self.format == AFMT_S16_LE { 2 } else { 1 }
+        self.channels as usize * self.sample_bytes()
+    }
+
+    fn sample_bytes(&self) -> usize {
+        match self.format {
+            AFMT_S32_LE => 4,
+            AFMT_S16_LE => 2,
+            _ => 1,
+        }
     }
 
     /// The card's bytes for `n` bytes of the program's data.
@@ -478,6 +488,7 @@ impl Sound {
             let sample = |i: usize| -> i16 {
                 match self.format {
                     AFMT_S16_LE => i16::from_le_bytes([f[2 * i], f[2 * i + 1]]),
+                    AFMT_S32_LE => i16::from_le_bytes([f[4 * i + 2], f[4 * i + 3]]),
                     AFMT_S8 => (f[i] as i8 as i16) << 8,
                     _ => ((f[i] as i16) - 128) << 8,
                 }
@@ -664,7 +675,7 @@ pub fn dsp_ioctl(request: u64, arg: u64) -> i64 {
                 Err(e) => return -e,
             };
             let mut s = SOUND.lock();
-            if matches!(v, AFMT_U8 | AFMT_S8 | AFMT_S16_LE) {
+            if matches!(v, AFMT_U8 | AFMT_S8 | AFMT_S16_LE | AFMT_S32_LE) {
                 s.format = v;
             } else if v != 0 {
                 s.format = AFMT_S16_LE; // the nearest it can do (OSS returns what it chose)
@@ -672,8 +683,8 @@ pub fn dsp_ioctl(request: u64, arg: u64) -> i64 {
             let f = s.format;
             write_ints(arg, &[f as i32])
         }
-        SOUND_PCM_READ_BITS => write_ints(arg, &[if SOUND.lock().format == AFMT_S16_LE { 16 } else { 8 }]),
-        SNDCTL_DSP_GETFMTS => write_ints(arg, &[(AFMT_U8 | AFMT_S8 | AFMT_S16_LE) as i32]),
+        SOUND_PCM_READ_BITS => write_ints(arg, &[SOUND.lock().sample_bytes() as i32 * 8]),
+        SNDCTL_DSP_GETFMTS => write_ints(arg, &[(AFMT_U8 | AFMT_S8 | AFMT_S16_LE | AFMT_S32_LE) as i32]),
         SNDCTL_DSP_SETFRAGMENT => {
             let v = match int() {
                 Ok(v) => v as u32,

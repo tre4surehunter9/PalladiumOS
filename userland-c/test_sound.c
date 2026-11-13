@@ -17,6 +17,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef AFMT_S32_LE
+#define AFMT_S32_LE 0x00001000 /* (not in musl's soundcard.h) */
+#endif
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "test_sound: check failed at line %d: %s (errno %d)\n", __LINE__, #c, errno); return __LINE__; } } while (0)
 
 static double now(void)
@@ -70,7 +73,11 @@ static int dsp(void)
     CHECK(open("/dev/dsp", O_WRONLY) == -1 && errno == EBUSY);
     int fmts = 0;
     CHECK(ioctl(d, SNDCTL_DSP_GETFMTS, &fmts) == 0 && fmts & AFMT_S16_LE && fmts & AFMT_U8);
-    int f = AFMT_S16_LE, ch = 2, rate = 22050;
+    /* 32-bit samples are taken (SoX plays its own as 32-bit), then 16-bit. */
+    CHECK(fmts & AFMT_S32_LE);
+    int f = AFMT_S32_LE, ch = 2, rate = 22050;
+    CHECK(ioctl(d, SNDCTL_DSP_SETFMT, &f) == 0 && f == AFMT_S32_LE);
+    f = AFMT_S16_LE;
     CHECK(ioctl(d, SNDCTL_DSP_SETFMT, &f) == 0 && f == AFMT_S16_LE);
     CHECK(ioctl(d, SNDCTL_DSP_CHANNELS, &ch) == 0 && ch == 2);
     CHECK(ioctl(d, SNDCTL_DSP_SPEED, &rate) == 0 && rate == 22050);
