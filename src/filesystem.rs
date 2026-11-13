@@ -226,6 +226,33 @@ pub fn init_default_files() {
     // current version.
     let _ = write_file("/etc/os-release", OS_RELEASE);
     init_users();
+    init_sudoers();
+}
+
+/// sudo's rules (written if there are none, also on an older disk): root
+/// and the wheel group (root and user to start with) may run anything as
+/// anyone, after their own password. Readable by root only, as sudo wants;
+/// edit it with visudo. And the directories sudo keeps its state in.
+fn init_sudoers() {
+    for dir in ["/var", "/var/run", "/var/db"] {
+        let _ = make_dir(dir);
+    }
+    if mounts::resolve("/etc/sudoers").is_ok() {
+        return;
+    }
+    let _ = make_dir("/etc");
+    let _ = write_file(
+        "/etc/sudoers",
+        "# /etc/sudoers: who may run what as whom. Edit it with visudo.\n\
+         Defaults env_reset\n\
+         Defaults secure_path=\"/bin:/usr/bin:/usr/local/bin\"\n\
+         \n\
+         root ALL=(ALL:ALL) ALL\n\
+         # The wheel group (/etc/group): everything, with their own password.\n\
+         %wheel ALL=(ALL:ALL) ALL\n",
+    );
+    let _ = chown("/etc/sudoers", 0, 0);
+    let _ = chmod("/etc/sudoers", 0o440);
 }
 
 /// Set the owner of a file (kernel helper; no permission checks).

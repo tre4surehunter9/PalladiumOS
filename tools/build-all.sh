@@ -17,7 +17,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-ALL_PORTS="lua dash fastfetch tcc micropython busybox dropbear fonts tinyx x11-clients fvwm95 x11-apps xterm links tcltk vim xfm cxx icewm sdl games doom dosbox nes"
+ALL_PORTS="lua dash fastfetch tcc micropython busybox dropbear fonts tinyx x11-clients fvwm95 x11-apps xterm links tcltk vim xfm cxx icewm sdl games doom dosbox nes sudo"
 STAMPS=target/ports/stamps
 
 # What each port produces (relative to target/).
@@ -38,6 +38,7 @@ outputs() {
         nes) echo "sysroot/bin/nes sysroot/share/games/nes/nova.nes" ;;
         dosbox) echo "sysroot/bin/dosbox.bin sysroot/share/games/dos/WORDLOS.COM sysroot/share/games/dos/FLOPBIRD.COM" ;;
         icewm) echo "sysroot/bin/icewm sysroot/bin/icewmbg sysroot/share/icewm/menu" ;;
+        sudo) echo "sysroot/bin/sudo sysroot/bin/visudo" ;;
         cxx) echo "musl/lib/libstdc++.a musl/lib/libdlfo.a musl/bin/palladium-c++" ;;
         games) echo "sysroot/bin/xboard sysroot/bin/fairymax sysroot/bin/xjewel sysroot/bin/xsnow sysroot/bin/xroach sysroot/bin/xmahjongg" ;;
         doom) echo "sysroot/bin/doomgeneric sysroot/share/games/doom/freedoom1.wad" ;;

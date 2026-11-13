@@ -98,6 +98,8 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
             ("groups", "your groups"),
             ("su", "become another user (root by default)"),
             ("passwd", "change a password"),
+            ("sudo", "run a command as root (the wheel group, with your own password)"),
+            ("visudo", "edit /etc/sudoers, who may use sudo (checks it before saving)"),
             ("login", "log in"),
             ("useradd", "add a user (root)"),
             ("userdel", "remove a user (root)"),
