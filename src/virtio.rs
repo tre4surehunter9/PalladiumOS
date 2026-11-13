@@ -268,6 +268,12 @@ impl Device {
         unsafe { read_volatile(self.config.add(off) as *const u32) }
     }
 
+    pub fn set_config8(&self, off: usize, v: u8) {
+        if !self.config.is_null() {
+            unsafe { write_volatile(self.config.add(off), v) }
+        }
+    }
+
     pub fn set_config32(&self, off: usize, v: u32) {
         if !self.config.is_null() {
             unsafe { write_volatile(self.config.add(off) as *mut u32, v) }

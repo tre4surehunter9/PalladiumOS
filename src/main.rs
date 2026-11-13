@@ -139,6 +139,9 @@ extern crate alloc;
         if palladiumos::mouse::init() {
             boot_ok!("Started the PS/2 mouse (/dev/input/mice)");
         }
+        for name in palladiumos::virtio_input::init() {
+            boot_ok!("Found a virtio input device: {}", name);
+        }
         if palladiumos::xhci::init().is_some() {
             let (k, p) = (palladiumos::xhci::keyboards(), palladiumos::xhci::pointers());
             let plural = |n: usize| if n == 1 { "" } else { "s" };

@@ -222,12 +222,8 @@ struct Keyboard {
 /// pointer laid out by its HID report descriptor.
 struct Pointer {
     layout: Layout,
-    /// The screen's size (for absolute pointers).
-    screen: (i32, i32),
-    /// Where the pointer is now, as far as programs were told (absolute
-    /// pointers; None until it's been put in the corner once).
-    at: Option<(i32, i32)>,
-    buttons: u8,
+    /// An absolute pointer's position, turned into relative moves.
+    tablet: crate::mouse::Tablet,
 }
 
 enum Layout {
@@ -584,12 +580,7 @@ impl Xhci {
             length: u32::from(maxp.clamp(8, REPORT_SIZE as u16)),
             prev: [0; 8],
             held: None,
-            pointer: pointer.map(|layout| Pointer {
-                layout,
-                screen: crate::vga_buffer::framebuffer().map_or((1280, 720), |f| (f.2 as i32, f.3 as i32)),
-                at: None,
-                buttons: 0,
-            }),
+            pointer: pointer.map(|layout| Pointer { layout, tablet: crate::mouse::Tablet::new() }),
         })
     }
 
@@ -645,9 +636,6 @@ impl Xhci {
         }
     }
 }
-
-/// The largest move of an absolute pointer's pins (see Pointer::move_to).
-const PIN_STEP: i32 = 45;
 
 /// A HID interface of a configuration descriptor.
 struct HidInterface {
@@ -834,7 +822,8 @@ impl Pointer {
                     let v = field(data, f).clamp(f.min, f.max);
                     (i64::from(v - f.min) * i64::from(extent - 1) / i64::from(f.max - f.min)) as i32
                 };
-                let (tx, ty) = (scale(l.x, self.screen.0), scale(l.y, self.screen.1));
+                let (w, h) = self.tablet.screen;
+                let (tx, ty) = (scale(l.x, w), scale(l.y, h));
                 let mut buttons = 0;
                 for (bit, f) in l.buttons.iter().enumerate() {
                     if f.is_some_and(|f| field(data, f) != 0) {
@@ -842,59 +831,9 @@ impl Pointer {
                     }
                 }
                 let wheel = l.wheel.map_or(0, |f| field(data, f));
-                if crate::mouse::take_resync() {
-                    self.at = None; // (a program set the mouse up: where X put the pointer isn't known)
-                }
-                self.move_to(tx, ty);
-                if buttons != self.buttons || wheel != 0 {
-                    // (After the move: a click lands where the pointer went.)
-                    self.buttons = buttons;
-                    crate::mouse::report(buttons, 0, 0, -wheel);
-                }
+                self.tablet.update(tx, ty, buttons, wheel);
             }
         }
-    }
-
-    /// Move the pointer to (x, y) on the screen with relative moves.
-    fn move_to(&mut self, x: i32, y: i32) {
-        let b = self.buttons;
-        // Into a corner or against an edge: moves past it (X stops the
-        // pointer there). At most 45 pixels each: while X's mouse driver
-        // is still working out the protocol, a move of more than 50 makes
-        // it give up on the right one.
-        let pin = |dx: i32, dy: i32, extent: i32| {
-            for _ in 0..=extent / PIN_STEP {
-                crate::mouse::report(b, dx, dy, 0);
-            }
-        };
-        let (mut cx, mut cy) = match self.at {
-            Some(at) => at,
-            None => {
-                pin(-PIN_STEP, 0, self.screen.0);
-                pin(0, PIN_STEP, self.screen.1);
-                (0, 0)
-            }
-        };
-        if x == 0 && cx != 0 {
-            pin(-PIN_STEP, 0, self.screen.0);
-            cx = 0;
-        }
-        if y == 0 && cy != 0 {
-            pin(0, PIN_STEP, self.screen.1);
-            cy = 0;
-        }
-        // Then steps of at most 2 pixels a side (at most 2.9 long: X
-        // accelerates moves of more than 4).
-        let (dx, dy) = (x - cx, y - cy);
-        let n = (dx.abs().max(dy.abs()) + 1) / 2;
-        let (mut px, mut py) = (0, 0);
-        for i in 1..=n {
-            let (sx, sy) = (dx * i / n, dy * i / n);
-            crate::mouse::report(b, sx - px, -(sy - py), 0); // (PS/2: up is positive)
-            px = sx;
-            py = sy;
-        }
-        self.at = Some((x, y));
     }
 }
 
@@ -943,7 +882,7 @@ impl Keyboard {
 
 /// Send a key press or release as PS/2 (set 1) scancodes. 0xE0xx codes are
 /// the extended keys (arrows, ...), sent with their 0xE0 prefix.
-fn emit(code: u16, press: bool) {
+pub(crate) fn emit(code: u16, press: bool) {
     if code == 0 {
         return;
     }

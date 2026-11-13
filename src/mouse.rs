@@ -146,6 +146,15 @@ pub fn interrupt(byte: u8) {
     }
 }
 
+/// Room for the most packets ever queued, made now: other mice report
+/// from the timer, which can interrupt kernel code that's allocating
+/// (the heap's lock held), so reporting mustn't allocate.
+pub fn reserve() {
+    let mut m = MICE.lock();
+    let room = MAX_QUEUED.saturating_sub(m.queue.len());
+    m.queue.reserve(room);
+}
+
 /// A packet from another mouse (a USB one): buttons (bit 0 left, 1 right,
 /// 2 middle), movement right and *up* (as PS/2 counts), and the wheel.
 pub fn report(buttons: u8, dx: i32, dy: i32, wheel: i32) {
@@ -235,4 +244,85 @@ pub fn write(bytes: &[u8]) -> i64 {
     drop(m);
     crate::task::keyboard::note_arrival();
     bytes.len() as i64
+}
+
+/// The largest move of an absolute pointer's pins (see Tablet::move_to).
+const PIN_STEP: i32 = 45;
+
+/// An absolute pointer (a USB or virtio tablet: QEMU's, whose pointer
+/// follows yours over its window), turned into the relative moves of
+/// /dev/input/mice: programs (X) are told where the pointer goes as moves
+/// from where it was.
+pub struct Tablet {
+    /// The screen's size (positions are given in it).
+    pub screen: (i32, i32),
+    /// Where the pointer is now, as far as programs were told (None until
+    /// it's been put in the corner once).
+    at: Option<(i32, i32)>,
+    buttons: u8,
+}
+
+impl Tablet {
+    pub fn new() -> Tablet {
+        reserve(); // (it reports from the timer)
+        let screen = crate::vga_buffer::framebuffer().map_or((1280, 720), |f| (f.2 as i32, f.3 as i32));
+        Tablet { screen, at: None, buttons: 0 }
+    }
+
+    /// The pointer is at (x, y) on the screen with `buttons` down (bit 0
+    /// left, 1 right, 2 middle), and the wheel turned `wheel` (up:
+    /// positive).
+    pub fn update(&mut self, x: i32, y: i32, buttons: u8, wheel: i32) {
+        if take_resync() {
+            self.at = None; // (a program set the mouse up: where X put the pointer isn't known)
+        }
+        self.move_to(x, y);
+        if buttons != self.buttons || wheel != 0 {
+            // (After the move: a click lands where the pointer went.)
+            self.buttons = buttons;
+            report(buttons, 0, 0, -wheel);
+        }
+    }
+
+    /// Move the pointer to (x, y) on the screen with relative moves.
+    fn move_to(&mut self, x: i32, y: i32) {
+        let b = self.buttons;
+        // Into a corner or against an edge: moves past it (X stops the
+        // pointer there). At most 45 pixels each: while X's mouse driver
+        // is still working out the protocol, a move of more than 50 makes
+        // it give up on the right one.
+        let pin = |dx: i32, dy: i32, extent: i32| {
+            for _ in 0..=extent / PIN_STEP {
+                report(b, dx, dy, 0);
+            }
+        };
+        let (mut cx, mut cy) = match self.at {
+            Some(at) => at,
+            None => {
+                pin(-PIN_STEP, 0, self.screen.0);
+                pin(0, PIN_STEP, self.screen.1);
+                (0, 0)
+            }
+        };
+        if x == 0 && cx != 0 {
+            pin(-PIN_STEP, 0, self.screen.0);
+            cx = 0;
+        }
+        if y == 0 && cy != 0 {
+            pin(0, PIN_STEP, self.screen.1);
+            cy = 0;
+        }
+        // Then steps of at most 2 pixels a side (at most 2.9 long: X
+        // accelerates moves of more than 4).
+        let (dx, dy) = (x - cx, y - cy);
+        let n = (dx.abs().max(dy.abs()) + 1) / 2;
+        let (mut px, mut py) = (0, 0);
+        for i in 1..=n {
+            let (sx, sy) = (dx * i / n, dy * i / n);
+            report(b, sx - px, -(sy - py), 0); // (PS/2: up is positive)
+            px = sx;
+            py = sy;
+        }
+        self.at = Some((x, y));
+    }
 }

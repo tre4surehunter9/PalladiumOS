@@ -46,6 +46,7 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     // kernel virtio-vga): X and /dev/fb0 are tested on it.
     let _ = palladiumos::virtio_gpu::init();
     let _ = palladiumos::virtio_rng::init();
+    let _ = palladiumos::virtio_input::init();
     palladiumos::net::init(); // loopback, and eth0 if QEMU has a card
     palladiumos::block::mount_system_disk(); // /usr: tcc's headers and libraries, if built
     palladiumos::block::mount_alpine_disk(); // /alpine: a 64 MiB scratch disk (target/test-scratch.img)
@@ -2055,6 +2056,21 @@ fn virtio_rng_gives_the_hosts_randomness() {
     let _ = filesystem::make_dir("/tmp");
     assert_eq!(sh("head -c 64 /dev/urandom | wc -c > /tmp/rng1"), 0);
     assert_eq!(file("/tmp/rng1").trim(), "64");
+}
+
+#[test_case]
+fn virtio_input_devices_are_found() {
+    // (The usermode test kernel has QEMU's virtio keyboard and tablet.)
+    assert_eq!(palladiumos::virtio_input::count(), 2);
+    use palladiumos::virtio_input::scancode;
+    // Linux's key codes: 1..88 are PS/2 set 1 scancodes; the rest 0xE0 ones.
+    assert_eq!(scancode(1), 0x01); // Esc
+    assert_eq!(scancode(30), 0x1E); // A
+    assert_eq!(scancode(88), 0x58); // F12
+    assert_eq!(scancode(103), 0xE048); // Up
+    assert_eq!(scancode(111), 0xE053); // Delete
+    assert_eq!(scancode(240), 0); // (unknown: nothing)
+    palladiumos::virtio_input::poll(); // (no events: nothing happens)
 }
 
 #[test_case]

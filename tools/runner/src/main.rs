@@ -44,10 +44,11 @@ const RUN_ARGS: &[&str] = &[
     "-drive", "format=raw,file=target/alpine.img,if=virtio",
     // A virtio network card (much faster than an emulated RTL8139).
     "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:80", "-device", "virtio-net-pci,netdev=net0",
-    // A USB keyboard (QEMU sends the window's keys to it, not to PS/2),
-    // and a USB tablet: the pointer follows yours in QEMU's window, without
-    // it grabbing the mouse.
-    "-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-tablet",
+    // A virtio keyboard (QEMU sends the window's keys to it, not to PS/2)
+    // and a virtio tablet: the pointer follows yours in QEMU's window,
+    // without it grabbing the mouse. (And a USB controller, for USB
+    // devices: PalladiumOS drives USB keyboards and tablets too.)
+    "-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci", "-device", "qemu-xhci",
     // A sound card (AC'97), played through this machine's sound system.
     "-device", "AC97",
     // The host's randomness, for /dev/random (virtio-rng).
@@ -366,7 +367,7 @@ fn test_extra_args(kernel: &Path, test: bool) -> Vec<&'static str> {
     let nic = if virtio { "virtio-net-pci,netdev=net0" } else { "rtl8139,netdev=net0" };
     args.extend(["-device", nic]);
     if virtio {
-        args.extend(["-device", "virtio-rng-pci"]);
+        args.extend(["-device", "virtio-rng-pci", "-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci"]);
     }
     args
 }
