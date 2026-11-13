@@ -2012,6 +2012,16 @@ fn epoll_eventfd_and_big_programs() {
 }
 
 #[test_case]
+fn ipv6_sockets_work() {
+    let Some(_) = c_program("test_ipv6") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let status = sh("test_ipv6 > /tmp/ipv6.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/ipv6.out"));
+    assert!(file("/tmp/ipv6.out").contains("all checks passed"), "{}", file("/tmp/ipv6.out"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn threads_on_several_cores_see_mapping_changes() {
     // TLB shootdowns (with PALLADIUM_SMP=4: threads on several cores).
     let Some(_) = c_program("test_tlb") else { return };

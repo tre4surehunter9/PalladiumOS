@@ -23,7 +23,7 @@ use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Loopback, Medium};
 use smoltcp::socket::dhcpv4;
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr};
 use spin::Mutex;
 
 use rtl8139::Rtl8139;
@@ -85,7 +85,15 @@ pub fn init() -> Option<([u8; 6], u8)> {
     let eth = card.and_then(|c| Rtl8139::new(&c)).map(|mut dev| {
         let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(dev.mac)));
         config.random_seed = seed();
-        let iface = Interface::new(config, &mut dev, now());
+        // IPv6: a global address from the router's advertisements (SLAAC:
+        // QEMU's user network sends them, prefix fec0::/64)...
+        config.slaac = true;
+        let mut iface = Interface::new(config, &mut dev, now());
+        // ...and the link-local one, from the MAC address (EUI-64).
+        let link_local = link_local(dev.mac);
+        iface.update_ip_addrs(|addrs| {
+            let _ = addrs.push(IpCidr::Ipv6(Ipv6Cidr::new(link_local, 64)));
+        });
         let mut sockets = SocketSet::new(vec![]);
         let dhcp = sockets.add(dhcpv4::Socket::new());
         Eth { iface, dev, sockets, dhcp, config: None }
@@ -105,6 +113,7 @@ pub fn init() -> Option<([u8; 6], u8)> {
     let mut iface = Interface::new(config, &mut dev, now());
     iface.update_ip_addrs(|addrs| {
         let _ = addrs.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+        let _ = addrs.push(IpCidr::Ipv6(Ipv6Cidr::new(Ipv6Address::LOCALHOST, 128)));
     });
     let lo = Lo { iface, dev, sockets: SocketSet::new(vec![]) };
     *NET.lock() = Some(Net { eth, lo, closing: alloc::vec::Vec::new() });
@@ -142,7 +151,8 @@ pub fn poll() {
                 changed = true;
             }
             Some(dhcpv4::Event::Deconfigured) => {
-                eth.iface.update_ip_addrs(|a| a.clear());
+                // (Only the IPv4 address: IPv6's come from elsewhere.)
+                eth.iface.update_ip_addrs(|a| a.retain(|c| !matches!(c, IpCidr::Ipv4(_))));
                 eth.iface.routes_mut().remove_default_ipv4_route();
                 eth.config = None;
             }
@@ -164,9 +174,39 @@ pub fn poll() {
     }
 }
 
+/// The IPv6 link-local address for a MAC address (fe80:: + EUI-64: the
+/// MAC with ff:fe in the middle and the universal/local bit flipped).
+fn link_local(mac: [u8; 6]) -> Ipv6Address {
+    let w = |a: u8, b: u8| u16::from_be_bytes([a, b]);
+    Ipv6Address::new(0xfe80, 0, 0, 0, w(mac[0] ^ 2, mac[1]), w(mac[2], 0xff), w(0xfe, mac[3]), w(mac[4], mac[5]))
+}
+
+/// The IPv6 addresses of the interfaces: (interface index: 1 lo, 2 eth0,
+/// address, prefix length), for /proc/net/if_inet6, netlink and choosing
+/// a source address.
+pub fn ipv6_addresses() -> alloc::vec::Vec<(u32, Ipv6Address, u8)> {
+    let mut out = alloc::vec::Vec::new();
+    let guard = NET.lock();
+    let Some(net) = guard.as_ref() else { return out };
+    for c in net.lo.iface.ip_addrs() {
+        if let IpCidr::Ipv6(c) = c {
+            out.push((1, c.address(), c.prefix_len()));
+        }
+    }
+    if let Some(eth) = net.eth.as_ref() {
+        for c in eth.iface.ip_addrs() {
+            if let IpCidr::Ipv6(c) = c {
+                out.push((2, c.address(), c.prefix_len()));
+            }
+        }
+    }
+    out
+}
+
 fn apply(eth: &mut Eth, cfg: IpConfig) {
     eth.iface.update_ip_addrs(|addrs| {
-        addrs.clear();
+        // (Only the IPv4 address: IPv6's come from elsewhere.)
+        addrs.retain(|c| !matches!(c, IpCidr::Ipv4(_)));
         let _ = addrs.push(IpCidr::Ipv4(cfg.address));
     });
     if let Some(gw) = cfg.gateway {

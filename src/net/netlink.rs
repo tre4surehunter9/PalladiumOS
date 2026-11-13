@@ -34,6 +34,7 @@ const NLM_F_MULTI: u16 = 2;
 const NLM_F_DUMP: u16 = 0x300;
 const AF_UNSPEC: u8 = 0;
 const AF_INET: u8 = 2;
+const AF_INET6: u8 = 10;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1 << 40);
 
@@ -151,6 +152,23 @@ fn addr_message(out: &mut Vec<u8>, seq: u32, pid: u32, l: &Link, addr: [u8; 4], 
     let mut name = l.name.to_vec();
     name.push(0);
     attr(&mut body, 3, &name); // IFA_LABEL
+    message(out, RTM_NEWADDR, NLM_F_MULTI, seq, pid, &body);
+}
+
+/// An IPv6 address (as Linux reports them: no label or local address).
+fn addr6_message(out: &mut Vec<u8>, seq: u32, pid: u32, index: u32, addr: [u8; 16], prefix: u8) {
+    let mut body = Vec::new();
+    // struct ifaddrmsg: family, prefixlen, flags (IFA_F_PERMANENT), scope, index
+    let scope = if addr == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] {
+        254 // host
+    } else if addr[0] == 0xfe && addr[1] & 0xc0 == 0x80 {
+        253 // link
+    } else {
+        0 // universe
+    };
+    body.extend_from_slice(&[AF_INET6, prefix, 0x80, scope]);
+    body.extend_from_slice(&index.to_le_bytes());
+    attr(&mut body, 1, &addr); // IFA_ADDRESS
     message(out, RTM_NEWADDR, NLM_F_MULTI, seq, pid, &body);
 }
 
@@ -279,6 +297,7 @@ impl NetlinkSocket {
         let family = data.get(16).copied().unwrap_or(AF_UNSPEC);
         let pid = self.port;
         let ipv4 = family == AF_UNSPEC || family == AF_INET;
+        let ipv6 = family == AF_UNSPEC || family == AF_INET6;
         let mut out = Vec::new();
         match ty {
             RTM_GETLINK => {
@@ -286,10 +305,17 @@ impl NetlinkSocket {
                     link_message(&mut out, seq, pid, &l);
                 }
             }
-            RTM_GETADDR if ipv4 => {
-                for l in links() {
-                    if let Some((addr, prefix)) = l.addr {
-                        addr_message(&mut out, seq, pid, &l, addr, prefix);
+            RTM_GETADDR if ipv4 || ipv6 => {
+                if ipv4 {
+                    for l in links() {
+                        if let Some((addr, prefix)) = l.addr {
+                            addr_message(&mut out, seq, pid, &l, addr, prefix);
+                        }
+                    }
+                }
+                if ipv6 {
+                    for (index, addr, prefix) in super::ipv6_addresses() {
+                        addr6_message(&mut out, seq, pid, index, addr.octets(), prefix);
                     }
                 }
             }

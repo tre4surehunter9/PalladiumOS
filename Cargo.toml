@@ -20,6 +20,7 @@ noto-sans-mono-bitmap = { version = "0.2", default-features = false, features = 
 # TCP/IP (no_std): Ethernet, IPv4, ARP, DHCP, TCP, UDP, ICMP.
 smoltcp = { version = "0.14", default-features = false, features = [
     "alloc", "medium-ethernet", "medium-ip", "proto-ipv4", "proto-dhcpv4",
+    "proto-ipv6", "proto-ipv6-slaac", # IPv6, its address from router advertisements
     "socket-tcp", "socket-udp", "socket-icmp", "socket-dhcpv4", "socket-raw",
     "auto-icmp-echo-reply", # answer pings
 ] }

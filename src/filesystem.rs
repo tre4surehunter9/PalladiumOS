@@ -195,7 +195,7 @@ pub fn is_dir(path: &str) -> bool {
 pub fn init_default_files() {
     let defaults = [
         // Names for addresses (libc reads this before asking DNS).
-        ("/etc/hosts", "127.0.0.1\tlocalhost\n10.0.2.2\tgateway\n"),
+        ("/etc/hosts", "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n10.0.2.2\tgateway\n"),
         ("/etc/xdg/fastfetch/palladium.txt", PALLADIUM_LOGO),
         // The machine's name, read at boot (`hostname NAME` changes it
         // until the next boot; write it here to keep it).

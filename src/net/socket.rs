@@ -1,10 +1,16 @@
 // Copyright (c) 2026 tre4surehunter9
-//! BSD sockets on smoltcp: AF_INET, TCP (SOCK_STREAM), UDP (SOCK_DGRAM)
-//! and raw IP (SOCK_RAW, root only: ping uses it).
+//! BSD sockets on smoltcp: AF_INET and AF_INET6, TCP (SOCK_STREAM), UDP
+//! (SOCK_DGRAM) and raw IP (SOCK_RAW, root only: ping uses it).
 //!
-//! Raw sockets work as on Linux: received packets come with their IPv4
-//! header; sent data gets one from the kernel (source address of the
-//! interface, the socket's TTL), unless IP_HDRINCL is set (or the protocol
+//! An AF_INET6 socket also talks IPv4, as on Linux: IPv4 addresses are
+//! given to and from it as IPv4-mapped ones (::ffff:a.b.c.d; vfs.rs turns
+//! them into IPv4 on the way in). A socket on the unspecified address
+//! listens on both.
+//!
+//! Raw sockets work as on Linux: received IPv4 packets come with their
+//! header, IPv6 ones (ICMPv6, for ping6) without; sent data gets one from
+//! the kernel (source address of the interface, the socket's TTL or hop
+//! limit; ICMPv6's checksum too), unless IP_HDRINCL is set (or the protocol
 //! is IPPROTO_RAW): then the program supplies it.
 //!
 //! A socket file descriptor holds an `Arc<Socket>`. The smoltcp socket(s)
@@ -23,7 +29,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::{raw, tcp, udp};
-use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpProtocol, IpVersion, Ipv4Address};
+use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpProtocol, IpVersion, Ipv4Address, Ipv6Address};
 use spin::Mutex;
 
 use super::{Net, NET, WAIT_KEY};
@@ -31,6 +37,8 @@ use crate::process;
 use crate::syscall::{EAGAIN, EINTR, EINVAL, EPIPE};
 
 pub const AF_INET: u64 = 2;
+pub const AF_INET6: u64 = 10;
+const IPPROTO_ICMPV6: u8 = 58;
 pub const SOCK_STREAM: u64 = 1;
 pub const SOCK_DGRAM: u64 = 2;
 pub const SOCK_RAW: u64 = 3;
@@ -67,19 +75,21 @@ pub enum Which {
 
 enum State {
     /// Created; maybe bound (address, port), not yet used.
-    Fresh { bound: Option<(Ipv4Address, u16)> },
+    Fresh { bound: Option<(IpAddress, u16)> },
     /// A TCP connection (or connecting).
     Tcp { which: Which, handle: SocketHandle },
     /// A TCP server: smoltcp sockets in LISTEN on each interface.
-    Listening { addr: Option<Ipv4Address>, port: u16, waiting: Vec<(Which, SocketHandle)> },
+    Listening { addr: Option<IpAddress>, port: u16, waiting: Vec<(Which, SocketHandle)> },
     /// UDP: one smoltcp socket per interface it's bound on.
     Udp { port: u16, handles: Vec<(Which, SocketHandle)>, peer: Option<IpEndpoint> },
     /// Raw IP for one protocol: a smoltcp raw socket on each interface.
-    Raw { protocol: u8, handles: Vec<(Which, SocketHandle)>, peer: Option<Ipv4Address>, hdrincl: bool, ttl: u8 },
+    Raw { protocol: u8, handles: Vec<(Which, SocketHandle)>, peer: Option<IpAddress>, hdrincl: bool, ttl: u8 },
     Closed,
 }
 
 pub struct Socket {
+    /// AF_INET or AF_INET6.
+    pub family: u64,
     stream: bool,
     state: Mutex<State>,
     nonblocking: AtomicBool,
@@ -102,8 +112,24 @@ fn ephemeral_port() -> u16 {
 }
 
 /// The interface for talking to `addr`.
-fn route(addr: Ipv4Address) -> Which {
-    if addr.octets()[0] == 127 { Which::Lo } else { Which::Eth }
+fn route(addr: IpAddress) -> Which {
+    let lo = match addr {
+        IpAddress::Ipv4(a) => a.octets()[0] == 127,
+        IpAddress::Ipv6(a) => a.is_loopback(),
+    };
+    if lo { Which::Lo } else { Which::Eth }
+}
+
+/// A family's unspecified address (0.0.0.0, ::).
+fn unspecified(family: u64) -> IpAddress {
+    if family == AF_INET6 { IpAddress::Ipv6(Ipv6Address::UNSPECIFIED) } else { IpAddress::Ipv4(Ipv4Address::UNSPECIFIED) }
+}
+
+/// May a socket of `family` talk to `addr`? (AF_INET6: both; AF_INET:
+/// IPv4 only. A listener or UDP socket on 0.0.0.0 hears IPv6 too in
+/// smoltcp; those are turned away.)
+fn family_ok(family: u64, addr: IpAddress) -> bool {
+    family == AF_INET6 || matches!(addr, IpAddress::Ipv4(_))
 }
 
 /// Run `f` on an interface's sockets (and the interface).
@@ -133,7 +159,7 @@ fn new_udp() -> udp::Socket<'static> {
 }
 
 /// Interfaces a socket bound to `addr` (None: 0.0.0.0) listens on.
-fn interfaces_for(net: &Net, addr: Option<Ipv4Address>) -> Vec<Which> {
+fn interfaces_for(net: &Net, addr: Option<IpAddress>) -> Vec<Which> {
     match addr {
         Some(a) => vec![route(a)],
         None => {
@@ -172,14 +198,15 @@ fn wait<T>(sock: &Socket, flags: u64, deadline: Option<u64>, mut ready: impl FnM
 }
 
 impl Socket {
-    pub fn new(ty: u64, protocol: u64) -> Result<Socket, i64> {
+    pub fn new(family: u64, ty: u64, protocol: u64) -> Result<Socket, i64> {
         let stream = match ty & 0xf {
             SOCK_STREAM => true,
             SOCK_DGRAM => false,
-            SOCK_RAW => return Self::new_raw(ty, protocol),
+            SOCK_RAW => return Self::new_raw(family, ty, protocol),
             _ => return Err(crate::syscall::EPROTONOSUPPORT),
         };
         Ok(Socket {
+            family,
             stream,
             state: Mutex::new(State::Fresh { bound: None }),
             nonblocking: AtomicBool::new(ty & SOCK_NONBLOCK != 0),
@@ -190,7 +217,7 @@ impl Socket {
 
     /// A raw socket for IP protocol `protocol` (root only, as Linux needs
     /// CAP_NET_RAW). It gets every packet of that protocol, on every interface.
-    fn new_raw(ty: u64, protocol: u64) -> Result<Socket, i64> {
+    fn new_raw(family: u64, ty: u64, protocol: u64) -> Result<Socket, i64> {
         if !process::current_cred().is_root() {
             return Err(crate::syscall::EPERM);
         }
@@ -202,7 +229,7 @@ impl Socket {
         let mut handles = Vec::new();
         for which in interfaces_for(net, None) {
             let s = raw::Socket::new(
-                Some(IpVersion::Ipv4),
+                Some(if family == AF_INET6 { IpVersion::Ipv6 } else { IpVersion::Ipv4 }),
                 Some(IpProtocol::from(protocol as u8)),
                 raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; 16], vec![0; UDP_BUFFER]),
                 raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; 16], vec![0; UDP_BUFFER]),
@@ -211,6 +238,7 @@ impl Socket {
         }
         let protocol = protocol as u8;
         Ok(Socket {
+            family,
             stream: false,
             state: Mutex::new(State::Raw { protocol, handles, peer: None, hdrincl: protocol == IPPROTO_RAW, ttl: 64 }),
             nonblocking: AtomicBool::new(ty & SOCK_NONBLOCK != 0),
@@ -249,11 +277,11 @@ impl Socket {
     }
 
     /// bind(addr, port): port 0 picks one.
-    pub fn bind(&self, addr: Ipv4Address, port: u16) -> Result<(), i64> {
+    pub fn bind(&self, addr: IpAddress, port: u16) -> Result<(), i64> {
         let mut state = self.state.lock();
         let State::Fresh { bound } = &mut *state else { return Err(EINVAL) };
         let port = if port == 0 { ephemeral_port() } else { port };
-        let addr_opt = (addr != Ipv4Address::UNSPECIFIED).then_some(addr);
+        let addr_opt = (!addr.is_unspecified()).then_some(addr);
         if self.stream {
             *bound = Some((addr, port));
             return Ok(());
@@ -264,7 +292,7 @@ impl Socket {
         let mut handles = Vec::new();
         for which in interfaces_for(net, addr_opt) {
             let mut s = new_udp();
-            s.bind(IpListenEndpoint { addr: addr_opt.map(IpAddress::Ipv4), port }).map_err(|_| EADDRINUSE)?;
+            s.bind(IpListenEndpoint { addr: addr_opt, port }).map_err(|_| EADDRINUSE)?;
             handles.push((which, with_set(net, which, |_, set| set.add(s))?));
         }
         *state = State::Udp { port, handles, peer: None };
@@ -275,7 +303,7 @@ impl Socket {
     fn ensure_udp(&self) -> Result<(), i64> {
         let fresh = matches!(&*self.state.lock(), State::Fresh { .. });
         if fresh {
-            self.bind(Ipv4Address::UNSPECIFIED, 0)?;
+            self.bind(unspecified(self.family), 0)?;
         }
         Ok(())
     }
@@ -286,7 +314,7 @@ impl Socket {
         }
         let mut state = self.state.lock();
         let (addr, port) = match &*state {
-            State::Fresh { bound: Some((a, p)) } => ((*a != Ipv4Address::UNSPECIFIED).then_some(*a), *p),
+            State::Fresh { bound: Some((a, p)) } => ((!a.is_unspecified()).then_some(*a), *p),
             State::Fresh { bound: None } => (None, ephemeral_port()),
             State::Listening { .. } => return Ok(()),
             _ => return Err(EINVAL),
@@ -297,7 +325,7 @@ impl Socket {
         for which in interfaces_for(net, addr) {
             for _ in 0..backlog.clamp(1, BACKLOG) {
                 let mut s = new_tcp();
-                s.listen(IpListenEndpoint { addr: addr.map(IpAddress::Ipv4), port }).map_err(|_| EADDRINUSE)?;
+                s.listen(IpListenEndpoint { addr, port }).map_err(|_| EADDRINUSE)?;
                 waiting.push((which, with_set(net, which, |_, set| set.add(s))?));
             }
         }
@@ -321,15 +349,22 @@ impl Socket {
             let (which, handle) = waiting.remove(pos);
             // Put a fresh listener in its place.
             let mut s = new_tcp();
-            let _ = s.listen(IpListenEndpoint { addr: addr.map(IpAddress::Ipv4), port: *port });
+            let _ = s.listen(IpListenEndpoint { addr: *addr, port: *port });
             if let Ok(h) = with_set(net, which, |_, set| set.add(s)) {
                 waiting.push((which, h));
             }
             let peer = with_set(net, which, |_, set| set.get::<tcp::Socket>(handle).remote_endpoint()).ok().flatten();
+            if peer.is_some_and(|p| !family_ok(self.family, p.addr)) {
+                // IPv6 on an IPv4 socket: turned away (reset), as if nobody listened.
+                let _ = with_set(net, which, |_, set| set.get_mut::<tcp::Socket>(handle).abort());
+                net.closing.push((which, handle));
+                return None;
+            }
             Some(Ok((which, handle, peer)))
         })?;
         let (which, handle, peer) = found;
         let sock = Socket {
+            family: self.family,
             stream: true,
             state: Mutex::new(State::Tcp { which, handle }),
             nonblocking: AtomicBool::new(nonblocking),
@@ -339,7 +374,7 @@ impl Socket {
         Ok((sock, peer))
     }
 
-    pub fn connect(&self, addr: Ipv4Address, port: u16) -> Result<(), i64> {
+    pub fn connect(&self, addr: IpAddress, port: u16) -> Result<(), i64> {
         if let State::Raw { peer, .. } = &mut *self.state.lock() {
             *peer = Some(addr); // raw: just the default destination
             return Ok(());
@@ -348,7 +383,7 @@ impl Socket {
             // UDP: just the default destination.
             self.ensure_udp()?;
             if let State::Udp { peer, .. } = &mut *self.state.lock() {
-                *peer = Some(IpEndpoint::new(IpAddress::Ipv4(addr), port));
+                *peer = Some(IpEndpoint::new(addr, port));
             }
             return Ok(());
         }
@@ -374,7 +409,7 @@ impl Socket {
             let net = guard.as_mut().ok_or(ENETUNREACH)?;
             let handle = with_set(net, which, |iface, set| {
                 let mut s = new_tcp();
-                s.connect(iface.context(), IpEndpoint::new(IpAddress::Ipv4(addr), port), local_port)
+                s.connect(iface.context(), IpEndpoint::new(addr, port), local_port)
                     .map(|_| set.add(s))
                     .map_err(|_| ENETUNREACH)
             })??;
@@ -427,10 +462,19 @@ impl Socket {
                 })
                 .unwrap_or(Some(Err(ENETUNREACH))),
                 State::Udp { handles, .. } => {
+                    let family = self.family;
                     for &(which, h) in handles {
                         let got = with_set(net, which, |_, set| {
                             let s = set.get_mut::<udp::Socket>(h);
-                            if s.can_recv() { s.recv_slice(buf).ok().map(|(n, meta)| (n, Some(meta.endpoint))) } else { None }
+                            while s.can_recv() {
+                                match s.recv_slice(buf) {
+                                    // (IPv6 for an IPv4 socket: dropped.)
+                                    Ok((_, meta)) if !family_ok(family, meta.endpoint.addr) => continue,
+                                    Ok((n, meta)) => return Some((n, Some(meta.endpoint))),
+                                    Err(_) => return None,
+                                }
+                            }
+                            None
                         });
                         if let Ok(Some(r)) = got {
                             return Some(Ok(r));
@@ -464,8 +508,7 @@ impl Socket {
                 let state = self.state.lock();
                 let State::Udp { handles, peer, .. } = &*state else { return Err(EINVAL) };
                 let dest = to.or(*peer).ok_or(EDESTADDRREQ)?;
-                let IpAddress::Ipv4(dest_v4) = dest.addr;
-                let which = route(dest_v4);
+                let which = route(dest.addr);
                 let &(_, h) = handles.iter().find(|(w, _)| *w == which).ok_or(ENETUNREACH)?;
                 with_set(net, which, |_, set| set.get_mut::<udp::Socket>(h).send_slice(data, dest))?
                     .map(|_| data.len())
@@ -511,12 +554,32 @@ impl Socket {
         Ok(sent)
     }
 
-    /// A raw packet, with its IPv4 header; the sender is its source.
+    /// A raw packet: IPv4 with its header, IPv6 without (as Linux gives
+    /// them); the sender is its source.
     fn recv_raw(&self, buf: &mut [u8], flags: u64) -> Result<(usize, Option<IpEndpoint>), i64> {
+        let v6 = self.family == AF_INET6;
         wait(self, flags, None, |net| {
             let state = self.state.lock();
             let State::Raw { handles, .. } = &*state else { return Some(Err(EINVAL)) };
             for &(which, h) in handles {
+                if v6 {
+                    let mut packet = [0u8; 1500];
+                    let got = with_set(net, which, |_, set| {
+                        let s = set.get_mut::<raw::Socket>(h);
+                        if s.can_recv() { s.recv_slice(&mut packet).ok() } else { None }
+                    });
+                    if let Ok(Some(n)) = got {
+                        if n < 40 {
+                            continue;
+                        }
+                        let payload = &packet[40..n];
+                        let k = payload.len().min(buf.len());
+                        buf[..k].copy_from_slice(&payload[..k]);
+                        let src: [u8; 16] = packet[8..24].try_into().unwrap();
+                        return Some(Ok((k, Some(IpEndpoint::new(IpAddress::Ipv6(Ipv6Address::from(src)), 0)))));
+                    }
+                    continue;
+                }
                 let got = with_set(net, which, |_, set| {
                     let s = set.get_mut::<raw::Socket>(h);
                     if s.can_recv() { s.recv_slice(buf).ok() } else { None }
@@ -541,10 +604,26 @@ impl Socket {
             let state = self.state.lock();
             let State::Raw { protocol, handles, peer, hdrincl, ttl } = &*state else { return Err(EINVAL) };
             let dest = match to.map(|e| e.addr) {
-                Some(IpAddress::Ipv4(a)) => a,
+                Some(a) => a,
                 None => peer.ok_or(EDESTADDRREQ)?,
             };
             let which = route(dest);
+            let dest = match dest {
+                IpAddress::Ipv6(d) => {
+                    // IPv6: a header from the kernel, and ICMPv6's checksum.
+                    let source = ipv6_source(net, which, d).ok_or(ENETUNREACH)?;
+                    let packet = ipv6_packet(source, d, *protocol, *ttl, data)?;
+                    let &(_, h) = handles.iter().find(|(w, _)| *w == which).ok_or(ENETUNREACH)?;
+                    let r = with_set(net, which, |_, set| set.get_mut::<raw::Socket>(h).send_slice(&packet))?
+                        .map(|_| data.len())
+                        .map_err(|_| EAGAIN);
+                    drop(state);
+                    drop(guard);
+                    super::poll();
+                    return r;
+                }
+                IpAddress::Ipv4(d) => d,
+            };
             let source = match which {
                 Which::Lo => Ipv4Address::new(127, 0, 0, 1),
                 Which::Eth => net.eth.as_ref().and_then(|e| e.config).map(|c| c.address.address()).ok_or(ENETUNREACH)?,
@@ -593,18 +672,19 @@ impl Socket {
 
     /// Our address (getsockname).
     pub fn local(&self) -> IpEndpoint {
-        let unspec = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED), 0);
+        let unspec = IpEndpoint::new(unspecified(self.family), 0);
         let mut guard = NET.lock();
         let Some(net) = guard.as_mut() else { return unspec };
         match &*self.state.lock() {
-            State::Fresh { bound: Some((a, p)) } => IpEndpoint::new(IpAddress::Ipv4(*a), *p),
+            State::Fresh { bound: Some((a, p)) } => IpEndpoint::new(*a, *p),
             State::Tcp { which, handle } => {
                 with_set(net, *which, |_, set| set.get::<tcp::Socket>(*handle).local_endpoint()).ok().flatten().unwrap_or(unspec)
             }
-            State::Listening { addr, port, .. } => {
-                IpEndpoint::new(IpAddress::Ipv4(addr.unwrap_or(Ipv4Address::UNSPECIFIED)), *port)
-            }
-            State::Udp { port, .. } => IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED), *port),
+            State::Listening { addr, port, .. } => IpEndpoint::new(addr.unwrap_or(unspecified(self.family)), *port),
+            // Connected: the address packets to the peer go from (as Linux
+            // says; libc's getaddrinfo sorts addresses by it, RFC 6724).
+            State::Udp { port, peer: Some(p), .. } => IpEndpoint::new(source_for(net, p.addr).unwrap_or(unspecified(self.family)), *port),
+            State::Udp { port, .. } => IpEndpoint::new(unspecified(self.family), *port),
             _ => unspec,
         }
     }
@@ -721,6 +801,83 @@ impl Drop for Socket {
             _ => {}
         }
     }
+}
+
+/// The source address for packets to `dest`.
+fn source_for(net: &Net, dest: IpAddress) -> Option<IpAddress> {
+    let which = route(dest);
+    match dest {
+        IpAddress::Ipv6(d) => ipv6_source(net, which, d).map(IpAddress::Ipv6),
+        IpAddress::Ipv4(_) => match which {
+            Which::Lo => Some(IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1))),
+            Which::Eth => net.eth.as_ref().and_then(|e| e.config).map(|c| IpAddress::Ipv4(c.address.address())),
+        },
+    }
+}
+
+/// The source address for an IPv6 packet to `dest` on interface `which`:
+/// ::1 on loopback; on eth0 a link-local address for a link-local
+/// destination, else the global one (from SLAAC), if there is one.
+fn ipv6_source(net: &Net, which: Which, dest: Ipv6Address) -> Option<Ipv6Address> {
+    if which == Which::Lo {
+        return Some(Ipv6Address::LOCALHOST);
+    }
+    let link_local = |a: &Ipv6Address| a.segments()[0] & 0xffc0 == 0xfe80;
+    let addrs: Vec<Ipv6Address> = net
+        .eth
+        .as_ref()?
+        .iface
+        .ip_addrs()
+        .iter()
+        .filter_map(|c| match c {
+            smoltcp::wire::IpCidr::Ipv6(c) => Some(c.address()),
+            _ => None,
+        })
+        .collect();
+    if link_local(&dest) {
+        addrs.iter().find(|a| link_local(a)).copied()
+    } else {
+        addrs.iter().find(|a| !link_local(a)).or(addrs.first()).copied()
+    }
+}
+
+/// An IPv6 packet: a 40-byte header (`next` protocol, hop limit) and
+/// `data`, with ICMPv6's checksum filled in (the kernel computes it for raw
+/// ICMPv6 sockets, as Linux does).
+fn ipv6_packet(src: Ipv6Address, dst: Ipv6Address, next: u8, hops: u8, data: &[u8]) -> Result<Vec<u8>, i64> {
+    if 40 + data.len() > 1500 {
+        return Err(crate::syscall::EMSGSIZE);
+    }
+    let mut p = vec![0u8; 40 + data.len()];
+    p[0] = 0x60; // version 6
+    p[4..6].copy_from_slice(&(data.len() as u16).to_be_bytes());
+    p[6] = next;
+    p[7] = hops;
+    p[8..24].copy_from_slice(&src.octets());
+    p[24..40].copy_from_slice(&dst.octets());
+    p[40..].copy_from_slice(data);
+    if next == IPPROTO_ICMPV6 && data.len() >= 4 {
+        p[42] = 0;
+        p[43] = 0;
+        // Over the pseudo-header (addresses, length, protocol) and the message.
+        let mut sum: u32 = 0;
+        let mut add = |bytes: &[u8]| {
+            for pair in bytes.chunks(2) {
+                sum += u32::from(u16::from_be_bytes([pair[0], *pair.get(1).unwrap_or(&0)]));
+            }
+        };
+        add(&src.octets());
+        add(&dst.octets());
+        add(&(data.len() as u32).to_be_bytes());
+        add(&[0, 0, 0, next]);
+        add(&p[40..]);
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        let check = !(sum as u16);
+        p[42..44].copy_from_slice(&check.to_be_bytes());
+    }
+    Ok(p)
 }
 
 /// Remove closed TCP sockets whose goodbye has finished (called by poll).

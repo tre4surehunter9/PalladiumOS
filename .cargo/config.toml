@@ -15,6 +15,11 @@ rustflags = ["-Ccode-model=kernel", "-Crelocation-model=static", "-Clink-arg=--i
 
 [env]
 RUST_TARGET_PATH = { value = ".", relative = true }
+# smoltcp's limits (read by its build script): eth0 has an IPv4 address,
+# an IPv6 link-local one and one from router advertisements (SLAAC);
+# routes: IPv4 and IPv6 defaults.
+SMOLTCP_IFACE_MAX_ADDR_COUNT = "4"
+SMOLTCP_IFACE_MAX_ROUTE_COUNT = "4"
 CARGO_BUILD_TARGET = { value = "x86_64-palladiumos.json" }
 
 [build]

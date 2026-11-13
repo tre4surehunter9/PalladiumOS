@@ -2228,18 +2228,35 @@ fn any_socket(fd: u64) -> Result<AnySock, i64> {
     }
 }
 
-/// struct sockaddr_in -> (address, port).
-fn read_sockaddr(ptr: u64, len: u64) -> Result<(smoltcp::wire::Ipv4Address, u16), i64> {
+/// struct sockaddr_in or sockaddr_in6 -> (address, port), for a socket of
+/// `sock_family`. An IPv4-mapped IPv6 address (::ffff:a.b.c.d) comes back
+/// as IPv4 (an AF_INET6 socket talking IPv4); an AF_INET socket takes
+/// only IPv4.
+fn read_sockaddr(ptr: u64, len: u64, sock_family: u64) -> Result<(smoltcp::wire::IpAddress, u16), i64> {
+    use smoltcp::wire::{IpAddress, Ipv4Address, Ipv6Address};
     if len < 8 {
         return Err(EINVAL);
     }
     let b = unsafe { crate::syscall::user_slice(ptr, 8) }.ok_or(EFAULT)?;
     let family = u16::from_le_bytes([b[0], b[1]]) as u64;
-    if family != sock::AF_INET {
-        return Err(EAFNOSUPPORT);
-    }
     let port = u16::from_be_bytes([b[2], b[3]]);
-    Ok((smoltcp::wire::Ipv4Address::new(b[4], b[5], b[6], b[7]), port))
+    match family {
+        sock::AF_INET => Ok((IpAddress::Ipv4(Ipv4Address::new(b[4], b[5], b[6], b[7])), port)),
+        sock::AF_INET6 if sock_family == sock::AF_INET6 => {
+            if len < 24 {
+                return Err(EINVAL);
+            }
+            let b = unsafe { crate::syscall::user_slice(ptr, 24) }.ok_or(EFAULT)?;
+            let a: [u8; 16] = b[8..24].try_into().unwrap();
+            let mapped = a[..10].iter().all(|&x| x == 0) && a[10] == 0xff && a[11] == 0xff;
+            Ok(if mapped {
+                (IpAddress::Ipv4(Ipv4Address::new(a[12], a[13], a[14], a[15])), port)
+            } else {
+                (IpAddress::Ipv6(Ipv6Address::from(a)), port)
+            })
+        }
+        _ => Err(EAFNOSUPPORT),
+    }
 }
 
 /// struct sockaddr_un -> a name: a path (up to its NUL), or an abstract
@@ -2276,12 +2293,35 @@ fn write_addr(ptr: u64, len_ptr: u64, bytes: &[u8]) -> Result<(), i64> {
     Ok(())
 }
 
-fn write_sockaddr(ptr: u64, len_ptr: u64, ep: smoltcp::wire::IpEndpoint) -> Result<(), i64> {
-    let smoltcp::wire::IpAddress::Ipv4(a) = ep.addr;
+/// A socket address as a socket of `family` gives it: sockaddr_in, or
+/// sockaddr_in6 (28 bytes; IPv4 as ::ffff:a.b.c.d; link-local addresses
+/// with eth0's interface number as scope).
+fn write_sockaddr(ptr: u64, len_ptr: u64, ep: smoltcp::wire::IpEndpoint, family: u64) -> Result<(), i64> {
+    use smoltcp::wire::IpAddress;
+    if family == sock::AF_INET6 {
+        let mut sa = [0u8; 28];
+        sa[0..2].copy_from_slice(&(sock::AF_INET6 as u16).to_le_bytes());
+        sa[2..4].copy_from_slice(&ep.port.to_be_bytes());
+        match ep.addr {
+            IpAddress::Ipv6(a) => {
+                sa[8..24].copy_from_slice(&a.octets());
+                if a.segments()[0] & 0xffc0 == 0xfe80 {
+                    sa[24..28].copy_from_slice(&2u32.to_le_bytes()); // eth0
+                }
+            }
+            IpAddress::Ipv4(a) => {
+                sa[18..20].copy_from_slice(&[0xff, 0xff]);
+                sa[20..24].copy_from_slice(&a.octets());
+            }
+        }
+        return write_addr(ptr, len_ptr, &sa);
+    }
     let mut sa = [0u8; 16];
     sa[0..2].copy_from_slice(&(sock::AF_INET as u16).to_le_bytes());
     sa[2..4].copy_from_slice(&ep.port.to_be_bytes());
-    sa[4..8].copy_from_slice(&a.octets());
+    if let IpAddress::Ipv4(a) = ep.addr {
+        sa[4..8].copy_from_slice(&a.octets());
+    }
     write_addr(ptr, len_ptr, &sa)
 }
 
@@ -2325,7 +2365,9 @@ pub fn sys_socket(domain: u64, ty: u64, protocol: u64) -> i64 {
     let cloexec = ty & sock::SOCK_CLOEXEC != 0;
     let nonblocking = ty & sock::SOCK_NONBLOCK != 0;
     result(match domain {
-        sock::AF_INET => Socket::new(ty, protocol).and_then(|s| new_socket_fd(AnySock::Inet(Arc::new(s)), cloexec)),
+        sock::AF_INET | sock::AF_INET6 => {
+            Socket::new(domain, ty, protocol).and_then(|s| new_socket_fd(AnySock::Inet(Arc::new(s)), cloexec))
+        }
         unix::AF_UNIX => match ty & 0xf {
             sock::SOCK_STREAM | sock::SOCK_DGRAM => {
                 let s = UnixSocket::new(ty & 0xf == sock::SOCK_STREAM, nonblocking);
@@ -2375,7 +2417,7 @@ pub fn sys_socketpair(domain: u64, ty: u64, _protocol: u64, sv: u64) -> i64 {
 pub fn sys_bind(fd: u64, addr: u64, len: u64) -> i64 {
     result((|| match any_socket(fd)? {
         AnySock::Inet(s) => {
-            let (a, port) = read_sockaddr(addr, len)?;
+            let (a, port) = read_sockaddr(addr, len, s.family)?;
             s.bind(a, port).map(|_| 0)
         }
         AnySock::Unix(s) => s.bind(read_sockaddr_un(addr, len)?).map(|_| 0),
@@ -2394,7 +2436,7 @@ pub fn sys_listen(fd: u64, backlog: u64) -> i64 {
 pub fn sys_connect(fd: u64, addr: u64, len: u64) -> i64 {
     result((|| match any_socket(fd)? {
         AnySock::Inet(s) => {
-            let (a, port) = read_sockaddr(addr, len)?;
+            let (a, port) = read_sockaddr(addr, len, s.family)?;
             s.connect(a, port).map(|_| 0)
         }
         AnySock::Unix(s) => s.connect(read_sockaddr_un(addr, len)?).map(|_| 0),
@@ -2411,7 +2453,7 @@ pub fn sys_accept(fd: u64, addr: u64, len_ptr: u64, flags: u64) -> i64 {
             AnySock::Inet(listener) => {
                 let (conn, peer) = listener.accept(nonblocking)?;
                 if let Some(peer) = peer {
-                    write_sockaddr(addr, len_ptr, peer)?;
+                    write_sockaddr(addr, len_ptr, peer, listener.family)?;
                 }
                 new_socket_fd(AnySock::Inet(Arc::new(conn)), cloexec)
             }
@@ -2433,8 +2475,8 @@ pub fn sys_sendto(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, alen: u64)
             AnySock::Inet(s) => {
                 let to = if addr != 0 && !s.is_stream() {
                     // (raw sockets: the port in the address is ignored, as on Linux)
-                    let (a, port) = read_sockaddr(addr, alen)?;
-                    Some(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(a), port))
+                    let (a, port) = read_sockaddr(addr, alen, s.family)?;
+                    Some(smoltcp::wire::IpEndpoint::new(a, port))
                 } else {
                     None
                 };
@@ -2457,9 +2499,9 @@ pub fn sys_recvfrom(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, len_ptr:
             AnySock::Inet(s) => {
                 let (n, from) = s.recv(out, flags)?;
                 if let Some(from) = from {
-                    write_sockaddr(addr, len_ptr, from)?;
+                    write_sockaddr(addr, len_ptr, from, s.family)?;
                 } else if s.is_stream() && addr != 0 {
-                    write_sockaddr(addr, len_ptr, s.peer().unwrap_or(s.local()))?;
+                    write_sockaddr(addr, len_ptr, s.peer().unwrap_or(s.local()), s.family)?;
                 }
                 Ok(n as i64)
             }
@@ -2489,7 +2531,7 @@ pub fn sys_shutdown(fd: u64, how: u64) -> i64 {
 
 pub fn sys_getsockname(fd: u64, addr: u64, len_ptr: u64) -> i64 {
     result((|| match any_socket(fd)? {
-        AnySock::Inet(s) => write_sockaddr(addr, len_ptr, s.local()).map(|_| 0),
+        AnySock::Inet(s) => write_sockaddr(addr, len_ptr, s.local(), s.family).map(|_| 0),
         AnySock::Unix(s) => write_sockaddr_un(addr, len_ptr, s.local().as_ref()).map(|_| 0),
         AnySock::Netlink(s) => write_sockaddr_nl(addr, len_ptr, s.port).map(|_| 0),
     })())
@@ -2497,7 +2539,7 @@ pub fn sys_getsockname(fd: u64, addr: u64, len_ptr: u64) -> i64 {
 
 pub fn sys_getpeername(fd: u64, addr: u64, len_ptr: u64) -> i64 {
     result((|| match any_socket(fd)? {
-        AnySock::Inet(s) => s.peer().and_then(|p| write_sockaddr(addr, len_ptr, p)).map(|_| 0),
+        AnySock::Inet(s) => s.peer().and_then(|p| write_sockaddr(addr, len_ptr, p, s.family)).map(|_| 0),
         AnySock::Unix(s) => s.peer().and_then(|p| write_sockaddr_un(addr, len_ptr, p.as_ref())).map(|_| 0),
         AnySock::Netlink(_) => write_sockaddr_nl(addr, len_ptr, 0).map(|_| 0),
     })())
@@ -2508,11 +2550,22 @@ pub fn sys_getpeername(fd: u64, addr: u64, len_ptr: u64) -> i64 {
 /// stack's defaults apply.
 pub fn sys_setsockopt(fd: u64, level: u64, name: u64, val: u64, len: u64) -> i64 {
     const IPPROTO_IP: u64 = 0;
+    const IPPROTO_IPV6: u64 = 41;
+    const IPV6_UNICAST_HOPS: u64 = 16;
+    const IP_TTL: u64 = 2;
     result((|| {
         if let AnySock::Inet(s) = any_socket(fd)? {
-            if level == IPPROTO_IP && val != 0 && len >= 4 {
-                let b = unsafe { crate::syscall::user_slice(val, 4) }.ok_or(EFAULT)?;
-                s.set_ip_option(name, u32::from_le_bytes(b.try_into().unwrap()));
+            if val != 0 && len >= 4 {
+                let value = || -> Result<u32, i64> {
+                    let b = unsafe { crate::syscall::user_slice(val, 4) }.ok_or(EFAULT)?;
+                    Ok(u32::from_le_bytes(b.try_into().unwrap()))
+                };
+                match level {
+                    IPPROTO_IP => s.set_ip_option(name, value()?),
+                    // (The hop limit: raw IPv6 sockets' TTL.)
+                    IPPROTO_IPV6 if name == IPV6_UNICAST_HOPS => s.set_ip_option(IP_TTL, value()?),
+                    _ => {}
+                }
             }
         }
         Ok(0)
@@ -2625,8 +2678,8 @@ pub fn sys_sendmsg(fd: u64, msg: u64, flags: u64) -> i64 {
         match any_socket(fd)? {
             AnySock::Inet(s) => {
                 let to = if name != 0 && !s.is_stream() {
-                    let (a, port) = read_sockaddr(name, namelen)?;
-                    Some(smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::Ipv4(a), port))
+                    let (a, port) = read_sockaddr(name, namelen, s.family)?;
+                    Some(smoltcp::wire::IpEndpoint::new(a, port))
                 } else {
                     None
                 };
@@ -2712,7 +2765,10 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
         if name != 0 {
             let namelen_ptr = msg + 8;
             match from {
-                From::Inet(Some(ep)) => write_sockaddr(name, namelen_ptr, ep)?,
+                From::Inet(Some(ep)) => {
+                    let family = if let AnySock::Inet(i) = &s { i.family } else { sock::AF_INET };
+                    write_sockaddr(name, namelen_ptr, ep, family)?
+                }
                 From::Unix(n) => write_sockaddr_un(name, namelen_ptr, n.as_ref())?,
                 From::Netlink => write_sockaddr_nl(name, namelen_ptr, 0)?,
                 From::Inet(None) => {}

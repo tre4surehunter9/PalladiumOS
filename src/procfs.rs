@@ -10,7 +10,8 @@
 //!   /proc/PID/exe      symlink to the program
 //!   /proc/PID/fd/N     symlink to what fd N is (a path, /dev/tty, pipe:[id])
 //!   /proc/self         symlink to the reading process's directory
-//! System: meminfo, uptime, loadavg, mounts, version, cpuinfo.
+//! System: meminfo, uptime, loadavg, mounts, version, cpuinfo, and
+//! /proc/net/if_inet6 (the IPv6 addresses, for ifconfig and ip).
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -22,6 +23,9 @@ use crate::syscall::{EACCES, EINVAL, ENOENT, ENOTDIR, EPERM};
 
 const ROOT: Ino = 1;
 const SELF: Ino = 2;
+/// /proc/net and its files: (name, inode).
+const NET_DIR: Ino = 13;
+const NET_FILES: &[(&str, Ino)] = &[("if_inet6", 14)];
 /// System files: (name, inode).
 const SYSTEM: &[(&str, Ino)] =
     &[("cmdline", 11), ("cpuinfo", 3), ("kmsg", 9), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("sound", 12), ("stat", 10), ("uptime", 7), ("version", 8)];
@@ -101,6 +105,7 @@ impl ProcFs {
             10 => system_stat(),
             11 => String::from("BOOT_IMAGE=palladiumos\n"), // the kernel's command line
             12 => crate::sound::status(), // the sound card (as old Linux's /proc/sound)
+            14 => if_inet6(),
             _ => return Err(EINVAL),
         })
     }
@@ -261,9 +266,15 @@ impl FileSystem for ProcFs {
     }
 
     fn lookup(&mut self, dir: Ino, name: &str) -> FsResult<Ino> {
+        if dir == NET_DIR {
+            return NET_FILES.iter().find(|(n, _)| *n == name).map(|&(_, i)| i).ok_or(ENOENT);
+        }
         if dir == ROOT {
             if name == "self" {
                 return Ok(SELF);
+            }
+            if name == "net" {
+                return Ok(NET_DIR);
             }
             if let Some(&(_, ino)) = SYSTEM.iter().find(|(n, _)| *n == name) {
                 return Ok(ino);
@@ -295,8 +306,10 @@ impl FileSystem for ProcFs {
     }
 
     fn meta(&mut self, ino: Ino) -> FsResult<Meta> {
-        let (kind, perm) = if ino == ROOT {
+        let (kind, perm) = if ino == ROOT || ino == NET_DIR {
             (FileType::Dir, 0o555)
+        } else if NET_FILES.iter().any(|&(_, i)| i == ino) {
+            (FileType::File, 0o444)
         } else if ino == SELF {
             (FileType::Symlink, 0o777)
         } else if SYSTEM.iter().any(|&(_, i)| i == ino) {
@@ -344,10 +357,14 @@ impl FileSystem for ProcFs {
     }
 
     fn readdir(&mut self, dir: Ino) -> FsResult<Vec<(String, Ino, FileType)>> {
+        if dir == NET_DIR {
+            return Ok(NET_FILES.iter().map(|&(n, i)| (n.to_string(), i, FileType::File)).collect());
+        }
         if dir == ROOT {
             let mut out: Vec<(String, Ino, FileType)> =
                 SYSTEM.iter().map(|&(n, i)| (n.to_string(), i, FileType::File)).collect();
             out.push(("self".to_string(), SELF, FileType::Symlink));
+            out.push(("net".to_string(), NET_DIR, FileType::Dir));
             for p in process::snapshot(None).into_iter().filter(|p| !p.kernel) {
                 out.push((p.pid.to_string(), pid_ino(p.pid, P_DIR), FileType::Dir));
             }
@@ -411,4 +428,24 @@ impl FileSystem for ProcFs {
     fn remove(&mut self, _dir: Ino, _name: &str, _is_dir: bool) -> FsResult<()> {
         Err(EPERM)
     }
+}
+
+/// /proc/net/if_inet6, as Linux writes it: per IPv6 address, the address
+/// (32 hex digits), interface number, prefix length, scope (0 global,
+/// 0x20 link, 0x10 host), flags (0x80 permanent) and interface name.
+fn if_inet6() -> String {
+    let mut out = String::new();
+    for (index, addr, prefix) in crate::net::ipv6_addresses() {
+        let hex: String = addr.octets().iter().map(|b| format!("{:02x}", b)).collect();
+        let scope = if addr.is_loopback() {
+            0x10
+        } else if addr.segments()[0] & 0xffc0 == 0xfe80 {
+            0x20
+        } else {
+            0
+        };
+        let name = if index == 1 { "lo" } else { "eth0" };
+        out.push_str(&format!("{} {:02x} {:02x} {:02x} 80 {:>8}\n", hex, index, prefix, scope, name));
+    }
+    out
 }

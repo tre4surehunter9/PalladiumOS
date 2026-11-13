@@ -90,6 +90,10 @@ impl Rtl8139 {
             // Accept broadcast, multicast and our own address; WRAP: a frame
             // may run past the ring's end (into the extra room).
             nic.out32(RCR, 0x0e | 1 << 7);
+            // Every multicast frame through (the hash filter all ones):
+            // IPv6's neighbour discovery and router advertisements.
+            nic.out32(0x08, 0xffff_ffff);
+            nic.out32(0x0c, 0xffff_ffff);
             nic.out8(CMD, CMD_RX_ENABLE | CMD_TX_ENABLE);
         }
         Some(nic)
