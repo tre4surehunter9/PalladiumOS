@@ -140,6 +140,8 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
             ("xjewel", "falling jewels: line up three"),
             ("xmahjongg", "mahjongg solitaire: take matching free tiles"),
             ("dosbox", "a PC with DOS in a window (C: is /usr/share/games/dos)"),
+            ("mpg123", "play MP3 files: mpg123 song.mp3 (-Z: a shuffled playlist; q quits)"),
+            ("out123", "play raw sound or a tone: out123 --wave-freq 440 --timelimit 44100"),
             ("nes", "a NES emulator: a menu of the games (or nes GAME.nes); Z/X, Enter, arrows"),
             ("wordlos", "WORDLOS, Wordle for DOS (in DOSBox)"),
             ("floppybird", "Floppy Bird, for DOS (in DOSBox; Space flaps)"),
