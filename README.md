@@ -443,7 +443,7 @@ The tiny user programs used by the tests live in `tests/user_progs` (`./build.sh
 |------|------------|---|
 | `/` | ext2 on the disk | saved; falls back to memory if there's no disk |
 | `/bin` | memory | the bundled programs, refreshed every boot |
-| `/usr` | ext2 on the system disk, read-only | BusyBox's links, musl's headers and libraries (for tcc), the shared libraries, fvwm95 and its files, X's programs, fonts and data, rebuilt every build as `target/usr.img` |
+| `/usr` | ext2 on the system disk, read-only | BusyBox's links, musl's headers and libraries (for tcc), the shared libraries, IceWM, fvwm95 and their files, X's programs, fonts and data, the games, rebuilt every build as `target/usr.img` (its files plus a tenth and 16 MiB) |
 | `/alpine` | ext2 on the Alpine disk | Alpine Linux, once `alpine` has set it up (`target/alpine.img`) |
 | `/tmp` | memory | cleared on reboot |
 | `/dev` | devfs | `null`, `zero`, `random`, `urandom`, `tty`, `console`, `tty0`/`tty1` (the console), `ptmx`, `pts/N`, `fb0` (the screen), `input/mice` and `psaux` (the mouse), `shm/` |

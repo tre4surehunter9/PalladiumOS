@@ -334,9 +334,11 @@ fn make_system_disk(root: &std::path::Path, target: &std::path::Path) {
         fs::create_dir_all(&empty).unwrap();
         empty
     };
-    // Room for the files plus some slack (sizes in KiB).
+    // Room for the files plus some slack: a tenth and 16 MiB (sizes in KiB;
+    // it was half, which made it a third empty: programs installed later
+    // go on other disks).
     let used = dir_size(&source) / 1024;
-    let size = format!("{}K", (used * 3 / 2 + 2048).max(4096));
+    let size = format!("{}K", (used * 11 / 10 + 16 * 1024).max(4096));
     if !mke2fs(&image, &size, Some(&source), &[]) {
         return;
     }
