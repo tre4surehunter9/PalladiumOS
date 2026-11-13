@@ -1,7 +1,8 @@
 // Copyright (c) 2026 tre4surehunter9
 //! Sound: a driver for the AC'97 audio controller (Intel's ICH audio, QEMU's
-//! `-device AC97`) and the OSS interface programs use: /dev/dsp (write
-//! samples) and /dev/mixer (volumes).
+//! `-device AC97`), a virtio sound card (virtio_snd.rs: QEMU's
+//! virtio-sound-pci, used when there is one), and the OSS interface
+//! programs use: /dev/dsp (write samples) and /dev/mixer (volumes).
 //!
 //! The controller plays from a ring of 32 buffers by DMA, each described in
 //! a buffer descriptor list (address, length). The driver fills buffer
@@ -132,8 +133,48 @@ impl Ac97 {
     }
 }
 
+/// The sound card: AC'97, or a virtio one.
+enum Card {
+    Ac97(Ac97),
+    Virtio(crate::virtio_snd::VirtioSnd),
+}
+
+impl Card {
+    /// Buffer `i` of the ring (BUF_BYTES of 16-bit stereo samples).
+    fn buf(&self, i: usize) -> *mut u8 {
+        match self {
+            Card::Ac97(c) => c.buf(i),
+            Card::Virtio(v) => v.buf(i),
+        }
+    }
+
+    /// Stop playing and start the ring over.
+    fn reset_output(&mut self) {
+        match self {
+            Card::Ac97(c) => c.reset_output(),
+            Card::Virtio(v) => v.reset_output(),
+        }
+    }
+
+    /// The rate it plays at for `rate` (what it took).
+    fn set_rate(&mut self, rate: u32) -> u32 {
+        match self {
+            Card::Ac97(c) => c.set_rate(rate),
+            Card::Virtio(v) => v.set_rate(rate),
+        }
+    }
+
+    /// It plays rates other than 48000 itself.
+    fn any_rate(&self) -> bool {
+        match self {
+            Card::Ac97(c) => c.vra,
+            Card::Virtio(v) => v.any_rate(),
+        }
+    }
+}
+
 struct Sound {
-    card: Option<Ac97>,
+    card: Option<Card>,
     /// /dev/dsp is open (one program at a time).
     open: bool,
     /// The program's format: rate, channels (1 or 2), AFMT_*.
@@ -190,6 +231,12 @@ const SOUND_KEY: u64 = 0x7E7E_0000_534E_4420;
 /// Find and start an AC'97 controller. Returns its description for the
 /// boot log, or None if there is none.
 pub fn init() -> Option<&'static str> {
+    // A virtio sound card first (made for virtual machines).
+    if let Some(v) = crate::virtio_snd::init() {
+        let any = v.any_rate();
+        SOUND.lock().card = Some(Card::Virtio(v));
+        return Some(if any { "virtio sound (any rate)" } else { "virtio sound (48 kHz)" });
+    }
     // A multimedia audio controller (class 4, subclass 1): AC'97.
     let pci = crate::net::pci::scan().into_iter().find(|d| d.class == 0x04 && d.subclass == 0x01)?;
     let (bar0, bar1) = (pci.bar(0), pci.bar(1));
@@ -239,7 +286,7 @@ pub fn init() -> Option<&'static str> {
     }
     card.reset_output();
     let vra = card.vra;
-    SOUND.lock().card = Some(card);
+    SOUND.lock().card = Some(Card::Ac97(card));
     Some(if vra { "AC'97 audio (any rate)" } else { "AC'97 audio (48 kHz)" })
 }
 
@@ -250,7 +297,25 @@ pub fn present() -> bool {
 /// /proc/sound: the card, the program's format, and where the ring is.
 pub fn status() -> alloc::string::String {
     let s = SOUND.lock();
-    let Some(card) = s.card.as_ref() else { return "No sound card\n".into() };
+    let card = match s.card.as_ref() {
+        None => return "No sound card\n".into(),
+        Some(Card::Virtio(v)) => {
+            return alloc::format!(
+                "virtio sound\nopen: {}\nformat: {} Hz, {} channel(s)\ncard rate: {} Hz\nring: tail {} fill {} queued {} running {}\n{}played: {} bytes\n",
+                s.open,
+                s.rate,
+                s.channels,
+                s.dev_rate,
+                s.tail,
+                s.fill,
+                s.queued(),
+                s.running,
+                v.describe(),
+                s.submitted
+            );
+        }
+        Some(Card::Ac97(c)) => c,
+    };
     alloc::format!(
         "AC'97 audio{}\nopen: {}\nformat: {} Hz, {} channel(s), {}\ncard rate: {} Hz\nfragment: {} bytes, {} queued at most\n\
          ring: tail {} fill {} queued {} running {}\ncard: civ {} lvi {} sr {:#06x} picb {} cr {:#04x}\nplayed: {} bytes\n",
@@ -356,8 +421,12 @@ pub fn open_mixer() -> Result<(), i64> {
 }
 
 impl Sound {
-    fn card(&self) -> &Ac97 {
+    fn card(&self) -> &Card {
         self.card.as_ref().unwrap()
+    }
+
+    fn card_mut(&mut self) -> &mut Card {
+        self.card.as_mut().unwrap()
     }
 
     /// Buffers handed to the card and not yet played (including the one
@@ -366,7 +435,10 @@ impl Sound {
         if !self.running {
             return 0;
         }
-        let card = self.card();
+        let card = match self.card() {
+            Card::Virtio(v) => return v.queued(),
+            Card::Ac97(c) => c,
+        };
         if card.in16(PO_SR) & SR_HALTED != 0 {
             return 0;
         }
@@ -376,7 +448,7 @@ impl Sound {
 
     /// Stop the card and start the ring over (nothing is queued).
     fn restart(&mut self) {
-        self.card().reset_output();
+        self.card_mut().reset_output();
         self.running = false;
         self.tail = 0;
         self.fill = 0;
@@ -386,7 +458,8 @@ impl Sound {
     fn apply_rate(&mut self) {
         // (Only while nothing plays: the codec's rate is for everything.)
         if self.queued() == 0 {
-            self.dev_rate = self.card().set_rate(self.rate);
+            let rate = self.rate;
+            self.dev_rate = self.card_mut().set_rate(rate);
             self.phase = 0;
         }
     }
@@ -426,12 +499,16 @@ impl Sound {
 
     /// Hand buffer `tail` (with `fill` bytes) to the card.
     fn submit(&mut self) {
-        let (tail, fill) = (self.tail, self.fill);
-        let card = self.card();
-        card.set_bd(tail, (fill / 2) as u16);
-        card.out8(PO_LVI, tail as u8);
-        if !self.running {
-            card.out8(PO_CR, CR_RUN);
+        let (tail, fill, running) = (self.tail, self.fill, self.running);
+        match self.card_mut() {
+            Card::Ac97(card) => {
+                card.set_bd(tail, (fill / 2) as u16);
+                card.out8(PO_LVI, tail as u8);
+                if !running {
+                    card.out8(PO_CR, CR_RUN);
+                }
+            }
+            Card::Virtio(v) => v.submit(tail, fill),
         }
         self.running = true;
         self.submitted += fill as u64;
@@ -448,6 +525,16 @@ impl Sound {
             }
             self.submit();
         }
+        // (A virtio card has no volume control: the volume is applied
+        // here.)
+        let (l, r) = match self.card() {
+            Card::Virtio(_) => {
+                let scale = |v: i16, vol: u32| (v as i32 * vol as i32 / 100) as i16;
+                let (lv, rv) = ((self.volume & 0xff) * (self.pcm & 0xff) / 100, (self.volume >> 8 & 0xff) * (self.pcm >> 8 & 0xff) / 100);
+                (scale(l, lv), scale(r, rv))
+            }
+            Card::Ac97(_) => (l, r),
+        };
         let p = unsafe { self.card().buf(self.tail).add(self.fill) };
         unsafe {
             core::ptr::write_volatile(p as *mut i16, l);
@@ -529,7 +616,10 @@ impl Sound {
         if queued == 0 {
             return self.fill;
         }
-        let left_in_current = self.card().in16(PO_PICB) as usize * 2;
+        let left_in_current = match self.card() {
+            Card::Ac97(c) => c.in16(PO_PICB) as usize * 2,
+            Card::Virtio(_) => self.frag(), // (not known: the whole buffer)
+        };
         (queued - 1) * self.frag() + left_in_current + self.fill
     }
 }
@@ -666,7 +756,7 @@ pub fn dsp_ioctl(request: u64, arg: u64) -> i64 {
             s.apply_rate();
             // (With variable rate, the codec's own; else what the program
             // asked for: the driver resamples.)
-            let actual = if s.card().vra && s.dev_rate != 48000 { s.dev_rate } else { rate };
+            let actual = if s.card().any_rate() && s.dev_rate != 48000 { s.dev_rate } else { rate };
             s.rate = actual;
             write_ints(arg, &[actual as i32])
         }
@@ -802,12 +892,16 @@ pub fn mixer_ioctl(request: u64, arg: u64) -> i64 {
             }
             if nr == MIXER_VOLUME {
                 s.volume = v;
-                let reg = ac97_volume(v, 0);
-                s.card().nam_write(NAM_MASTER, reg);
-                s.card().nam_write(NAM_HEADPHONE, reg);
+                if let Card::Ac97(c) = s.card() {
+                    let reg = ac97_volume(v, 0);
+                    c.nam_write(NAM_MASTER, reg);
+                    c.nam_write(NAM_HEADPHONE, reg);
+                }
             } else {
                 s.pcm = v;
-                s.card().nam_write(NAM_PCM_OUT, ac97_volume(v, 8));
+                if let Card::Ac97(c) = s.card() {
+                    c.nam_write(NAM_PCM_OUT, ac97_volume(v, 8));
+                }
             }
             write_ints(arg, &[v as i32])
         }

@@ -328,6 +328,26 @@ impl Queue {
         }
     }
 
+    /// Hand the device a chain of buffers (physical address, length,
+    /// written by the device?) as descriptors `first`, `first` + 1...
+    /// without waiting: it comes back through take_used as `first`.
+    pub fn submit_chain(&mut self, first: u16, parts: &[(u64, u32, bool)]) {
+        let n = parts.len() as u16;
+        for (i, &(phys, len, writable)) in parts.iter().enumerate() {
+            let d = first + i as u16;
+            let last = i as u16 + 1 == n;
+            let flags = if writable { DESC_WRITE } else { 0 } | if last { 0 } else { DESC_NEXT };
+            self.set_desc(d, phys, len, flags, if last { 0 } else { d + 1 });
+        }
+        unsafe {
+            let slot = self.next_avail % self.size;
+            write_volatile(self.avail.add(4 + 2 * slot as usize) as *mut u16, first);
+            fence(Ordering::SeqCst);
+            self.next_avail = self.next_avail.wrapping_add(1);
+            write_volatile(self.avail.add(2) as *mut u16, self.next_avail);
+        }
+    }
+
     /// Tell the device there's something new in the queue.
     pub fn kick(&self) {
         fence(Ordering::SeqCst);

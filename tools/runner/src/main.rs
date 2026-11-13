@@ -49,8 +49,7 @@ const RUN_ARGS: &[&str] = &[
     // without it grabbing the mouse. (And a USB controller, for USB
     // devices: PalladiumOS drives USB keyboards and tablets too.)
     "-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci", "-device", "qemu-xhci",
-    // A sound card (AC'97), played through this machine's sound system.
-    "-device", "AC97",
+    // (The sound card: display_args.)
     // The host's randomness, for /dev/random (virtio-rng).
     "-device", "virtio-rng-pci",
     // A second terminal, with a login, on a socket (virtio-console):
@@ -283,6 +282,11 @@ fn display_args(extra: &[String]) -> Vec<String> {
         args.push("-fw_cfg".to_string());
         args.push(format!("name=opt/palladium/resolution,string={}x{}", w, h));
     }
+    // The sound card, played through this machine's sound system: virtio
+    // sound, or AC'97 with PALLADIUM_SOUND=ac97.
+    let ac97 = std::env::var("PALLADIUM_SOUND").is_ok_and(|v| v.eq_ignore_ascii_case("ac97"));
+    args.push("-device".to_string());
+    args.push(if ac97 { "AC97" } else { "virtio-sound-pci" }.to_string());
     let chose_display = extra.iter().any(|a| matches!(a.as_str(), "-display" | "-nographic" | "-vnc" | "-spice" | "-sdl" | "-curses"));
     if !chose_display && gtk_display() {
         args.push("-display".to_string());
