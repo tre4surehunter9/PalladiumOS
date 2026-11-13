@@ -36,15 +36,7 @@ const RUN_ARGS: &[&str] = &[
     // 1 GiB of memory: Node.js and other big programs don't fit in
     // QEMU's default 128 MiB.
     "-m", "1G",
-    // The screen: a virtio GPU (virtio-vga: VGA-compatible for the firmware
-    // and the boot, then PalladiumOS puts the screen on virtio-gpu). It
-    // tells the firmware it prefers 1280x720 (EDID), and UEFI booting keeps
-    // the firmware's mode: 720p, as with BIOS.
-    "-vga", "none", "-device", "virtio-vga,edid=on,xres=1280,yres=720",
-    // The same size, told to the kernel directly: with QEMU's window, the
-    // GPU reports the window's size instead (smaller when the window
-    // manager shrinks it to fit the desktop).
-    "-fw_cfg", "name=opt/palladium/resolution,string=1280x720",
+    // (The screen: display_args.)
     // The data, system and Alpine disks as virtio disks (in this order:
     // PalladiumOS numbers them so; much faster than IDE or AHCI).
     "-drive", "format=raw,file=target/disk.img,if=virtio",
@@ -247,6 +239,40 @@ fn repo_root(kernel: &Path) -> PathBuf {
 
 /// Test kernels are the ones cargo names NAME-HASH (16 hex digits), in a
 /// `deps` directory or (newer cargo) a build directory.
+/// `cargo run`'s screen: a virtio GPU (virtio-vga: VGA-compatible for the
+/// firmware and the boot, then PalladiumOS puts the screen on virtio-gpu),
+/// PALLADIUM_RESOLUTION (WIDTHxHEIGHT, default 1280x720) in size. The GPU
+/// tells the firmware that size as its preferred one (EDID), and the
+/// kernel gets it directly too (a fw_cfg file): with QEMU's window, the
+/// GPU reports the window's size instead, smaller when the window manager
+/// shrinks the window to fit the desktop. PALLADIUM_FOLLOW_WINDOW=1 leaves
+/// the fw_cfg file out: the screen takes the window's size (at boot).
+fn display_args() -> Vec<String> {
+    let wanted = std::env::var("PALLADIUM_RESOLUTION").ok();
+    let (w, h) = wanted
+        .as_deref()
+        .and_then(|r| r.split_once('x'))
+        .and_then(|(w, h)| Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?)))
+        .filter(|&(w, h)| (640..=7680).contains(&w) && (480..=4320).contains(&h))
+        .unwrap_or_else(|| {
+            if let Some(r) = &wanted {
+                eprintln!("palladium-runner: PALLADIUM_RESOLUTION={:?} isn't WIDTHxHEIGHT (640x480 to 7680x4320): using 1280x720", r);
+            }
+            (1280, 720)
+        });
+    let mut args = vec![
+        "-vga".to_string(),
+        "none".to_string(),
+        "-device".to_string(),
+        format!("virtio-vga,edid=on,xres={},yres={}", w, h),
+    ];
+    if std::env::var_os("PALLADIUM_FOLLOW_WINDOW").is_none_or(|v| v.is_empty() || v == "0") {
+        args.push("-fw_cfg".to_string());
+        args.push(format!("name=opt/palladium/resolution,string={}x{}", w, h));
+    }
+    args
+}
+
 fn is_test_kernel(kernel: &Path) -> bool {
     let name = kernel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let hashed = name.rsplit_once('-').is_some_and(|(_, h)| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()));
@@ -358,6 +384,7 @@ fn run(kernel: &Path, extra: &[String], uefi: bool) {
         .arg(format!("format=raw,file={}", image.canonicalize().unwrap_or(image.clone()).display()))
         .arg("-no-reboot")
         .args(if test { TEST_ARGS } else { RUN_ARGS })
+        .args(if test { Vec::new() } else { display_args() })
         .args(test_extra_args(kernel, test))
         .args(kvm_args(&test_extra_args(kernel, test).iter().copied().chain(extra.iter().map(String::as_str)).collect::<Vec<_>>()))
         .args(extra);
