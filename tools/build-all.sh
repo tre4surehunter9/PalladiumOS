@@ -17,7 +17,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-ALL_PORTS="lua dash fastfetch tcc micropython busybox dropbear fonts tinyx x11-clients fvwm95 x11-apps xterm links tcltk vim xfm cxx games doom"
+ALL_PORTS="lua dash fastfetch tcc micropython busybox dropbear fonts tinyx x11-clients fvwm95 x11-apps xterm links tcltk vim xfm cxx sdl games doom"
 STAMPS=target/ports/stamps
 
 # What each port produces (relative to target/).
@@ -34,6 +34,7 @@ outputs() {
         tinyx) echo "sysroot/bin/Xfbdev ports/x11/lib/libX11.a" ;;
         x11-clients) echo "sysroot/bin/rxvt sysroot/bin/evilwm" ;;
         x11-apps) echo "sysroot/bin/xclock sysroot/bin/xeyes sysroot/bin/xcalc sysroot/bin/xlogo" ;;
+        sdl) echo "ports/x11/lib/libSDL2.a ports/x11/lib/libSDL2x.a ports/x11/lib/libSDL.a ports/x11/bin/sdl-config" ;;
         cxx) echo "musl/lib/libstdc++.a musl/lib/libdlfo.a musl/bin/palladium-c++" ;;
         games) echo "sysroot/bin/xboard sysroot/bin/fairymax sysroot/bin/xjewel sysroot/bin/xsnow sysroot/bin/xroach sysroot/bin/xmahjongg" ;;
         doom) echo "sysroot/bin/doomgeneric sysroot/share/games/doom/freedoom1.wad" ;;
