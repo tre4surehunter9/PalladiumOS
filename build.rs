@@ -374,7 +374,8 @@ fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
 }
 
 fn dir_size(dir: &std::path::Path) -> u64 {
-    walk(dir).iter().filter_map(|p| p.metadata().ok()).map(|m| if m.is_file() { m.len() + 1024 } else { 1024 }).sum()
+    // (symlink_metadata: a link counts as itself, not as what it points at.)
+    walk(dir).iter().filter_map(|p| p.symlink_metadata().ok()).map(|m| if m.is_file() { m.len() + 1024 } else { 1024 }).sum()
 }
 
 /// A plain Linux program (tests/linux/hello.c) built by the host's gcc,

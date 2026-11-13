@@ -310,8 +310,19 @@ fn user_fault(frame: &mut crate::syscall::SyscallFrame, sig: i32, info: crate::p
         return;
     }
     println!("{} (rip {:#x})", what, frame.rip);
-    crate::boot_warn!("pid {}: {} ip {:#x} sp {:#x} cpu {}", crate::process::current_pid(), what, frame.rip, frame.rsp,
-        crate::smp::cpu_index());
+    // A call through a null (or tiny) function pointer: the return address
+    // on top of the stack says where from.
+    let from = if frame.rip < 0x1000 && crate::memory::is_user_range(frame.rsp, 8, false) {
+        Some(unsafe { core::ptr::read_volatile(frame.rsp as *const u64) })
+    } else {
+        None
+    };
+    match from {
+        Some(ret) => crate::boot_warn!("pid {}: {} ip {:#x} sp {:#x} cpu {} (called from {:#x})",
+            crate::process::current_pid(), what, frame.rip, frame.rsp, crate::smp::cpu_index(), ret),
+        None => crate::boot_warn!("pid {}: {} ip {:#x} sp {:#x} cpu {}", crate::process::current_pid(), what, frame.rip,
+            frame.rsp, crate::smp::cpu_index()),
+    }
     crate::process::kill_current(sig);
 }
 
