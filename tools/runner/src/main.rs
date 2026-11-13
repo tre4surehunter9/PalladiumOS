@@ -53,6 +53,10 @@ const RUN_ARGS: &[&str] = &[
     "-device", "AC97",
     // The host's randomness, for /dev/random (virtio-rng).
     "-device", "virtio-rng-pci",
+    // A second terminal, with a login, on a socket (virtio-console):
+    // `socat -,raw,echo=0 UNIX-CONNECT:target/console.sock`.
+    "-device", "virtio-serial-pci", "-device", "virtconsole,chardev=hvc0",
+    "-chardev", "socket,id=hvc0,path=target/console.sock,server=on,wait=off",
 ];
 
 /// QEMU's arguments for test kernels.

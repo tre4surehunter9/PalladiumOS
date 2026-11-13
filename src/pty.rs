@@ -283,6 +283,15 @@ pub fn open_master(nonblocking: bool) -> Result<End, i64> {
     Ok(End { pty, master: true, nonblocking: AtomicBool::new(nonblocking) })
 }
 
+/// unlockpt() and chown root:root for the kernel (a terminal it makes for
+/// a login of its own: virtio-console's).
+pub fn unlock_for_kernel(end: &End) {
+    let mut s = end.pty.state.lock();
+    s.locked = false;
+    s.uid = 0;
+    s.gid = 0;
+}
+
 /// open("/dev/pts/N") (permissions were checked by the caller). Without
 /// O_NOCTTY, a session leader with no controlling terminal gets this one.
 pub fn open_slave(n: u32, nonblocking: bool, noctty: bool) -> Result<End, i64> {

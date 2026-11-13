@@ -262,6 +262,7 @@ pub fn idle_loop() -> ! {
         if cpu_index() == 0 {
             crate::net::poll_if_due();
             crate::virtio_gpu::tick(); // (not from interrupts: see the timer)
+            crate::virtio_console::pump();
         }
         crate::process::schedule();
         unlock_kernel();

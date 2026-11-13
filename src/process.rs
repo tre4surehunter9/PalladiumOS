@@ -1633,7 +1633,36 @@ fn program_path(name: &str) -> String {
 /// Start a program as a child of the kernel, with the kernel shell's
 /// working directory. Returns its pid.
 pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static str> {
-    let c = current_cred();
+    spawn_as(bytes, argv, envp, current_pid(), CTTY_CONSOLE)
+}
+
+/// Start a program as the kernel's child (whatever is running now), as root,
+/// in a session of its own with no controlling terminal: the first terminal
+/// it opens becomes it (a login on another terminal: virtio-console's).
+pub fn spawn_session(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static str> {
+    let pid = spawn_as(bytes, argv, envp, 0, CTTY_NONE)?;
+    let mut s = OTHER_SESSIONS.lock();
+    s.retain(|&sid| alive(sid)); // (sessions whose leader is gone: forgotten)
+    s.push(pid); // (it leads its session: sid = pid)
+    Ok(pid)
+}
+
+/// Sessions the kernel started on other terminals (spawn_session): the
+/// console's logout leaves them be.
+static OTHER_SESSIONS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// Whether `p` belongs to a session on another terminal.
+fn on_other_terminal(p: &Process, others: &[u64]) -> bool {
+    others.contains(&p.sid)
+}
+
+/// Whether process `pid` is there and not a zombie.
+pub fn alive(pid: u64) -> bool {
+    TABLE.lock().get(&pid).is_some_and(|p| !matches!(p.state, State::Zombie(_)))
+}
+
+fn spawn_as(bytes: &[u8], argv: &[&str], envp: &[&str], ppid: u64, ctty: u32) -> Result<u64, &'static str> {
+    let c = if ctty == CTTY_NONE { Cred::ROOT } else { current_cred() };
     let ids = usermode::Ids { uid: c.ruid, euid: c.euid, gid: c.rgid, egid: c.egid };
     let image = usermode::build_image(&usermode::Program::Bytes(bytes), argv, envp, ids)?;
     let frame = SyscallFrame::new_user(image.entry, image.stack_pointer);
@@ -1643,7 +1672,7 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
     let name = argv.first().map(|a| basename(a)).unwrap_or_else(|| "program".to_string());
     let process = Process {
         pid,
-        ppid: current_pid(),
+        ppid,
         name,
         state: State::Ready,
         kernel_rsp,
@@ -1653,7 +1682,7 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         mm: Mm::new(),
         pgid: pid, // leader of a new process group
         sid: pid,  // and session, on the console
-        ctty: CTTY_CONSOLE,
+        ctty,
         pending: 0,
         siginfo: BTreeMap::new(),
         altstack: AltStack::DISABLED,
@@ -1671,7 +1700,7 @@ pub fn spawn(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<u64, &'static
         affinity: u64::MAX,
         cpu_ticks: 0,
         running_since: 0,
-        cred: current_cred(), // programs the kernel starts run as root
+        cred: c, // programs the kernel starts run as root
         fpu: Box::new(crate::fpu::FpuState::initial()),
         fs_base: 0,
         gs_base: 0,
@@ -1702,15 +1731,26 @@ pub fn run_program_env(bytes: &[u8], argv: &[&str], envp: &[&str]) -> Result<i32
 
     let mut status = None;
     // Reap the program, then any orphans it left behind (they were handed
-    // to the kernel), until no children remain.
+    // to the kernel), until none on the console remain. (Sessions on other
+    // terminals, like virtio-console's login, are the kernel's children
+    // too: they go on, and are reaped here when they end.)
     loop {
+        if status.is_some() {
+            let others = OTHER_SESSIONS.lock().clone();
+            let table = TABLE.lock();
+            if !table.values().any(|p| p.ppid == 0 && p.pid != 0 && !on_other_terminal(p, &others)) {
+                break;
+            }
+        }
         match wait(-1, false) {
             Ok(Some((p, reason))) if p == pid => {
                 status = Some(reason);
                 // Like a terminal hanging up: whatever it left running gets
                 // SIGHUP, so e.g. `sleep 100 &` can't keep the console busy.
+                // (Not the sessions on other terminals: virtio-console's.)
+                let others = OTHER_SESSIONS.lock().clone();
                 let mut table = TABLE.lock();
-                let left: Vec<u64> = table.keys().copied().filter(|&p| p != 0).collect();
+                let left: Vec<u64> = table.values().filter(|q| q.pid != 0 && !on_other_terminal(q, &others)).map(|q| q.pid).collect();
                 for p in left {
                     signal_locked(&mut table, p, SIGHUP);
                 }

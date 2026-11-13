@@ -94,6 +94,7 @@ extern "C" fn timer_dispatch(frame: &mut crate::syscall::SyscallFrame) {
         // allocation holds the heap's lock: waiting for it here, on the
         // same core, would be forever.)
         crate::virtio_gpu::tick();
+        crate::virtio_console::pump(); // (likewise)
         crate::process::preempt();
         crate::process::handle_signals(frame, None);
     } else if took {

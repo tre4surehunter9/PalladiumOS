@@ -139,6 +139,9 @@ extern crate alloc;
         if palladiumos::mouse::init() {
             boot_ok!("Started the PS/2 mouse (/dev/input/mice)");
         }
+        if palladiumos::virtio_console::init() {
+            boot_ok!("Found a virtio console: a login on it (QEMU's virtconsole)");
+        }
         for name in palladiumos::virtio_input::init() {
             boot_ok!("Found a virtio input device: {}", name);
         }
