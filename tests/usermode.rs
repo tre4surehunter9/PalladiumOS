@@ -1404,6 +1404,17 @@ fn file_tools_end_to_end() {
     assert_eq!(file("/ft-rl.txt"), "a\n");
     assert!(file("/ft-du.txt").ends_with("/ft\n"));
     assert!(file("/ft-df.txt").contains("Mounted on"));
+    // Everything mounted (from /proc/mounts), the system disk too, under
+    // its device's name (not one name for every disk).
+    if filesystem::is_dir("/usr/lib") {
+        assert_eq!(sh("df > /ft-dfall.txt"), 0);
+        let df = file("/ft-dfall.txt");
+        assert!(df.lines().any(|l| l.ends_with(" /usr") && l.starts_with("/dev/")), "{}", df);
+        // (/proc files say they're empty, as on Linux: read through cat.)
+        assert_eq!(sh("cat /proc/mounts > /ft-mounts.txt"), 0);
+        let mounts = file("/ft-mounts.txt");
+        assert!(mounts.lines().any(|l| l.starts_with("/dev/") && l.contains(" /usr ext2 ro")), "{}", mounts);
+    }
     assert!(!filesystem::is_dir("/ft") && !filesystem::is_dir("/ft2"));
 }
 

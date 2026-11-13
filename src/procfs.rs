@@ -92,8 +92,11 @@ impl ProcFs {
             6 => {
                 let mut s = String::new();
                 for (path, fs) in crate::mounts::list_unlocked() {
-                    let device = if fs == "ext2" { "/dev/hda" } else { fs };
-                    s.push_str(&format!("{} {} {} rw 0 0\n", device, path, fs));
+                    // A disk's device (/dev/hdb, /dev/sda2...), else the
+                    // filesystem's name, as Linux shows tmpfs or proc.
+                    let device = crate::mounts::device(&path).unwrap_or_else(|| fs.to_string());
+                    let mode = if path == "/usr" { "ro" } else { "rw" };
+                    s.push_str(&format!("{} {} {} {} 0 0\n", device, path, fs, mode));
                 }
                 s
             }

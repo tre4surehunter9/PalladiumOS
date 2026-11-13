@@ -187,6 +187,22 @@ pub fn unmount(path: &str) -> FsResult<Box<dyn FileSystem>> {
     Ok(old)
 }
 
+/// The device behind each disk's mount (path, /dev/hda...), for
+/// /proc/mounts.
+static DEVICES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Say which device is mounted at `path`.
+pub fn set_device(path: &str, device: &str) {
+    let mut d = DEVICES.lock();
+    d.retain(|(p, _)| p != path);
+    d.push((path.to_string(), device.to_string()));
+}
+
+/// The device mounted at `path`, if it's a disk.
+pub fn device(path: &str) -> Option<String> {
+    DEVICES.lock().iter().find(|(p, _)| p == path).map(|(_, d)| d.clone())
+}
+
 /// (mount path, filesystem name) for each mount, like /proc/mounts.
 pub fn list() -> Vec<(String, &'static str)> {
     ensure_root();

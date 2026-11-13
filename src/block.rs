@@ -358,68 +358,103 @@ pub fn gpt_partitions(disk: &mut dyn BlockDevice) -> Vec<(String, u64, u64)> {
 
 /// PalladiumOS's partitions (named palladium-...) on any disk, found once.
 /// Disks without any are left alone (and free for disk(N)).
-static NAMED: Mutex<Option<Vec<(String, Partition)>>> = Mutex::new(None);
+static NAMED: Mutex<Option<Vec<(String, Partition, String)>>> = Mutex::new(None);
 
-fn take_named(name: &str) -> Option<Box<dyn BlockDevice>> {
+/// Linux's name for a disk: hda..hdd for IDE positions 0..3, sda, sdb...
+/// for AHCI ports.
+fn disk_name(index: u8, ide: bool) -> String {
+    alloc::format!("/dev/{}{}", if ide { "hd" } else { "sd" }, (b'a' + index) as char)
+}
+
+/// Disk `index` (as disk()), with its Linux name.
+fn disk_named(index: u8) -> Option<(Box<dyn BlockDevice>, String)> {
+    let ide = match index {
+        0 => AtaDisk::primary_master(),
+        1 => AtaDisk::primary_slave(),
+        2 => AtaDisk::secondary_master(),
+        3 => AtaDisk::secondary_slave(),
+        _ => None,
+    };
+    match ide {
+        Some(d) => Some((Box::new(d), disk_name(index, true))),
+        None => crate::ahci::boxed(index).map(|d| (d, disk_name(index, false))),
+    }
+}
+
+fn take_named(name: &str) -> Option<(Box<dyn BlockDevice>, String)> {
     let mut named = NAMED.lock();
     let list = named.get_or_insert_with(|| {
         let mut list = Vec::new();
         let ahci_ports = crate::ahci::ports_with_disks();
-        let candidates = (0..4u8).filter_map(|i| match i {
-            0 => AtaDisk::primary_master(),
-            1 => AtaDisk::primary_slave(),
-            2 => AtaDisk::secondary_master(),
-            _ => AtaDisk::secondary_slave(),
-        }.map(|d| Box::new(d) as Box<dyn BlockDevice>))
-        .chain(ahci_ports.into_iter().filter_map(crate::ahci::boxed));
-        for mut disk in candidates {
-            let parts: Vec<_> = gpt_partitions(disk.as_mut()).into_iter().filter(|p| p.0.starts_with("palladium-")).collect();
+        let candidates = (0..4u8)
+            .filter_map(|i| {
+                match i {
+                    0 => AtaDisk::primary_master(),
+                    1 => AtaDisk::primary_slave(),
+                    2 => AtaDisk::secondary_master(),
+                    _ => AtaDisk::secondary_slave(),
+                }
+                .map(|d| (Box::new(d) as Box<dyn BlockDevice>, disk_name(i, true)))
+            })
+            .chain(ahci_ports.into_iter().filter_map(|p| crate::ahci::boxed(p).map(|d| (d, disk_name(p, false)))));
+        for (mut disk, dev) in candidates {
+            // (Numbered as on Linux: their place in the partition table.)
+            let parts: Vec<_> = gpt_partitions(disk.as_mut())
+                .into_iter()
+                .enumerate()
+                .filter(|(_, p)| p.0.starts_with("palladium-"))
+                .collect();
             if parts.is_empty() {
                 continue; // (dropped: an AHCI port is handed back)
             }
             let shared = Arc::new(Mutex::new(disk));
-            for (pname, start, sectors) in parts {
+            for (i, (pname, start, sectors)) in parts {
                 crate::serial_println!("partition {}: sectors {}..+{}", pname, start, sectors);
-                list.push((pname, Partition { disk: shared.clone(), start, sectors }));
+                let devname = alloc::format!("{}{}", dev, i + 1);
+                list.push((pname, Partition { disk: shared.clone(), start, sectors }, devname));
             }
         }
         list
     });
-    let i = list.iter().position(|(n, _)| n == name)?;
-    Some(Box::new(list.remove(i).1))
+    let i = list.iter().position(|(n, _, _)| n == name)?;
+    let (_, part, devname) = list.remove(i);
+    Some((Box::new(part), devname))
 }
 
 /// The data disk, mounted at /: a partition named palladium-data on any
 /// disk (see `palladium-runner usb`), or else disk 1.
-pub fn data_disk() -> Option<Box<dyn BlockDevice>> {
-    take_named("palladium-data").or_else(|| disk(1))
+/// (With its device name, for /proc/mounts.)
+pub fn data_disk() -> Option<(Box<dyn BlockDevice>, String)> {
+    take_named("palladium-data").or_else(|| disk_named(1))
 }
 
 /// The system disk: the files under /usr (C headers and libraries for
 /// tcc), made by build.rs as target/usr.img. palladium-usr, or disk 2.
-pub fn system_disk() -> Option<Box<dyn BlockDevice>> {
-    take_named("palladium-usr").or_else(|| disk(2))
+pub fn system_disk() -> Option<(Box<dyn BlockDevice>, String)> {
+    take_named("palladium-usr").or_else(|| disk_named(2))
 }
 
 /// Mount the Alpine disk (palladium-alpine, or disk 3: target/alpine.img
 /// from build.rs) at /alpine, if there is one: room for an Alpine Linux
 /// root filesystem (see /bin/alpine). Returns its size in MiB.
 pub fn mount_alpine_disk() -> Option<u64> {
-    let dev = take_named("palladium-alpine").or_else(|| disk(3))?;
+    let (dev, name) = take_named("palladium-alpine").or_else(|| disk_named(3))?;
     let mib = dev.sectors() * 512 / 1024 / 1024;
     let fs = crate::ext2::Ext2::mount(dev).ok()?;
     let _ = crate::filesystem::make_dir("/alpine");
     crate::mounts::mount("/alpine", Box::new(fs));
+    crate::mounts::set_device("/alpine", &name);
     Some(mib)
 }
 
 /// Mount the system disk read-only at /usr, if there is one with files.
 pub fn mount_system_disk() -> bool {
-    let Some(dev) = system_disk() else { return false };
+    let Some((dev, name)) = system_disk() else { return false };
     let Ok(mut fs) = crate::ext2::Ext2::mount(dev) else { return false };
     fs.make_read_only();
     let _ = crate::filesystem::make_dir("/usr");
     crate::mounts::mount("/usr", Box::new(fs));
+    crate::mounts::set_device("/usr", &name);
     true
 }
 

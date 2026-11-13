@@ -218,12 +218,17 @@ fn mount_filesystems() {
     use alloc::boxed::Box;
     use palladiumos::{block, boot_failed, boot_info, boot_ok, boot_warn, devfs::DevFs, ext2::Ext2, fdfs::Fdfs, mounts};
 
-    let disk = block::data_disk();
-    if let Some(d) = &disk {
-        boot_info!("ata0-slave: {} MiB disk", d.sectors() * 512 / 1024 / 1024);
+    let (disk, device) = match block::data_disk() {
+        Some((d, name)) => (Some(d), Some(name)),
+        None => (None, None),
+    };
+    if let (Some(d), Some(name)) = (&disk, &device) {
+        boot_info!("{}: {} MiB disk", name, d.sectors() * 512 / 1024 / 1024);
     }
+    let mut on_disk = false;
     let root: Box<dyn mounts::FileSystem> = match disk.map(Ext2::mount) {
         Some(Ok(mut fs)) => {
+            on_disk = true;
             let stats = mounts::FileSystem::statfs(&mut fs);
             let used = (stats.blocks - stats.free_blocks) * stats.block_size / 1024 / 1024;
             let size = stats.blocks * stats.block_size / 1024 / 1024;
@@ -241,6 +246,9 @@ fn mount_filesystems() {
         }
     };
     mounts::mount("/", root);
+    if let (true, Some(name)) = (on_disk, &device) {
+        mounts::set_device("/", name);
+    }
     for dir in ["/bin", "/tmp", "/dev", "/proc"] {
         let _ = palladiumos::filesystem::make_dir(dir); // mount points
     }

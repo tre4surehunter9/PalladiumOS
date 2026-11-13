@@ -66,7 +66,7 @@ PalladiumOS's own tools, written in Rust, live in `/bin` and run from the shell 
 * mv / cp - move and copy files (`cp -r` for directories; `mv` works across filesystems)
 * ln - hard links, or symbolic links with `-s`; readlink shows where a link points
 * chmod - permissions, octal (`755`) or symbolic (`u+x,go-w`)
-* df / du - free disk space, and space used by files (`-h` for K/M/G, `du -s` totals)
+* df / du - free disk space of everything mounted (with each disk's device: `/dev/hdb`, `/dev/sda2`...; `mount` and `/proc/mounts` name them the same way), and space used by files (`-h` for K/M/G, `du -s` totals)
 * stat - a file's type, size, inode, links, permissions and time
 * ps - list processes (PID, parent, state, CPU time, memory, command)
 * top - live process view, refreshed every second (`q` quits)
