@@ -2,13 +2,14 @@
 # Copyright (c) 2026 tre4surehunter9
 # startx: the X Window System on the whole screen.
 #
-#   startx              the X server (Xfbdev) with fvwm95 (a taskbar and a
-#                       Start menu) and a terminal (rxvt)
+#   startx              the X server (Xfbdev) with IceWM (a taskbar and a
+#                       menu) and a terminal (xterm)
+#   startx fvwm95       ... with fvwm95 instead (Windows 95 style)
 #   startx PROGRAM...   the X server and PROGRAM instead (e.g. startx evilwm)
 #
-# Quitting fvwm95 (Start, Shut Down) or Ctrl+Alt+Backspace stops X and comes
-# back here. The X server's messages are in /tmp/Xfbdev.log, its programs'
-# in /tmp/startx.log.
+# Logging out of IceWM (or quitting fvwm95: Start, Shut Down), or
+# Ctrl+Alt+Backspace, stops X and comes back here. The X server's messages
+# are in /tmp/Xfbdev.log, its programs' in /tmp/startx.log.
 
 if ! command -v Xfbdev >/dev/null; then
     echo "startx: no X server (build it with tools/ports/tinyx.sh)" >&2
@@ -47,8 +48,16 @@ export DISPLAY=:0
 # knows (it has no C.UTF-8; musl takes any UTF-8 locale as its own).
 export LANG="${LANG:-en_US.UTF-8}"
 : >/tmp/startx.log
-if [ $# -gt 0 ]; then
+if [ "$1" = fvwm95 ] && [ $# -eq 1 ]; then
+    # It opens a terminal itself. Quitting it ends the session.
+    (fvwm95 >>/tmp/startx.log 2>&1; kill $x 2>/dev/null) &
+elif [ $# -gt 0 ]; then
     "$@" >>/tmp/startx.log 2>&1 &
+elif command -v icewm >/dev/null; then
+    # The background, a terminal, and IceWM. Logging out ends the session.
+    icewmbg >>/tmp/startx.log 2>&1 &
+    xterm >>/tmp/startx.log 2>&1 &
+    (icewm >>/tmp/startx.log 2>&1; kill $x 2>/dev/null) &
 elif command -v fvwm95 >/dev/null; then
     # It opens a terminal itself. Quitting it ends the session.
     (fvwm95 >>/tmp/startx.log 2>&1; kill $x 2>/dev/null) &

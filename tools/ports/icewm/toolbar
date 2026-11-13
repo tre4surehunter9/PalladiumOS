@@ -1,0 +1,5 @@
+# PalladiumOS: buttons on IceWM's taskbar.
+prog "Terminal" xterm xterm
+prog "Web browser" /usr/lib/X11/mini-icons/mini-nscape.xpm links -g https://example.com/
+prog "Files" folder xfm
+prog "NES games" /usr/lib/X11/mini-icons/mini-tetris.xpm nes

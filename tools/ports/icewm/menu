@@ -1,0 +1,57 @@
+# PalladiumOS: IceWM's menu (its own items, Run, Windows, Themes, Logout...,
+# come after these). Icons: IceWM's, or fvwm95's mini-icons.
+prog "Terminal (XTerm)" xterm xterm
+prog "Terminal (rxvt)" xterm rxvt
+prog "Web browser (Links)" /usr/lib/X11/mini-icons/mini-nscape.xpm links -g https://example.com/
+prog "File manager (xfm)" folder xfm
+separator
+menu "Games" /usr/lib/X11/mini-icons/mini-happy.xpm {
+    prog "NES games" /usr/lib/X11/mini-icons/mini-tetris.xpm nes
+    menu "DOS games" /usr/lib/X11/mini-icons/mini-cd.xpm {
+        prog "WORDLOS (Wordle)" /usr/lib/X11/mini-icons/mini-happy.xpm wordlos
+        prog "Floppy Bird" /usr/lib/X11/mini-icons/mini-happy.xpm floppybird
+        prog "DOSBox (a DOS prompt)" /usr/lib/X11/mini-icons/mini-term.xpm dosbox
+    }
+    prog "DOOM (Freedoom)" /usr/lib/X11/mini-icons/mini-happy.xpm doom
+    prog "Mahjongg" /usr/lib/X11/mini-icons/mini-xmahjongg.xpm xmahjongg
+    prog "Chess (XBoard)" /usr/lib/X11/mini-icons/mini-slon.xpm xboard
+    prog "Jewels" /usr/lib/X11/mini-icons/mini-bball.xpm xjewel
+    separator
+    prog "Let it snow (xsnow)" /usr/lib/X11/mini-icons/mini-xsnow.xpm xsnow
+    prog "Roaches (xroach)" /usr/lib/X11/mini-icons/mini-roach.xpm xroach
+    prog "Stop snow and roaches" /usr/lib/X11/mini-icons/mini-stop.xpm busybox pkill -x "xsnow|xroach"
+}
+menu "Accessories" /usr/lib/X11/mini-icons/mini-hammer.xpm {
+    prog "Calculator" /usr/lib/X11/mini-icons/mini-calc.xpm xcalc
+    prog "Text editor (xedit)" /usr/lib/X11/mini-icons/mini-edit.xpm xedit
+    prog "Magnifying glass" /usr/lib/X11/mini-icons/mini-zoom.xpm xmag
+    prog "Font viewer" /usr/lib/X11/mini-icons/mini-font.xpm xfontsel
+    prog "Bitmap editor" /usr/lib/X11/mini-icons/mini-paint.xpm bitmap
+    separator
+    prog "Clock" /usr/lib/X11/mini-icons/mini-clock.xpm xclock
+    prog "Round clock" /usr/lib/X11/mini-icons/mini-clock.xpm oclock
+    prog "System load" xload xload
+    prog "Eyes" /usr/lib/X11/mini-icons/mini-eyes.xpm xeyes
+    prog "Polyhedron" /usr/lib/X11/mini-icons/mini-bball.xpm ico
+}
+menu "Programming" /usr/lib/X11/mini-icons/mini-run.xpm {
+    prog "Vim" vim xterm -T Vim -e vim
+    prog "vi" /usr/lib/X11/mini-icons/mini-edit.xpm xterm -T vi -e vi
+    prog "Text editor (edit)" /usr/lib/X11/mini-icons/mini-edit.xpm xterm -T edit -e edit
+    separator
+    prog "Python" /usr/lib/X11/mini-icons/mini-run.xpm xterm -T MicroPython -e micropython
+    prog "Lua" /usr/lib/X11/mini-icons/mini-run.xpm xterm -T Lua -e lua
+    prog "Tcl/Tk: widget tour" /usr/lib/X11/mini-icons/mini-modules.xpm wish /usr/lib/tk8.6/demos/widget
+}
+menu "System tools" /usr/lib/X11/mini-icons/mini-modules.xpm {
+    prog "Processes (top)" /usr/lib/X11/mini-icons/mini-run.xpm xterm -T top -e busybox top
+    prog "System info" /usr/lib/X11/mini-icons/mini-bx2.xpm xterm -T fastfetch -e sh -c "fastfetch; sh"
+    prog "Sound test" /usr/lib/X11/mini-icons/mini-sound.xpm xterm -T volume -e sh -c "volume; play -t 440 1; sh"
+    separator
+    prog "Input events (xev)" /usr/lib/X11/mini-icons/mini-hex.xpm xterm -T xev -e xev
+    prog "Window info (click one)" /usr/lib/X11/mini-icons/mini-ray.xpm xterm -T xwininfo -e sh -c "xwininfo; sleep 60"
+    prog "Display info" /usr/lib/X11/mini-icons/mini-display.xpm xterm -T xdpyinfo -e sh -c "xdpyinfo | busybox less"
+    prog "Kill a window (click it)" /usr/lib/X11/mini-icons/mini-crosbone.xpm xkill
+    prog "Screenshot (/tmp/screen.xwd)" /usr/lib/X11/mini-icons/mini-camera.xpm sh -c "xwd -root -out /tmp/screen.xwd && xmessage 'Saved /tmp/screen.xwd (view: xwud -in /tmp/screen.xwd)'"
+}
+prog "Alpine Linux" /usr/lib/X11/mini-icons/mini-penguin.xpm xterm -T Alpine -e alpine

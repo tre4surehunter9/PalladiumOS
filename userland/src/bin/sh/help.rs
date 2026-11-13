@@ -124,7 +124,8 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
         "graphics",
         "the X Window System",
         &[
-            ("startx", "X with fvwm95 and a terminal (Start > Shut Down, or Ctrl+Alt+Backspace: back)"),
+            ("startx", "X with IceWM and a terminal (Logout, or Ctrl+Alt+Backspace: back; startx fvwm95)"),
+            ("icewm", "the window manager: a taskbar, a menu (Ctrl+Esc), workspaces, themes"),
             ("fvwm95", "a window manager like Windows 95: a taskbar and a Start menu"),
             ("Xfbdev", "the X server, on the whole screen (Xfbdev &; X programs use DISPLAY=:0)"),
             ("evilwm", "a window manager (move: Alt+drag, resize: Alt+middle-drag, terminal: Ctrl+Alt+Enter)"),

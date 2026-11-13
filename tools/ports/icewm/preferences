@@ -1,0 +1,38 @@
+# PalladiumOS: IceWM's settings (what's not here: IceWM's defaults).
+# The X core fonts PalladiumOS has (no Xft): Adobe's Helvetica.
+TitleFontName="-adobe-helvetica-bold-r-normal--12-*-*-*-*-*-iso8859-1"
+MenuFontName="-adobe-helvetica-bold-r-normal--12-*-*-*-*-*-iso8859-1"
+StatusFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
+QuickSwitchFontName="-adobe-helvetica-bold-r-normal--12-*-*-*-*-*-iso8859-1"
+NormalButtonFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
+ActiveButtonFontName="-adobe-helvetica-bold-r-normal--12-*-*-*-*-*-iso8859-1"
+NormalTaskBarFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
+ActiveTaskBarFontName="-adobe-helvetica-bold-r-normal--12-*-*-*-*-*-iso8859-1"
+ToolButtonFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
+NormalWorkspaceFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
+ActiveWorkspaceFontName="-adobe-helvetica-bold-r-normal--12-*-*-*-*-*-iso8859-1"
+MinimizedWindowFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
+ListBoxFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
+ToolTipFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
+ClockFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
+ApmFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
+InputFontName="-misc-fixed-medium-r-normal--13-*-*-*-*-*-iso8859-1"
+LabelFontName="-adobe-helvetica-medium-r-normal--12-*-*-*-*-*-iso8859-1"
+# (The desktop: the theme's own background.)
+# The taskbar: a clock in plain text (no LED digits), CPU and memory.
+TaskBarShowClock=1
+TaskBarClockLeds=0
+TaskBarShowCPUStatus=1
+TaskBarShowMEMStatus=1
+TaskBarShowNetStatus=0
+TaskBarShowMailboxStatus=0
+TaskBarShowApm=0
+TaskBarShowWorkspaces=1
+WorkspaceNames=" 1 ", " 2 ", " 3 ", " 4 "
+# PalladiumOS's programs.
+TerminalCommand="xterm"
+ClockCommand="xclock"
+OpenCommand="xfm"
+RunCommand=""
+ShutdownCommand="poweroff"
+RebootCommand="reboot"
