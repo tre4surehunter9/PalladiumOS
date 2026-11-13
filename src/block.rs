@@ -466,6 +466,16 @@ pub fn mount_system_disk() -> bool {
 
 /// Mount an in-memory filesystem at /dev/shm, open to everyone (sticky,
 /// like /tmp): where shm_open and named semaphores keep their files.
+/// The host's shared folder (virtio-9p), mounted at /host. Returns its
+/// mount tag.
+pub fn mount_host() -> Option<alloc::string::String> {
+    let (fs, tag) = crate::virtio_9p::init()?;
+    let _ = crate::filesystem::make_dir("/host");
+    crate::mounts::mount("/host", Box::new(fs));
+    crate::mounts::set_device("/host", &tag);
+    Some(tag)
+}
+
 /// /sys: what programs read there about the machine, in memory. So far
 /// the CPU cores (/sys/devices/system/cpu: cpu0, cpu1... and online,
 /// possible, present: "0-N"), as htop and libc's get_nprocs_conf count

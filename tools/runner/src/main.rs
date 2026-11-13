@@ -331,6 +331,39 @@ fn find_ovmf() -> Option<PathBuf> {
 /// Extra QEMU arguments for some test kernels, by name, and each one's
 /// network card: virtio-net for the usermode tests (where the network is
 /// tested), the RTL8139 for the others.
+/// A folder of this machine's shared with PalladiumOS (virtio-9p: it's
+/// /host there). `cargo run`: PALLADIUM_SHARE, else shared/ here (made if
+/// missing; git ignores it). The usermode tests: a fresh target/test-share
+/// with a file in it. QEMU does the reading and writing, as you.
+fn share_args(kernel: &Path, test: bool) -> Vec<String> {
+    let name = kernel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let dir = if test {
+        if !name.starts_with("usermode-") {
+            return Vec::new();
+        }
+        let dir = PathBuf::from("target/test-share");
+        let _ = std::fs::remove_dir_all(&dir);
+        if std::fs::create_dir_all(dir.join("sub")).is_err() || std::fs::write(dir.join("hello.txt"), "shared by the host\n").is_err() {
+            return Vec::new();
+        }
+        dir
+    } else {
+        let dir = std::env::var_os("PALLADIUM_SHARE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("shared"));
+        if std::fs::create_dir_all(&dir).is_err() {
+            eprintln!("palladium-runner: can't make the shared folder {}", dir.display());
+            return Vec::new();
+        }
+        dir
+    };
+    let Ok(abs) = dir.canonicalize() else { return Vec::new() };
+    let path = abs.to_string_lossy();
+    if path.contains(',') {
+        eprintln!("palladium-runner: the shared folder's path has a comma, which QEMU can't take: {}", path);
+        return Vec::new();
+    }
+    vec!["-virtfs".to_string(), format!("local,path={},mount_tag=host,security_model=none,id=host", path)]
+}
+
 fn test_extra_args(kernel: &Path, test: bool) -> Vec<&'static str> {
     let name = kernel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if !test {
@@ -414,6 +447,7 @@ fn run(kernel: &Path, extra: &[String], uefi: bool) {
         .arg("-no-reboot")
         .args(if test { TEST_ARGS } else { RUN_ARGS })
         .args(if test { Vec::new() } else { display_args(&extra) })
+        .args(share_args(kernel, test))
         .args(test_extra_args(kernel, test))
         .args(kvm_args(&test_extra_args(kernel, test).iter().copied().chain(extra.iter().map(String::as_str)).collect::<Vec<_>>()))
         .args(extra);

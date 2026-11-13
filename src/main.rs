@@ -285,6 +285,9 @@ fn mount_filesystems() {
     if let Some(mib) = block::mount_alpine_disk() {
         boot_ok!("Mounted the Alpine disk at /alpine ({} MiB)", mib);
     }
+    if let Some(tag) = block::mount_host() {
+        boot_ok!("Mounted the host's shared folder at /host (virtio-9p, tag {})", tag);
+    }
 }
 
 #[cfg(not(test))]

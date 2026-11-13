@@ -1886,6 +1886,8 @@ pub fn sys_statfs(path: Option<u64>, fd: u64, out: &mut [u8]) -> i64 {
     let fs_type: u64 = match name {
         "ext2" => 0xEF53,
         "memfs" => 0x01021994, // tmpfs
+        "9p" => 0x01021997,    // V9FS_MAGIC (the host's shared folder)
+        "sysfs" => 0x62656572,
         _ => 0x1373,           // devfs
     };
     out.fill(0);

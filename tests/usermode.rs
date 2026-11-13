@@ -47,6 +47,7 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     let _ = palladiumos::virtio_gpu::init();
     let _ = palladiumos::virtio_rng::init();
     let _ = palladiumos::virtio_input::init();
+    let _ = palladiumos::block::mount_host();
     palladiumos::net::init(); // loopback, and eth0 if QEMU has a card
     palladiumos::block::mount_system_disk(); // /usr: tcc's headers and libraries, if built
     palladiumos::block::mount_alpine_disk(); // /alpine: a 64 MiB scratch disk (target/test-scratch.img)
@@ -2071,6 +2072,40 @@ fn virtio_input_devices_are_found() {
     assert_eq!(scancode(111), 0xE053); // Delete
     assert_eq!(scancode(240), 0); // (unknown: nothing)
     palladiumos::virtio_input::poll(); // (no events: nothing happens)
+}
+
+#[test_case]
+fn the_hosts_shared_folder_is_at_host() {
+    // (The runner shares a fresh target/test-share: hello.txt and sub/.)
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(file("/host/hello.txt"), "shared by the host\n");
+    let steps = [
+        "ls /host > /tmp/9p1",
+        "echo made-here > /host/sub/new.txt",
+        "cat /host/sub/new.txt > /tmp/9p2",
+        "mkdir /host/dir",
+        "mv /host/sub/new.txt /host/dir/moved.txt",
+        "ls /host/dir > /tmp/9p3",
+        "rm /host/dir/moved.txt",
+        "rmdir /host/dir",
+        "ln -s hello.txt /host/link",
+        "readlink /host/link > /tmp/9p4",
+        "rm /host/link",
+    ];
+    for step in steps {
+        let status = sh(step);
+        assert_eq!(status, 0, "{:?} failed", step);
+    }
+    assert_eq!(file("/tmp/9p1"), "hello.txt\nsub/\n");
+    assert_eq!(file("/tmp/9p2"), "made-here\n");
+    assert_eq!(file("/tmp/9p3"), "moved.txt\n");
+    assert_eq!(file("/tmp/9p4"), "hello.txt\n");
+    // A file bigger than one 9P message (64 KiB), written and read back.
+    let big: alloc::vec::Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    filesystem::write_bytes("/host/big.bin", &big).unwrap();
+    assert_eq!(filesystem::read_bytes("/host/big.bin").unwrap(), big);
+    assert_eq!(sh("rm /host/big.bin"), 0);
+    assert!(only_kernel_left(), "{:?}", process::list());
 }
 
 #[test_case]

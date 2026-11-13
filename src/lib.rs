@@ -153,6 +153,7 @@ pub mod fw_cfg;
 pub mod virtio_rng;
 pub mod virtio_input;
 pub mod virtio_console;
+pub mod virtio_9p;
 pub mod interrupts;
 pub mod gdt;
 pub mod memory;

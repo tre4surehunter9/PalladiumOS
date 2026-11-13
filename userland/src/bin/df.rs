@@ -91,13 +91,15 @@ fn main(args: Args) -> i32 {
         let fs_type = match st.f_type {
             0xEF53 => "ext2",
             0x01021994 => "memfs",
+            0x01021997 => "9p",
+            0x62656572 => "sysfs",
             _ => "devfs",
         };
         let bs = st.f_bsize.max(1) as u64;
         let (total, free) = (st.f_blocks * bs, st.f_bfree * bs);
         let used = total.saturating_sub(free);
         // In-memory filesystems have no fixed size: just show what's used.
-        let sized = fs_type == "ext2";
+        let sized = fs_type == "ext2" || fs_type == "9p";
         let pct = if sized && total > 0 { format!("{}%", (used * 100).div_ceil(total)) } else { String::from("-") };
         let (total_s, free_s) = if sized { (size(total, human), size(free, human)) } else { (String::from("-"), String::from("-")) };
         println!("{:<12} {:<8} {:>10} {:>10} {:>10} {:>5}  {}", device_of(path), fs_type, total_s, size(used, human), free_s, pct, path);
