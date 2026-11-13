@@ -274,6 +274,8 @@ fn test_extra_args(kernel: &Path, test: bool) -> &'static [&'static str] {
         &[]
     } else if name.starts_with("ahci-") {
         &["-machine", "q35"] // q35 has its disks on AHCI
+    } else if name.starts_with("ext2-") {
+        &["-machine", "pc"] // its disks on IDE (it tests the IDE driver; KVM would pick q35)
     } else if name.starts_with("smp-") {
         &["-smp", "4"] // four CPU cores
     } else if name.starts_with("usb-") {
@@ -281,6 +283,29 @@ fn test_extra_args(kernel: &Path, test: bool) -> &'static [&'static str] {
     } else {
         &[]
     }
+}
+
+/// KVM, when this machine has it (/dev/kvm usable) and PALLADIUM_NO_KVM
+/// isn't set: QEMU runs PalladiumOS on the processor itself, many times
+/// faster, as the host CPU (`-cpu host`: its features; programs still see
+/// no AVX, since the kernel doesn't enable AVX state, OSXSAVE). Not when the
+/// arguments choose an accelerator themselves.
+///
+/// And on the q35 machine (disks on AHCI) unless the arguments pick one:
+/// under KVM, QEMU's IDE disks finish each PIO sector slowly (~20 ms here,
+/// whatever the guest does), so a 34 MB write took minutes; AHCI is fast.
+fn kvm_args(args: &[&str]) -> Vec<&'static str> {
+    if std::env::var_os("PALLADIUM_NO_KVM").is_some()
+        || args.iter().any(|a| *a == "-enable-kvm" || *a == "-accel" || a.contains("accel="))
+        || std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_err()
+    {
+        return Vec::new();
+    }
+    let mut out = vec!["-enable-kvm", "-cpu", "host"];
+    if !args.iter().any(|a| *a == "-machine" || *a == "-M") {
+        out.extend(["-machine", "q35"]);
+    }
+    out
 }
 
 fn run(kernel: &Path, extra: &[String], uefi: bool) {
@@ -298,6 +323,7 @@ fn run(kernel: &Path, extra: &[String], uefi: bool) {
         .arg("-no-reboot")
         .args(if test { TEST_ARGS } else { RUN_ARGS })
         .args(test_extra_args(kernel, test))
+        .args(kvm_args(&test_extra_args(kernel, test).iter().copied().chain(extra.iter().map(String::as_str)).collect::<Vec<_>>()))
         .args(extra);
     // `cargo run`: CPU cores, as many as this machine has, up to 4 (unless
     // the arguments say otherwise).

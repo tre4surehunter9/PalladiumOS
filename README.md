@@ -471,6 +471,8 @@ tools/build-all.sh         # optional: musl and the ported software (see above)
 
 `cargo run` boots with UEFI when the OVMF firmware is installed (Arch: `edk2-ovmf`, Debian/Ubuntu: `ovmf`; or set `OVMF` to the firmware file), at 1280x720 (142x45 characters, through the screen's EDID; change `xres`/`yres` in `tools/runner` for another size); without OVMF, or with `cargo run -- --bios`, it boots with BIOS, also at 1280x720. It makes a UEFI disk image (GPT with an EFI system partition); `palladium-runner image KERNEL OUT.img --uefi` makes one to keep. `cargo test` boots with BIOS (`PALLADIUM_UEFI=1 cargo test` for UEFI). The console uses whatever screen the firmware offers, scaling the font up on very big ones (2x at 2560x1600).
 
+**KVM.** When `/dev/kvm` is usable (Linux with hardware virtualisation; your user in the `kvm` group, or the device open to all), the runner turns it on for `cargo run` and every test kernel: `-enable-kvm -cpu host`. QEMU then runs PalladiumOS on the processor itself instead of translating each instruction, and the test suite takes about half the time. It also picks QEMU's q35 machine, whose disks are on AHCI: under KVM, QEMU's IDE disks take ~20 ms per sector (the ext2 tests, which test the IDE driver, keep it). Programs see the host CPU's features but not AVX (the kernel saves only the SSE registers and doesn't enable AVX state). `PALLADIUM_NO_KVM=1` turns it off; passing `-accel`, `-enable-kvm` or `-machine` to `cargo run --` chooses yourself. The release images: add `-enable-kvm -cpu host -machine q35` to QEMU.
+
 ## The Shell
 After you log in, you get `/bin/sh`, a POSIX-style shell that runs in userland as a normal process.
 
