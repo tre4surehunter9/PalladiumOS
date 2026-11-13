@@ -1,6 +1,7 @@
 #!/bin/sh
 # Copyright (c) 2026 tre4surehunter9
-# A NES emulator for PalladiumOS: tools/ports/nes.sh -> /usr/bin/nes:
+# A NES emulator for PalladiumOS: tools/ports/nes.sh -> /usr/bin/nes (a
+# menu of the games, or `nes GAME.nes`):
 # libretro's FCEUmm core (linked in, static) with a small SDL2 front end
 # (tools/ports/nes/nes.c: an X window, sound through /dev/dsp, the
 # keyboard), and three homebrew games under the GPL-3.0, from their
@@ -14,6 +15,14 @@ if [ ! -x "$X/bin/sdl2-config" ]; then
     exit 1
 fi
 NES="$SYSROOT/share/games/nes"
+
+# The menu's letters: misc-fixed 8x13 (public domain, font-misc-misc, as
+# fonts.sh fetches it) made into a C array.
+fetch font-misc-misc-1.1.3 https://www.x.org/releases/individual/font/font-misc-misc-1.1.3.tar.xz \
+    79abe361f58bb21ade9f565898e486300ce1cc621d5285bec26e14b6a8618fed
+FONT_H="$PORTS/src/nes-font"
+mkdir -p "$FONT_H"
+python3 "$ROOT/tools/ports/nes/bdf2c.py" 8x13.bdf "$FONT_H/font.h"
 
 # FCEUmm (libretro, GPL-2.0) at a fixed commit (git checks it): the core
 # as a static library.
@@ -30,7 +39,7 @@ COMMON="$LC/compat/compat_posix_string.c $LC/compat/compat_strcasestr.c $LC/comp
     $LC/compat/fopen_utf8.c $LC/encodings/encoding_utf.c $LC/file/file_path.c $LC/file/file_path_io.c
     $LC/streams/file_stream.c $LC/streams/file_stream_transforms.c $LC/string/stdstring.c $LC/time/rtime.c
     $LC/vfs/vfs_implementation.c"
-"$PCC" -O2 -D__LIBRETRO__ $("$X/bin/sdl2-config" --cflags) -I$LC/include \
+"$PCC" -O2 -D__LIBRETRO__ $("$X/bin/sdl2-config" --cflags) -I$LC/include -I"$FONT_H" \
     "$ROOT/tools/ports/nes/nes.c" $COMMON "$CORE" $("$X/bin/sdl2-config" --libs) -o nes 2>build.log ||
     { grep -B2 -A4 "error\|undefined" build.log | tail -20; exit 1; }
 install -m 755 -s nes "$SYSROOT/bin/nes"

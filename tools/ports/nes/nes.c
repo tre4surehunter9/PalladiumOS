@@ -3,15 +3,20 @@
  * with this small SDL2 front end: an X window (the picture scaled 2x),
  * sound through SDL (/dev/dsp), the keyboard as the first controller.
  *
- *   nes GAME.nes
+ *   nes             a menu of the games (/usr/share/games/nes, and .nes
+ *                   files in your home folder or ~/nes): arrows and Enter
+ *   nes GAME.nes    that game
  *
  * Keys: arrows, Z = B, X = A, Enter = Start, Right Shift or Tab = Select,
- * Escape quits. */
+ * Escape: back to the menu (or quit). The menu's letters: misc-fixed 8x13
+ * (public domain), made into font.h by bdf2c.py when it's built. */
 #include <SDL.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "libretro.h"
+#include "font.h"
 
 static SDL_Window *window;
 static SDL_Renderer *renderer;
@@ -19,7 +24,8 @@ static SDL_Texture *texture;
 static int tex_w, tex_h;
 static enum retro_pixel_format pixfmt = RETRO_PIXEL_FORMAT_0RGB1555;
 static SDL_AudioDeviceID audio;
-static int running = 1;
+static int running = 1;   /* this game (0: back to the menu) */
+static int quitting = 0;  /* the whole program (the window closed) */
 static const Uint8 *keys;
 /* Keys pressed since the last frame, even if already let go (a quick tap
  * between two frames still counts). */
@@ -102,7 +108,9 @@ static void input_poll(void)
     SDL_Event e;
     memset(tapped, 0, sizeof tapped);
     while (SDL_PollEvent(&e)) {
-        if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE))
+        if (e.type == SDL_QUIT)
+            running = 0, quitting = 1;
+        if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE)
             running = 0;
         if (e.type == SDL_KEYDOWN && e.key.keysym.scancode < SDL_NUM_SCANCODES)
             tapped[e.key.keysym.scancode] = 1;
@@ -132,10 +140,196 @@ static int16_t input_state(unsigned port, unsigned device, unsigned index, unsig
     }
 }
 
+/* ---- the menu ---- */
+
+#define MW 256
+#define MH 240
+static Uint32 menu_px[MW * MH];
+
+static void fill(int x, int y, int w, int h, Uint32 c)
+{
+    for (int j = y; j < y + h && j < MH; j++)
+        for (int i = x; i < x + w && i < MW; i++)
+            if (i >= 0 && j >= 0)
+                menu_px[j * MW + i] = c;
+}
+
+static void text(int x, int y, const char *s, Uint32 c)
+{
+    for (; *s && x < MW; s++, x += 8) {
+        unsigned ch = (unsigned char)*s;
+        if (ch < 32 || ch > 126)
+            ch = '?';
+        for (int r = 0; r < 13; r++)
+            for (int b = 0; b < 8; b++)
+                if (font[ch - 32][r] & (0x80 >> b) && x + b < MW && y + r < MH)
+                    menu_px[(y + r) * MW + x + b] = c;
+    }
+}
+
+struct game {
+    char path[512];
+    char title[33];
+};
+
+static struct game games[200];
+static int ngames;
+
+/* The bundled games' titles; others: their file name. */
+static void title_of(const char *file, char *out)
+{
+    static const char *known[][2] = {
+        { "nova.nes", "Nova the Squirrel" },
+        { "thwaite.nes", "Thwaite" },
+        { "croom.nes", "Concentration Room" },
+    };
+    for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++)
+        if (strcmp(file, known[i][0]) == 0) {
+            snprintf(out, 33, "%s", known[i][1]);
+            return;
+        }
+    snprintf(out, 33, "%s", file);
+    char *dot = strrchr(out, '.');
+    if (dot && strcasecmp(dot, ".nes") == 0)
+        *dot = 0;
+}
+
+static void find_games(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) && ngames < 200) {
+        size_t n = strlen(e->d_name);
+        if (n < 5 || strcasecmp(e->d_name + n - 4, ".nes") != 0)
+            continue;
+        struct game *g = &games[ngames++];
+        snprintf(g->path, sizeof g->path, "%s/%s", dir, e->d_name);
+        title_of(e->d_name, g->title);
+    }
+    closedir(d);
+}
+
+static int by_title(const void *a, const void *b)
+{
+    return strcasecmp(((const struct game *)a)->title, ((const struct game *)b)->title);
+}
+
+/* The menu until a game is chosen (its index) or the window closes (-1). */
+static int menu(SDL_Texture *t, int sel)
+{
+    const int rows = 12; /* games shown at once */
+    for (;;) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT)
+                return -1;
+            if (e.type != SDL_KEYDOWN)
+                continue;
+            switch (e.key.keysym.sym) {
+            case SDLK_UP: sel = sel > 0 ? sel - 1 : ngames - 1; break;
+            case SDLK_DOWN: sel = sel < ngames - 1 ? sel + 1 : 0; break;
+            case SDLK_PAGEUP: sel = sel > rows ? sel - rows : 0; break;
+            case SDLK_PAGEDOWN: sel = sel + rows < ngames ? sel + rows : ngames - 1; break;
+            case SDLK_RETURN: case SDLK_x: case SDLK_SPACE:
+                if (ngames > 0)
+                    return sel;
+                break;
+            case SDLK_ESCAPE: return -1;
+            default: break;
+            }
+        }
+        /* Draw it: a title bar, the list (the chosen one highlighted), the keys. */
+        fill(0, 0, MW, MH, 0xff101830);
+        fill(0, 0, MW, 22, 0xff2848a0);
+        text(8, 5, "PalladiumOS NES", 0xffffffff);
+        text(MW - 8 - 8 * 8, 5, ngames == 1 ? "  1 game" : "", 0xffc0d0ff);
+        if (ngames != 1) {
+            char n[16];
+            snprintf(n, sizeof n, "%3d games", ngames);
+            text(MW - 8 - 9 * 8, 5, n, 0xffc0d0ff);
+        }
+        if (ngames == 0) {
+            text(16, 60, "No games found.", 0xffffffff);
+            text(16, 80, "Put .nes files in your", 0xffc0c0c0);
+            text(16, 94, "home folder or ~/nes.", 0xffc0c0c0);
+        }
+        int first = sel >= rows ? sel - rows + 1 : 0;
+        for (int i = first; i < ngames && i < first + rows; i++) {
+            int y = 32 + (i - first) * 15;
+            if (i == sel) {
+                fill(6, y - 1, MW - 12, 15, 0xffe8c040);
+                text(12, y, ">", 0xff101830);
+            }
+            text(24, y, games[i].title, i == sel ? 0xff101830 : 0xffffffff);
+        }
+        fill(0, MH - 34, MW, 34, 0xff0a1020);
+        text(8, MH - 30, "Arrows: choose  Enter: play", 0xffc0d0ff);
+        text(8, MH - 16, "Esc: quit (in a game: menu)", 0xffc0d0ff);
+        SDL_UpdateTexture(t, NULL, menu_px, MW * 4);
+        SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, t, NULL, NULL);
+        SDL_RenderPresent(renderer);
+        SDL_Delay(30);
+    }
+}
+
+/* ---- playing ---- */
+
+/* Play one game until Escape (or the window closes). 0 if it can't load. */
+static int play(const char *path, const struct retro_system_av_info *first_av)
+{
+    struct retro_game_info game = { .path = path };
+    if (!retro_load_game(&game)) {
+        fprintf(stderr, "nes: %s: can't load it\n", path);
+        return 0;
+    }
+    struct retro_system_av_info av;
+    retro_get_system_av_info(&av);
+    (void)first_av;
+    const char *name = strrchr(path, '/');
+    char title[256];
+    snprintf(title, sizeof title, "NES: %s", name ? name + 1 : path);
+    SDL_SetWindowTitle(window, title);
+    SDL_AudioSpec want = { .freq = (int)av.timing.sample_rate, .format = AUDIO_S16SYS, .channels = 2, .samples = 1024 };
+    audio = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
+    if (audio)
+        SDL_PauseAudioDevice(audio, 0);
+    else
+        fprintf(stderr, "nes: no sound (%s)\n", SDL_GetError());
+    /* Frames at the game's rate; the sound queue kept short (0.1 s). */
+    const double frame_ms = 1000.0 / (av.timing.fps > 0 ? av.timing.fps : 60.0);
+    const Uint32 max_queued = (Uint32)(av.timing.sample_rate * 4 / 10);
+    double next = SDL_GetTicks();
+    running = 1;
+    while (running) {
+        retro_run();
+        next += frame_ms;
+        double now = SDL_GetTicks();
+        if (next > now)
+            SDL_Delay((Uint32)(next - now));
+        else if (now - next > 200)
+            next = now; /* (fell behind: don't race to catch up) */
+        while (audio && SDL_GetQueuedAudioSize(audio) > max_queued)
+            SDL_Delay(2);
+    }
+    if (audio) {
+        SDL_CloseAudioDevice(audio);
+        audio = 0;
+    }
+    retro_unload_game();
+    if (texture) {
+        SDL_DestroyTexture(texture);
+        texture = NULL;
+    }
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 2) {
-        fprintf(stderr, "usage: nes GAME.nes   (games: /usr/share/games/nes)\n");
+    if (argc > 2 || (argc == 2 && argv[1][0] == '-')) {
+        fprintf(stderr, "usage: nes [GAME.nes]   (without a game: a menu of them)\n");
         return 1;
     }
     const char *home = getenv("HOME");
@@ -152,48 +346,38 @@ int main(int argc, char **argv)
     retro_set_input_poll(input_poll);
     retro_set_input_state(input_state);
     retro_init();
-    struct retro_game_info game = { .path = argv[1] };
-    if (!retro_load_game(&game)) {
-        fprintf(stderr, "nes: %s: can't load it\n", argv[1]);
-        return 1;
-    }
-    struct retro_system_av_info av;
-    retro_get_system_av_info(&av);
-    const char *name = strrchr(argv[1], '/');
-    char title[256];
-    snprintf(title, sizeof title, "NES: %s", name ? name + 1 : argv[1]);
-    window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                              av.geometry.base_width * 2, av.geometry.base_height * 2, 0);
+    window = SDL_CreateWindow("NES", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, MW * 2, MH * 2, 0);
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     if (!window || !renderer) {
         fprintf(stderr, "nes: %s\n", SDL_GetError());
         return 1;
     }
-    SDL_AudioSpec want = { .freq = (int)av.timing.sample_rate, .format = AUDIO_S16SYS, .channels = 2, .samples = 1024 };
-    audio = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
-    if (audio) {
-        SDL_PauseAudioDevice(audio, 0);
-        fprintf(stderr, "nes: sound through %s at %d Hz\n", SDL_GetCurrentAudioDriver(), want.freq);
-    } else {
-        fprintf(stderr, "nes: no sound (%s)\n", SDL_GetError());
-    }
     keys = SDL_GetKeyboardState(NULL);
-    /* Frames at the game's rate; the sound queue kept short (0.1 s). */
-    const double frame_ms = 1000.0 / (av.timing.fps > 0 ? av.timing.fps : 60.0);
-    const Uint32 max_queued = (Uint32)(av.timing.sample_rate * 4 / 10);
-    double next = SDL_GetTicks();
-    while (running) {
-        retro_run();
-        next += frame_ms;
-        double now = SDL_GetTicks();
-        if (next > now)
-            SDL_Delay((Uint32)(next - now));
-        else if (now - next > 200)
-            next = now; /* (fell behind: don't race to catch up) */
-        while (audio && SDL_GetQueuedAudioSize(audio) > max_queued)
-            SDL_Delay(2);
+    if (argc == 2) {
+        int ok = play(argv[1], NULL);
+        retro_deinit();
+        SDL_Quit();
+        return ok ? 0 : 1;
     }
-    retro_unload_game();
+    /* The menu: the bundled games, then the player's own. */
+    find_games("/usr/share/games/nes");
+    if (home) {
+        char dir[512];
+        find_games(home);
+        snprintf(dir, sizeof dir, "%s/nes", home);
+        find_games(dir);
+    }
+    qsort(games, ngames, sizeof games[0], by_title);
+    SDL_Texture *mt = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, MW, MH);
+    int sel = 0;
+    while (!quitting) {
+        SDL_SetWindowTitle(window, "NES");
+        int chosen = menu(mt, sel);
+        if (chosen < 0)
+            break;
+        sel = chosen;
+        play(games[chosen].path, NULL);
+    }
     retro_deinit();
     SDL_Quit();
     return 0;
