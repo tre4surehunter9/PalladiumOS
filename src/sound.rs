@@ -408,7 +408,7 @@ pub fn open_dsp() -> Result<Arc<Dsp>, i64> {
     s.apply_rate();
     drop(s);
     if settle {
-        let until = crate::process::ticks() + 3;
+        let until = crate::process::tick_after_ns(30_000_000);
         while crate::process::ticks() < until && !crate::process::signal_pending() {
             crate::process::block_on_until(SOUND_KEY, until);
         }

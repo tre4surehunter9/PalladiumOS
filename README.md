@@ -136,7 +136,7 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 32 | dup | yes |
 | 33 | dup2 | yes |
 | 34 | pause | yes |
-| 35 | nanosleep | yes (10 ms timer resolution) |
+| 35 | nanosleep | yes (1 ms timer resolution: the timer runs at 1000 Hz) |
 | 36/38 | getitimer, setitimer | `ITIMER_REAL` |
 | 37 | alarm | yes |
 | 39 | getpid | yes |
@@ -221,8 +221,8 @@ PalladiumOS uses the Linux x86_64 syscall ABI (`rax` = number, arguments in `rdi
 | 277 | sync_file_range | accepted |
 | 280 | utimensat | modification time |
 | 282 / 289 | signalfd, signalfd4 | yes (readable in poll/epoll) |
-| 222-226 | timer_create, timer_settime, timer_gettime, timer_getoverrun, timer_delete | POSIX timers: one-shot and repeating, relative or absolute, on CLOCK_REALTIME/MONOTONIC; a signal to the process or a thread (`SIGEV_SIGNAL`, `SIGEV_THREAD_ID`, so musl's `SIGEV_THREAD` works), `SIGEV_NONE`; `sigwaitinfo` reports `SI_TIMER` with the timer's value (10 ms resolution) |
-| 283 / 286 / 287 | timerfd_create, timerfd_settime, timerfd_gettime | one-shot and repeating, relative or absolute (10 ms resolution) |
+| 222-226 | timer_create, timer_settime, timer_gettime, timer_getoverrun, timer_delete | POSIX timers: one-shot and repeating, relative or absolute, on CLOCK_REALTIME/MONOTONIC; a signal to the process or a thread (`SIGEV_SIGNAL`, `SIGEV_THREAD_ID`, so musl's `SIGEV_THREAD` works), `SIGEV_NONE`; `sigwaitinfo` reports `SI_TIMER` with the timer's value (1 ms resolution) |
+| 283 / 286 / 287 | timerfd_create, timerfd_settime, timerfd_gettime | one-shot and repeating, relative or absolute (1 ms resolution) |
 | 284 / 290 | eventfd, eventfd2 | yes (`EFD_SEMAPHORE`, `EFD_NONBLOCK`) |
 | 285 | fallocate | growing a file |
 | 292 | dup3 | yes (`O_CLOEXEC`) |
@@ -424,7 +424,7 @@ PalladiumOS plays sound through an AC'97 sound card (Intel's ICH audio, QEMU's `
 * `sox` (sox_ng) converts and changes sound files (`sox in.wav out.ogg rate 22050 vol 0.5`; WAV, AIFF, AU, raw, Ogg Vorbis...; effects like `reverb`, `trim`, `fade`, `speed`, `synth`), plays them on the card with `-d` (`sox song.ogg -d`, `sox -n -d synth 1 sine 440`), and `soxi` shows a file's details. (PalladiumOS's `play` stays `play`.)
 * DOOM (Freedoom) has its sound effects and music.
 
-The kernel's timer ticks 100 times a second (10 ms), so a program waiting for room in the card's buffers is woken in time. Not yet: recording, Intel HD Audio (the sound hardware of PCs since 2004), ALSA (`/dev/snd`, which most programs in Alpine use).
+The kernel's timer ticks 1000 times a second (1 ms), so a program waiting for room in the card's buffers is woken in time. Not yet: recording, Intel HD Audio (the sound hardware of PCs since 2004), ALSA (`/dev/snd`, which most programs in Alpine use).
 
 ## Alpine Linux
 PalladiumOS can run [Alpine Linux](https://alpinelinux.org)'s userland, its package manager and its packages, unchanged: Alpine builds everything against musl, dynamically linked, which is what PalladiumOS runs.

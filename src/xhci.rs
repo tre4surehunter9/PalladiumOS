@@ -16,7 +16,7 @@
 //! releases, which become PS/2 scancodes in the same queue the PS/2
 //! keyboard feeds, so everything above (the TTY, Ctrl-C) works the same.
 //! USB keyboards don't repeat keys themselves, so this does it. Events are
-//! polled from the timer interrupt (100 Hz), and transfers stay queued in
+//! polled from the timer interrupt (1000 Hz), and transfers stay queued in
 //! between, so no key is lost.
 //!
 //! USB pointers feed /dev/input/mice (as PS/2 packets, like the PS/2

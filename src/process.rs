@@ -773,10 +773,15 @@ pub fn yield_now() {
 
 /// Called from the timer interrupt when it fires in ring 3.
 pub fn preempt() {
-    if others_ready() {
+    // Time slices of about 10 ms (every SLICE_TICKS ticks), not 1: fewer
+    // switches, as before the timer went to 1000 Hz.
+    if ticks() % SLICE_TICKS == 0 && others_ready() {
         schedule();
     }
 }
+
+/// How often a busy program gives way to others (in ticks: 10 ms).
+const SLICE_TICKS: u64 = 10_000_000 / TICK_NS;
 
 /// End the current process. Its parent is woken if it's waiting; its
 /// children are handed to the kernel (task 0), which reaps them.
@@ -1933,9 +1938,9 @@ static FOREGROUND: AtomicU64 = AtomicU64::new(0);
 static TTY_SIGNALS: AtomicU64 = AtomicU64::new(0);
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Length of a timer tick: 11932 / 1193182 Hz (interrupts::PIT_DIVISOR),
-/// about 10 ms.
-pub const TICK_NS: u64 = 10_000_151;
+/// Length of a timer tick: 1193 / 1193182 Hz (interrupts::PIT_DIVISOR),
+/// about 1 ms.
+pub const TICK_NS: u64 = 999_848;
 
 pub fn foreground() -> u64 {
     FOREGROUND.load(Ordering::SeqCst)

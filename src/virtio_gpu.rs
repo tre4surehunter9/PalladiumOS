@@ -52,8 +52,9 @@ const CURSOR: u32 = 2;
 /// The pixel format of cursor images: B, G, R, alpha bytes (ARGB words).
 const FORMAT_B8G8R8A8: u32 = 1;
 const CURSOR_SIZE: u32 = 64;
-/// Hand the screen over every this many timer ticks (10 ms each).
-const FLUSH_TICKS: u64 = 3;
+/// Hand the screen over every this many timer ticks (about 33 times a
+/// second).
+const FLUSH_TICKS: u64 = 30_000_000 / crate::process::TICK_NS; // (30 ms)
 
 struct Gpu {
     /// (Kept: its registers stay mapped and in use.)

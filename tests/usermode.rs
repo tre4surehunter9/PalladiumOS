@@ -2415,6 +2415,20 @@ fn ifconfig_shows_and_changes_interfaces() {
 }
 
 #[test_case]
+fn short_sleeps_are_short() {
+    // 1 ms sleeps last about 1 ms (the timer at 1000 Hz), not a 10 ms tick:
+    // DOSBox and SDL programs pace themselves with them.
+    if palladiumos::mounts::resolve("/usr/bin/python3").is_err() {
+        palladiumos::serial_print!("(skipped: python not built) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("python3 -c \"import time; t=time.monotonic(); [time.sleep(0.001) for _ in range(100)]; print(round((time.monotonic()-t)*1000))\" > /tmp/sl1"), 0);
+    let ms: u64 = file("/tmp/sl1").trim().parse().unwrap_or(9999);
+    assert!((100..500).contains(&ms), "100 sleeps of 1 ms took {} ms", ms);
+}
+
+#[test_case]
 fn avx_registers_are_kept() {
     // AVX turned on for programs (XSAVE), and the YMM registers kept across
     // task switches and signal handlers (test_avx).
