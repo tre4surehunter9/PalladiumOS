@@ -47,4 +47,15 @@ rm -f "$SYSROOT/libexec/git-core/git-daemon" "$SYSROOT/libexec/git-core/git-http
 find "$SYSROOT/libexec/git-core" -xtype l -delete
 # (Strip the real programs: the rest are links to them.)
 find "$SYSROOT/libexec/git-core" "$SYSROOT/bin/git" -type f -perm -u+x -exec sh -c 'file "$1" | grep -q ELF && strip "$1"' _ {} \;
+# Its manual pages (man git, git help commit), released ready-made beside
+# it: the same good signature from Junio C Hamano's key.
+cd "$PORTS/src"
+tarball="$PORTS/src/git-manpages-2.56.1.tar.xz"
+if [ ! -f "$tarball" ]; then
+    curl -fL --proto '=https' -o "$tarball.part" https://mirrors.edge.kernel.org/pub/software/scm/git/git-manpages-2.56.1.tar.xz
+    mv "$tarball.part" "$tarball"
+fi
+echo "6ea093f15745a9ac85fe1b1d4fe488413d54e68d0fcb10bab62f047f362cf6de  $tarball" | sha256sum -c -
+mkdir -p "$SYSROOT/share/man"
+tar -xJf "$tarball" -C "$SYSROOT/share/man" --no-same-owner
 echo "git installed in $SYSROOT ($(du -sh "$SYSROOT/libexec/git-core" | cut -f1) of helpers)"
