@@ -2192,6 +2192,37 @@ fn tmux_port_works() {
 }
 
 #[test_case]
+fn curl_port_works() {
+    if palladiumos::mounts::resolve("/usr/bin/curl").is_err() {
+        palladiumos::serial_print!("(skipped: curl not built) ");
+        return;
+    }
+    // A page from BusyBox's httpd on loopback, fetched with curl (and its
+    // HTTPS side present: OpenSSL in the version line).
+    let _ = filesystem::make_dir("/tmp");
+    let _ = filesystem::make_dir("/tmp/www");
+    filesystem::write_file("/tmp/www/index.html", "served-by-httpd\n").unwrap();
+    // (httpd in the foreground, killed by its pid: as a daemon it's named
+    // busybox, and takes SIGHUP as "read the configuration again".)
+    // (A dash script: $! for killing the server.)
+    filesystem::write_file(
+        "/tmp/cu.sh",
+        "curl --version > /tmp/cu1\n\
+         busybox httpd -f -p 127.0.0.1:8081 -h /tmp/www &\n\
+         sleep 1\n\
+         curl -sS -m 10 -o /tmp/cu2 -w '%{http_code}' http://127.0.0.1:8081/index.html > /tmp/cu3\n\
+         kill $!\n",
+    )
+    .unwrap();
+    let status = sh("dash /tmp/cu.sh");
+    assert_eq!(status, 0, "{}", file("/tmp/cu1"));
+    assert!(file("/tmp/cu1").starts_with("curl 8.23.0") && file("/tmp/cu1").contains("OpenSSL/3"), "{}", file("/tmp/cu1"));
+    assert_eq!(file("/tmp/cu3"), "200");
+    assert_eq!(file("/tmp/cu2"), "served-by-httpd\n");
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn nano_port_works() {
     if palladiumos::mounts::resolve("/usr/bin/nano").is_err() {
         palladiumos::serial_print!("(skipped: nano not built) ");
