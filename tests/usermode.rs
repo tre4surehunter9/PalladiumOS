@@ -2135,6 +2135,45 @@ fn bash_port_works() {
 }
 
 #[test_case]
+fn the_clock_is_finer_than_a_tick() {
+    // Read twice within a tick: different times (the time-stamp counter
+    // between ticks), never going back.
+    let mut prev = process::clock_ns();
+    let mut changed = 0;
+    for _ in 0..1000 {
+        let now = process::clock_ns();
+        assert!(now >= prev, "the clock went back: {} -> {}", prev, now);
+        if now > prev {
+            changed += 1;
+        }
+        prev = now;
+    }
+    assert!(changed > 100, "only {} of 1000 reads saw the clock move", changed);
+    // musl's mkstemp names files from it: several in a row (mandoc makes
+    // two at once: with a 10 ms clock, the second kept getting the first's
+    // name and failed).
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("for i in 1 2 3 4 5; do mktemp /tmp/clk.XXXXXX > /dev/null || exit 1; done; ls /tmp | grep -c clk > /tmp/clk"), 0);
+    assert_eq!(file("/tmp/clk").trim(), "5");
+    assert_eq!(sh("rm /tmp/clk.*"), 0);
+}
+
+#[test_case]
+fn man_pages_work() {
+    if palladiumos::mounts::resolve("/usr/bin/man").is_err() {
+        palladiumos::serial_print!("(skipped: mandoc not built) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    // (Not a terminal: no pager, the page as text.)
+    assert_eq!(sh("man less > /tmp/man1 2>&1; apropos editor > /tmp/man2; whatis less > /tmp/man3"), 0, "{}", file("/tmp/man1"));
+    assert!(file("/tmp/man1").contains("less - display the contents of a file"), "{}", file("/tmp/man1"));
+    assert!(file("/tmp/man3").starts_with("less(1) - display the contents of a file"), "{}", file("/tmp/man3"));
+    assert!(file("/tmp/man2").contains("nano(1)"), "{}", file("/tmp/man2"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn nano_port_works() {
     if palladiumos::mounts::resolve("/usr/bin/nano").is_err() {
         palladiumos::serial_print!("(skipped: nano not built) ");
