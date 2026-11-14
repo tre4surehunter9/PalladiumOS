@@ -94,8 +94,18 @@ fi
 exec /usr/bin/dosbox.bin -conf "$games/dosbox.conf" "$@"
 SCRIPT
 chmod 755 "$SYSROOT/bin/dosbox"
+# Floppy Bird's own setting (its dosbox.conf): 10000 cycles. DOSBox's
+# default for a program without DOS's protected mode is about 3000, too few
+# to draw a frame between two of the BIOS clock's ticks (18.2 a second),
+# which the game waits for each frame: it ran slower than meant. (More
+# can't make it too fast: the clock paces it.)
+printf '[cpu]\ncycles=10000\n' > "$DOS/floppybird.conf"
 # Shortcuts for the two games.
 printf '#!/bin/busybox sh\nexec dosbox WORDLOS.COM\n' > "$SYSROOT/bin/wordlos"
-printf '#!/bin/busybox sh\nexec dosbox FLOPBIRD.COM\n' > "$SYSROOT/bin/floppybird"
+cat > "$SYSROOT/bin/floppybird" <<'SCRIPT'
+#!/bin/busybox sh
+games=/usr/share/games/dos
+exec /usr/bin/dosbox.bin -conf "$games/dosbox.conf" -conf "$games/floppybird.conf" -c FLOPBIRD.COM -c exit
+SCRIPT
 chmod 755 "$SYSROOT/bin/wordlos" "$SYSROOT/bin/floppybird"
 echo "dosbox installed in $SYSROOT/bin, games in $DOS: $(ls "$DOS" | tr '\n' ' ')"
