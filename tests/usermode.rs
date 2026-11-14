@@ -2374,6 +2374,20 @@ fn micro_port_works() {
 }
 
 #[test_case]
+fn zip_and_unzip_work() {
+    if palladiumos::mounts::resolve("/usr/bin/zip").is_err() {
+        palladiumos::serial_print!("(skipped: zip not built) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    let status = sh("rm -rf /tmp/zz /tmp/zz.zip /tmp/zout; mkdir -p /tmp/zz/sub; echo one > /tmp/zz/a.txt; seq 1 3000 > /tmp/zz/sub/n.txt; \
+         cd /tmp && zip -qr zz.zip zz && unzip -Z1 zz.zip > /tmp/zl && mkdir zout && unzip -q zz.zip -d zout && diff -r zz zout/zz");
+    assert_eq!(status, 0, "{}", file("/tmp/zl"));
+    assert!(file("/tmp/zl").contains("zz/sub/n.txt"), "{}", file("/tmp/zl"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn nano_port_works() {
     if palladiumos::mounts::resolve("/usr/bin/nano").is_err() {
         palladiumos::serial_print!("(skipped: nano not built) ");
