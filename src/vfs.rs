@@ -1187,6 +1187,16 @@ pub fn sys_write(fd: u64, bytes: &[u8]) -> i64 {
         Ok(h) => h,
         Err(e) => return -e,
     };
+    write_handle(&h, bytes)
+}
+
+/// The open file behind `fd` (a reference of its own: strace's output).
+pub fn handle_of(fd: u64) -> Result<Handle, i64> {
+    get(fd)
+}
+
+/// write() to an open file (sys_write's work, by handle).
+pub fn write_handle(h: &Handle, bytes: &[u8]) -> i64 {
     let mut desc = h.lock();
     match &desc.kind {
         Kind::Console => {

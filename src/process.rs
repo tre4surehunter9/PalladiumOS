@@ -987,6 +987,9 @@ fn running_elsewhere(pid: u64) -> bool {
 
 /// Free a reaped process's memory. Its kernel stack is freed when it drops.
 fn free_process(p: Box<Process>) {
+    if p.pid == p.tgid {
+        crate::strace::forget(p.tgid);
+    }
     // Threads share the address space: the last one to go frees it.
     if p.kernel_stack.is_some() && !p.borrowed_vm && Arc::strong_count(&p.mm) == 1 {
         let mut alloc = FRAME_ALLOCATOR.lock();
@@ -1237,7 +1240,12 @@ fn fork_with(frame: &SyscallFrame, kind: CloneKind, stack: u64) -> i64 {
         borrowed_vm: kind == CloneKind::Vfork,
     };
     match add_process(child) {
-        Ok(pid) => pid as i64,
+        Ok(pid) => {
+            if !thread {
+                crate::strace::inherit(current_tgid(), pid); // (traced if this is)
+            }
+            pid as i64
+        }
         Err(e) => {
             if !share {
                 let mut alloc = FRAME_ALLOCATOR.lock();
@@ -3664,6 +3672,7 @@ pub fn sys_prctl(option: u64, arg2: u64) -> i64 {
     const PR_GET_NO_NEW_PRIVS: u64 = 39;
     const PR_SET_VMA: u64 = 0x5356_4d41;
     match option {
+        crate::strace::PR_PALLADIUM_TRACE => crate::strace::start(arg2),
         PR_SET_NAME => {
             let Some(b) = (unsafe { user_slice(arg2, 16) }) else { return -EFAULT };
             let name = b.split(|&c| c == 0).next().unwrap_or(&[]);

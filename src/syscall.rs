@@ -530,12 +530,17 @@ fn fast_syscall(frame: &SyscallFrame) -> Option<i64> {
 
 #[unsafe(no_mangle)]
 extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
-    if let Some(ret) = fast_syscall(frame) {
-        frame.rax = ret as u64;
-        return;
+    // (Not while anything is traced: every call goes the usual way, to be
+    // written out.)
+    if crate::strace::ANY.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+        if let Some(ret) = fast_syscall(frame) {
+            frame.rax = ret as u64;
+            return;
+        }
     }
     // Into the kernel (syscall_return lets go on the way back).
     crate::smp::lock_kernel();
+    let trace = crate::strace::before(frame.rax, frame);
     let (a1, a2, a3, a4, a5) = (frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8);
     const FDCWD: u64 = -100i64 as u64;
     let num = frame.rax;
@@ -875,6 +880,9 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         }
     };
 
+    if let Some(line) = trace {
+        crate::strace::after(line, num, (a1, a2), ret);
+    }
     frame.rax = ret as u64;
     // Signals take effect before returning to the program (a handler may
     // run first). After sigreturn, there's no syscall to restart.

@@ -2388,6 +2388,25 @@ fn zip_and_unzip_work() {
 }
 
 #[test_case]
+fn strace_shows_system_calls() {
+    // The kernel's tracing, through /bin/strace: a program's calls, its
+    // child's (with [pid N]), paths as strings, errors by name.
+    let _ = filesystem::make_dir("/tmp");
+    filesystem::write_file("/tmp/st-in", "x\n").unwrap();
+    let status = sh("strace -o /tmp/st-out sh -c 'cat /tmp/st-in /tmp/st-none; echo end' > /dev/null 2>&1");
+    let out = file("/tmp/st-out");
+    assert!(status == 0 || status == 1, "{}", out);
+    assert!(out.starts_with("execve(\"/bin/sh\""), "{}", out);
+    assert!(out.contains("\"/tmp/st-in\""), "{}", out);
+    assert!(out.contains("= -1 ENOENT (No such file or directory)"), "{}", out);
+    assert!(out.contains("[pid "), "{}", out);
+    assert!(out.contains("exit_group(") || out.contains("exit("), "{}", out);
+    // Afterwards nothing is traced: the lock-free calls are back.
+    assert_eq!(palladiumos::strace::ANY.load(core::sync::atomic::Ordering::SeqCst), 0);
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn nano_port_works() {
     if palladiumos::mounts::resolve("/usr/bin/nano").is_err() {
         palladiumos::serial_print!("(skipped: nano not built) ");

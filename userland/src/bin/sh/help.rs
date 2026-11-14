@@ -63,6 +63,7 @@ const CATEGORIES: &[(&str, &str, &[(&str, &str)])] = &[
         "running programs",
         &[
             ("ps", "list processes"),
+            ("strace", "show a program's system calls (strace ls, strace -o FILE cmd)"),
             ("top", "live process view (q quits)"),
             ("kill", "send a signal (kill -9 PID)"),
             ("pkill", "signal processes by name"),
