@@ -222,3 +222,40 @@ pub fn write_status(pipe: &Arc<Pipe>) -> (bool, bool) {
 pub fn buffered(pipe: &Arc<Pipe>) -> usize {
     pipe.buf.lock().len()
 }
+
+/// A read without the kernel lock (the lock-free system calls): what's
+/// there now. None: nothing to read yet (the usual way blocks), or the
+/// pipe was busy.
+pub fn fast_read(pipe: &Arc<Pipe>, out: &mut [u8]) -> Option<i64> {
+    let n = {
+        let mut buf = crate::smp::try_lock_spinning(&pipe.buf)?;
+        let n = out.len().min(buf.len());
+        for (dst, src) in out.iter_mut().zip(buf.drain(..n)) {
+            *dst = src;
+        }
+        n
+    };
+    if n == 0 {
+        return if pipe.writers.load(Ordering::SeqCst) == 0 { Some(0) } else { None };
+    }
+    process::wake(pipe.key()); // room for blocked writers (queued: see process::wake)
+    Some(n as i64)
+}
+
+/// A write without the kernel lock: all of `data` if it fits now. None:
+/// it doesn't (the usual way waits or writes part), no readers (SIGPIPE:
+/// the usual way), or the pipe was busy.
+pub fn fast_write(pipe: &Arc<Pipe>, data: &[u8]) -> Option<i64> {
+    if pipe.readers.load(Ordering::SeqCst) == 0 {
+        return None;
+    }
+    {
+        let mut buf = crate::smp::try_lock_spinning(&pipe.buf)?;
+        if PIPE_CAPACITY - buf.len() < data.len() {
+            return None;
+        }
+        buf.extend(data);
+    }
+    process::wake(pipe.key()); // data for blocked readers
+    Some(data.len() as i64)
+}

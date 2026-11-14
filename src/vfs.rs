@@ -3630,3 +3630,33 @@ fn async_input(desc: &Description) {
         owners.push(desc.async_owner);
     }
 }
+
+/// read()/write() on a pipe without the kernel lock (from the lock-free
+/// system calls), when it can be done at once; None otherwise (not a
+/// pipe, it would wait, a lock was busy): the usual way. The buffer must
+/// already be mapped (no page faults here).
+pub fn fast_pipe_io(write: bool, fd: u64, ptr: u64, len: u64) -> Option<i64> {
+    if len == 0 || len > crate::pipe::PIPE_CAPACITY as u64 || !crate::memory::user_range_ready(ptr, len, !write) {
+        return None;
+    }
+    let files = crate::process::fast_current_files()?;
+    let h = {
+        let f = crate::smp::try_lock_spinning(&files)?;
+        f.fds.get(fd as usize).cloned().flatten()?.handle
+    };
+    let pipe = {
+        let desc = crate::smp::try_lock_spinning(&h.desc)?;
+        match (&desc.kind, write) {
+            (Kind::PipeRead(r), false) => r.pipe(),
+            (Kind::PipeWrite(w), true) => w.pipe(),
+            _ => return None,
+        }
+    };
+    if write {
+        let data = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        crate::pipe::fast_write(&pipe, data)
+    } else {
+        let out = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
+        crate::pipe::fast_read(&pipe, out)
+    }
+}

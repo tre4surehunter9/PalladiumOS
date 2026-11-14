@@ -2559,7 +2559,11 @@ fn processes_stay_intact_under_stress() {
                      cat /tmp/stress1.txt /tmp/stress2.txt /tmp/stress3.txt > /tmp/stress.txt");
     assert_eq!(status, 0);
     let out = file("/tmp/stress.txt");
-    assert_eq!(out.matches(" ok: ").count(), 3, "{}", out);
+    if out.matches(" ok: ").count() != 3 {
+        // (Which one, and the kernel's last words: a segfault?)
+        let _ = sh("dmesg | tail -5 > /tmp/stresslog.txt");
+        panic!("{}\n--- the kernel log's end:\n{}", out, file("/tmp/stresslog.txt"));
+    }
     assert!(only_kernel_left());
 }
 

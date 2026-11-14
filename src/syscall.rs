@@ -473,7 +473,12 @@ pub fn init_syscalls(idt: &mut InterruptDescriptorTable) {
 
 /// System calls answered without the kernel lock, so threads on several
 /// cores make them at the same moment: the time (programs ask it all the
-/// time: games, SDL, glxgears), and who and where the caller is. They use
+/// time: games, SDL, glxgears), who and where the caller is, pipe reads
+/// and writes that needn't wait, and futex wakes. A wake from here is
+/// never lost: process::wake only queues it (the scheduler acts on it,
+/// under the kernel lock, which a process going to sleep holds from its
+/// check until it sleeps), and futex waits re-check their word with the
+/// table held, as the wake takes it. They use
 /// only per-core values and atomics, and write their answer only into
 /// memory that's already mapped and writable (else: None, and the call
 /// goes the usual way, which faults pages in). A mapping taken away under
@@ -511,6 +516,12 @@ fn fast_syscall(frame: &SyscallFrame) -> Option<i64> {
             write_pair(a1, ns / 1_000_000_000, ns / 1000 % 1_000_000)
         }
         SYS_TIME if a1 == 0 => Some(crate::rtc::now() as i64),
+        // Pipes (shell pipelines, threads talking) and futex wakes
+        // (pthread mutexes and condition variables): when they can be done
+        // at once (see vfs::fast_pipe_io, process::fast_futex_wake).
+        SYS_READ => vfs::fast_pipe_io(false, a1, a2, frame.rdx),
+        SYS_WRITE => vfs::fast_pipe_io(true, a1, a2, frame.rdx),
+        SYS_FUTEX => process::fast_futex_wake(a2, a1, frame.rdx),
         _ => None,
     }
 }

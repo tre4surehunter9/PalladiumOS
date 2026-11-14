@@ -450,9 +450,12 @@ pub fn current_root() -> String {
 /// Run `f` on the current process's memory bookkeeping (brk, mmap list).
 /// Like with_current_mm, but None instead of waiting if the process table
 /// or the memory description is busy (for the page fault path: a fault
-/// can't wait for a lock the faulting code itself holds).
+/// can't wait for a lock the faulting code itself holds). The table is
+/// tried for a while first: another core may hold it for a moment without
+/// the kernel lock (the lock-free system calls); giving up at once failed
+/// that core's faults, and killed programs with SIGSEGV.
 pub fn try_with_current_mm<T>(f: impl FnOnce(&mut Mm) -> T) -> Option<T> {
-    let mm = TABLE.try_lock()?.get(&current_pid())?.mm.clone();
+    let mm = crate::smp::try_lock_spinning(&TABLE)?.get(&current_pid())?.mm.clone();
     let mut guard = mm.try_lock()?;
     Some(f(&mut guard))
 }
@@ -3718,6 +3721,29 @@ fn futex_key(p4: PhysFrame, addr: u64) -> u64 {
     (1 << 63) | (((p4.start_address().as_u64() >> 12) % 0x7FFF) << 47) | (addr & ((1 << 47) - 1))
 }
 
+/// FUTEX_WAKE without the kernel lock (from the lock-free system calls): a
+/// private futex (its key: the address and this address space, from CR3),
+/// up to `max` waiters. None: not that case, or the table was busy.
+pub fn fast_futex_wake(op: u64, uaddr: u64, max: u64) -> Option<i64> {
+    const FUTEX_PRIVATE_FLAG: u64 = 128;
+    const WAKE: u64 = 1;
+    const WAKE_BITSET: u64 = 10;
+    if op & FUTEX_PRIVATE_FLAG == 0 || !matches!(op & 0x7f, WAKE | WAKE_BITSET) || uaddr & 3 != 0 {
+        return None;
+    }
+    let (p4, _) = x86_64::registers::control::Cr3::read();
+    let key = futex_key(p4, uaddr);
+    let mut table = crate::smp::try_lock_spinning(&TABLE)?;
+    Some(futex_wake_locked(&mut table, key, max.min(u32::MAX as u64) as u32) as i64)
+}
+
+/// The current process's open files, without the kernel lock (the table
+/// taken briefly). None if the table was busy.
+pub fn fast_current_files() -> Option<Arc<Mutex<Files>>> {
+    let table = crate::smp::try_lock_spinning(&TABLE)?;
+    Some(table.get(&current_pid())?.files.clone())
+}
+
 /// Wake up to `max` threads waiting on `key`. Returns how many.
 fn futex_wake_locked(table: &mut BTreeMap<u64, Box<Process>>, key: u64, max: u32) -> u32 {
     let mut woken = 0;
@@ -3791,6 +3817,17 @@ pub fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3:
             }
             {
                 let mut table = TABLE.lock();
+                // The word again, with the table held: a wake without the
+                // kernel lock (fast_futex_wake) takes the table too, so it
+                // comes either before this (the word has changed: don't
+                // sleep) or after (it finds this thread blocked). (Only
+                // read if mapped: no page fault with the table held.)
+                if crate::memory::user_range_ready(uaddr, 4, false) {
+                    let now = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+                    if now != val as u32 {
+                        return -EAGAIN;
+                    }
+                }
                 let p = table.get_mut(&current_pid()).unwrap();
                 p.state = State::Blocked(key);
                 p.deadline = deadline.unwrap_or(0);

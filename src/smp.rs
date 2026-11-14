@@ -593,3 +593,18 @@ extern "C" fn ap_main(cpu: u64) -> ! {
     // Its idle loop: it takes processes as they're ready.
     idle_loop()
 }
+
+/// Take `m` from a path without the kernel lock and with interrupts off
+/// (the lock-free system calls): answering TLB flushes while it waits (the
+/// holder may be waiting for this core's), and giving up after a while
+/// (None: the caller takes the usual way).
+pub fn try_lock_spinning<T>(m: &spin::Mutex<T>) -> Option<spin::MutexGuard<'_, T>> {
+    for _ in 0..100_000 {
+        if let Some(g) = m.try_lock() {
+            return Some(g);
+        }
+        flush_if_asked();
+        core::hint::spin_loop();
+    }
+    None
+}
