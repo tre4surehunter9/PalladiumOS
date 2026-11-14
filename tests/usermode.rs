@@ -2174,6 +2174,24 @@ fn man_pages_work() {
 }
 
 #[test_case]
+fn tmux_port_works() {
+    if palladiumos::mounts::resolve("/usr/bin/tmux").is_err() {
+        palladiumos::serial_print!("(skipped: tmux not built) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    // A detached session (its server in the background, on a pty) running
+    // a command; listed; then the server ended.
+    let status = sh("tmux -V > /tmp/tm1 && tmux new-session -d -s t 'echo from-tmux > /tmp/tm2; sleep 30' \
+         && sleep 1 && tmux ls > /tmp/tm3 && tmux kill-server");
+    assert_eq!(status, 0, "{} {}", file("/tmp/tm1"), file("/tmp/tm3"));
+    assert_eq!(file("/tmp/tm1"), "tmux 3.8\n");
+    assert_eq!(file("/tmp/tm2"), "from-tmux\n");
+    assert!(file("/tmp/tm3").starts_with("t: 1 windows"), "{}", file("/tmp/tm3"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn nano_port_works() {
     if palladiumos::mounts::resolve("/usr/bin/nano").is_err() {
         palladiumos::serial_print!("(skipped: nano not built) ");
