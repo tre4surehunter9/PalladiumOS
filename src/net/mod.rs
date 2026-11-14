@@ -269,6 +269,97 @@ pub fn ipv6_addresses() -> alloc::vec::Vec<(u32, Ipv6Address, u8)> {
     out
 }
 
+/// eth0's IPv4 address and prefix length, if it has one.
+pub fn eth_ipv4() -> Option<([u8; 4], u8)> {
+    let guard = NET.lock();
+    let c = guard.as_ref()?.eth.as_ref()?.config?;
+    Some((c.address.address().octets(), c.address.prefix_len()))
+}
+
+/// eth0's IPv4 routes through a gateway (destination, prefix length,
+/// gateway): the default route (DHCP's, or one added) and those added by
+/// hand (route add, ip route add). (Its own network is on the link: not a
+/// route here.)
+pub fn ipv4_routes() -> alloc::vec::Vec<([u8; 4], u8, [u8; 4])> {
+    let mut out = alloc::vec::Vec::new();
+    let mut guard = NET.lock();
+    let Some(eth) = guard.as_mut().and_then(|n| n.eth.as_mut()) else { return out };
+    eth.iface.routes_mut().update(|routes| {
+        for r in routes.iter() {
+            if let (IpCidr::Ipv4(c), IpAddress::Ipv4(via)) = (r.cidr, r.via_router) {
+                out.push((c.address().octets(), c.prefix_len(), via.octets()));
+            }
+        }
+    });
+    out
+}
+
+/// Add an IPv4 route through `gw` (on eth0's network). Errors: errno.
+pub fn add_ipv4_route(dst: [u8; 4], prefix: u8, gw: [u8; 4]) -> Result<(), i64> {
+    const EEXIST: i64 = 17;
+    const ENETUNREACH: i64 = 101;
+    const ENOSPC: i64 = 28;
+    const EINVAL: i64 = 22;
+    if prefix > 32 {
+        return Err(EINVAL);
+    }
+    let mut guard = NET.lock();
+    let Some(eth) = guard.as_mut().and_then(|n| n.eth.as_mut()) else { return Err(ENETUNREACH) };
+    let gw = Ipv4Address::from_octets(gw);
+    // The gateway must be reachable directly: on eth0's network.
+    if !eth.config.is_some_and(|c| c.address.contains_addr(&gw)) {
+        return Err(ENETUNREACH);
+    }
+    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix as u32) };
+    let net = Ipv4Address::from_bits(u32::from_be_bytes(dst) & mask);
+    let cidr = IpCidr::Ipv4(Ipv4Cidr::new(net, prefix));
+    let mut result = Ok(());
+    eth.iface.routes_mut().update(|routes| {
+        if routes.iter().any(|r| r.cidr == cidr) {
+            result = Err(EEXIST);
+        } else if routes
+            .push(smoltcp::iface::Route { cidr, via_router: IpAddress::Ipv4(gw), preferred_until: None, expires_at: None })
+            .is_err()
+        {
+            result = Err(ENOSPC);
+        }
+    });
+    if result.is_ok() && prefix == 0 {
+        if let Some(c) = eth.config.as_mut() {
+            c.gateway = Some(gw); // (the default route: shown as the gateway)
+        }
+    }
+    result
+}
+
+/// Delete the IPv4 route to `dst`/`prefix` (through `gw`, if given).
+pub fn del_ipv4_route(dst: [u8; 4], prefix: u8, gw: Option<[u8; 4]>) -> Result<(), i64> {
+    const ESRCH: i64 = 3;
+    let mut guard = NET.lock();
+    let Some(eth) = guard.as_mut().and_then(|n| n.eth.as_mut()) else { return Err(ESRCH) };
+    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix.min(32) as u32) };
+    let net = Ipv4Address::from_bits(u32::from_be_bytes(dst) & mask);
+    let cidr = IpCidr::Ipv4(Ipv4Cidr::new(net, prefix.min(32)));
+    let mut found = false;
+    eth.iface.routes_mut().update(|routes| {
+        if let Some(i) = routes.iter().position(|r| {
+            r.cidr == cidr && gw.is_none_or(|g| r.via_router == IpAddress::Ipv4(Ipv4Address::from_octets(g)))
+        }) {
+            routes.remove(i);
+            found = true;
+        }
+    });
+    if !found {
+        return Err(ESRCH);
+    }
+    if prefix == 0 {
+        if let Some(c) = eth.config.as_mut() {
+            c.gateway = None;
+        }
+    }
+    Ok(())
+}
+
 /// eth0's IPv6 routes: (destination, prefix length, gateway): each of its
 /// networks on the link (no gateway), and those through a router (from
 /// its advertisements: the default route), for netlink (ip -6 route).

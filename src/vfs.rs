@@ -621,6 +621,13 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
                 ifc[..4].copy_from_slice(&(list.len() as i32).to_le_bytes());
                 return 0;
             }
+            // route add / del: struct rtentry.
+            if let Some(r) = unsafe { user_slice(arg, 120) }.and_then(|rt| crate::net::netlink::route_ioctl(request, rt)) {
+                return match r {
+                    Ok(()) => 0,
+                    Err(e) => -e,
+                };
+            }
             if let Some(req) = unsafe { user_slice_mut(arg, 40) } {
                 let mut ifreq = [0u8; 40];
                 ifreq.copy_from_slice(req);

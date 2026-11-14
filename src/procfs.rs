@@ -26,7 +26,7 @@ const ROOT: Ino = 1;
 const SELF: Ino = 2;
 /// /proc/net and its files: (name, inode).
 const NET_DIR: Ino = 13;
-const NET_FILES: &[(&str, Ino)] = &[("if_inet6", 14), ("dev", 15)];
+const NET_FILES: &[(&str, Ino)] = &[("if_inet6", 14), ("dev", 15), ("route", 16)];
 /// System files: (name, inode).
 const SYSTEM: &[(&str, Ino)] =
     &[("cmdline", 11), ("cpuinfo", 3), ("kmsg", 9), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("sound", 12), ("stat", 10), ("uptime", 7), ("version", 8)];
@@ -111,6 +111,7 @@ impl ProcFs {
             12 => crate::sound::status(), // the sound card (as old Linux's /proc/sound)
             14 => if_inet6(),
             15 => net_dev(),
+            16 => net_route(),
             _ => return Err(EINVAL),
         })
     }
@@ -433,6 +434,32 @@ impl FileSystem for ProcFs {
     fn remove(&mut self, _dir: Ino, _name: &str, _is_dir: bool) -> FsResult<()> {
         Err(EPERM)
     }
+}
+
+/// /proc/net/route, as Linux writes it (route and netstat -r read it): per
+/// IPv4 route, the interface, destination, gateway, flags (1 up, 2
+/// through a gateway), counts, metric and mask, addresses in hex as they
+/// lie in memory.
+fn net_route() -> String {
+    let hex = |a: [u8; 4]| format!("{:08X}", u32::from_le_bytes(a));
+    let mask = |len: u8| if len == 0 { [0; 4] } else { (u32::MAX << (32 - len as u32)).to_be_bytes() };
+    let mut out = String::from("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
+    let row = |out: &mut String, dst: [u8; 4], gw: [u8; 4], flags: u32, len: u8, metric: u32| {
+        out.push_str(&format!("eth0\t{}\t{}\t{:04X}\t0\t0\t{}\t{}\t0\t0\t0\n", hex(dst), hex(gw), flags, metric, hex(mask(len))));
+    };
+    let mut routes = crate::net::ipv4_routes();
+    routes.sort_by_key(|r| r.1 == 0); // (the default route last, as Linux lists it)
+    for (dst, len, gw) in routes.iter().filter(|r| r.1 > 0) {
+        row(&mut out, *dst, *gw, 0x3, *len, 0);
+    }
+    if let Some((addr, len)) = crate::net::eth_ipv4() {
+        let m = u32::from_be_bytes(mask(len));
+        row(&mut out, (u32::from_be_bytes(addr) & m).to_be_bytes(), [0; 4], 0x1, len, 0);
+    }
+    for (dst, len, gw) in routes.iter().filter(|r| r.1 == 0) {
+        row(&mut out, *dst, *gw, 0x3, *len, 0);
+    }
+    out
 }
 
 /// /proc/net/dev, as Linux writes it: per interface, what it received

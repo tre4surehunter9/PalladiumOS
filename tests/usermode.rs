@@ -2294,6 +2294,33 @@ fn python_port_works() {
 }
 
 #[test_case]
+fn routes_can_be_added_and_deleted() {
+    if palladiumos::mounts::resolve("/usr/bin/route").is_err() || palladiumos::net::eth_ipv4().is_none() {
+        palladiumos::serial_print!("(skipped: no busybox or no eth0 address) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    let (addr, _) = palladiumos::net::eth_ipv4().unwrap();
+    let gw = alloc::format!("{}.{}.{}.2", addr[0], addr[1], addr[2]); // (QEMU's: on eth0's network)
+    let script = alloc::format!(
+        "route add -net 192.168.50.0 netmask 255.255.255.0 gw {gw} && ip route add 192.168.60.0/24 via {gw} \
+         && cat /proc/net/route > /tmp/rt1 && ip route > /tmp/rt2 \
+         && route del -net 192.168.50.0 netmask 255.255.255.0 && ip route del 192.168.60.0/24 && cat /proc/net/route > /tmp/rt3"
+    );
+    assert_eq!(sh(&script), 0, "{}", file("/tmp/rt1"));
+    // (/proc/net/route: addresses in hex as they lie in memory: 192.168.50.0 is 0032A8C0.)
+    assert!(file("/tmp/rt1").contains("eth0\t0032A8C0\t"), "{}", file("/tmp/rt1"));
+    assert!(file("/tmp/rt1").starts_with("Iface\tDestination\tGateway"), "{}", file("/tmp/rt1"));
+    assert!(file("/tmp/rt2").contains("192.168.60.0/24 via"), "{}", file("/tmp/rt2"));
+    assert!(!file("/tmp/rt3").contains("0032A8C0") && !file("/tmp/rt3").contains("003CA8C0"), "{}", file("/tmp/rt3"));
+    // A route through a gateway not on the network, or by an ordinary user: refused.
+    assert_ne!(sh("route add -net 192.168.70.0 netmask 255.255.255.0 gw 172.16.0.1 2>/dev/null"), 0);
+    setup_users();
+    assert_ne!(sh(&alloc::format!("setuidgid user route add -net 192.168.80.0 netmask 255.255.255.0 gw {gw} 2>/dev/null")), 0);
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn nano_port_works() {
     if palladiumos::mounts::resolve("/usr/bin/nano").is_err() {
         palladiumos::serial_print!("(skipped: nano not built) ");

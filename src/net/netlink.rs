@@ -29,7 +29,9 @@ const RTM_GETLINK: u16 = 18;
 const RTM_NEWADDR: u16 = 20;
 const RTM_GETADDR: u16 = 22;
 const RTM_NEWROUTE: u16 = 24;
+const RTM_DELROUTE: u16 = 25;
 const RTM_GETROUTE: u16 = 26;
+const NLM_F_ACK: u16 = 4;
 const NLM_F_MULTI: u16 = 2;
 const NLM_F_DUMP: u16 = 0x300;
 const AF_UNSPEC: u8 = 0;
@@ -203,8 +205,11 @@ fn route_messages(out: &mut Vec<u8>, seq: u32, pid: u32, l: &Link) {
         attr(&mut body, 4, &l.index.to_le_bytes()); // RTA_OIF
         message(out, RTM_NEWROUTE, NLM_F_MULTI, seq, pid, &body);
     };
-    if let Some(gw) = l.gateway {
-        route(out, None, Some(gw), RTPROT_DHCP, 0);
+    // The routes through a gateway: the default one, and any added.
+    const RTPROT_STATIC: u8 = 4;
+    for (dst, len, gw) in super::ipv4_routes() {
+        let proto = if len == 0 && l.gateway == Some(gw) { RTPROT_DHCP } else { RTPROT_STATIC };
+        route(out, (len > 0).then_some((dst, len)), Some(gw), proto, 0);
     }
     let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix as u32) };
     let net = (u32::from_be_bytes(addr) & mask).to_be_bytes();
@@ -424,6 +429,18 @@ impl NetlinkSocket {
                     }
                 }
             }
+            // ip route add / del (IPv4, through a gateway): root only.
+            RTM_NEWROUTE | RTM_DELROUTE if family == AF_INET => {
+                let result = if !crate::process::current_cred().is_root() { Err(crate::syscall::EPERM) } else { route_request(ty, data) };
+                // An acknowledgement (error 0) if asked for, or the error.
+                if result.is_err() || flags & NLM_F_ACK != 0 {
+                    let mut body = (-result.err().unwrap_or(0) as i32).to_le_bytes().to_vec();
+                    body.extend_from_slice(&data[..16]);
+                    message(&mut out, NLMSG_ERROR, 0, seq, pid, &body);
+                    self.replies.lock().push_back(out);
+                }
+                return Ok(data.len());
+            }
             _ if flags & NLM_F_DUMP == NLM_F_DUMP => {} // nothing to list (IPv6...)
             _ => {
                 // struct nlmsgerr: -errno, then the request's header.
@@ -493,4 +510,67 @@ pub fn interface_list(room: usize) -> Vec<u8> {
 /// The interfaces, for /proc/net/dev: (name, interface index).
 pub fn link_names() -> Vec<(&'static str, u32)> {
     links().iter().map(|l| (core::str::from_utf8(l.name).unwrap_or("?"), l.index)).collect()
+}
+
+/// RTM_NEWROUTE / RTM_DELROUTE: struct rtmsg (destination prefix length
+/// at byte 17 of the message), then attributes (RTA_DST, RTA_GATEWAY).
+fn route_request(ty: u16, data: &[u8]) -> Result<(), i64> {
+    const EINVAL: i64 = 22;
+    let len = (u32::from_le_bytes(data[..4].try_into().unwrap()) as usize).min(data.len());
+    let prefix = *data.get(17).ok_or(EINVAL)?;
+    let (mut dst, mut gw) = ([0u8; 4], None);
+    let mut at = 28;
+    while at + 4 <= len {
+        let alen = u16::from_le_bytes([data[at], data[at + 1]]) as usize;
+        let aty = u16::from_le_bytes([data[at + 2], data[at + 3]]);
+        if alen < 4 || at + alen > len {
+            break;
+        }
+        let v = &data[at + 4..at + alen];
+        match (aty, v.len()) {
+            (1, 4) => dst.copy_from_slice(v), // RTA_DST
+            (5, 4) => gw = Some(<[u8; 4]>::try_from(v).unwrap()), // RTA_GATEWAY
+            _ => {}
+        }
+        at += align4(alen);
+    }
+    if ty == RTM_NEWROUTE {
+        super::add_ipv4_route(dst, prefix, gw.ok_or(EINVAL)?) // (on-link routes: not supported)
+    } else {
+        super::del_ipv4_route(dst, prefix, gw)
+    }
+}
+
+/// route add / route del (SIOCADDRT, SIOCDELRT): struct rtentry (rt_dst
+/// at 8, rt_gateway at 24, rt_genmask at 40, rt_flags at 56). None: not
+/// one of these.
+pub fn route_ioctl(request: u64, rt: &[u8]) -> Option<Result<(), i64>> {
+    const SIOCADDRT: u64 = 0x890B;
+    const SIOCDELRT: u64 = 0x890C;
+    const RTF_GATEWAY: u16 = 2;
+    const RTF_HOST: u16 = 4;
+    const EINVAL: i64 = 22;
+    if request != SIOCADDRT && request != SIOCDELRT {
+        return None;
+    }
+    if !crate::process::current_cred().is_root() {
+        return Some(Err(crate::syscall::EPERM));
+    }
+    if rt.len() < 120 {
+        return Some(Err(EINVAL));
+    }
+    let ipv4 = |off: usize| -> [u8; 4] { rt[off + 4..off + 8].try_into().unwrap() };
+    let flags = u16::from_le_bytes([rt[56], rt[57]]);
+    let dst = ipv4(8);
+    let mask = u32::from_be_bytes(ipv4(40));
+    let prefix = if flags & RTF_HOST != 0 { 32 } else { mask.leading_ones() as u8 };
+    let gw = (flags & RTF_GATEWAY != 0).then(|| ipv4(24));
+    Some(if request == SIOCADDRT {
+        match gw {
+            Some(g) => super::add_ipv4_route(dst, prefix, g),
+            None => Err(EINVAL), // (on-link routes: not supported)
+        }
+    } else {
+        super::del_ipv4_route(dst, prefix, gw)
+    })
 }
