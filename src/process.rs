@@ -544,6 +544,14 @@ pub fn list() -> Vec<(u64, u64, String, State)> {
     TABLE.lock().values().map(|p| (p.pid, p.ppid, p.name.clone(), p.state)).collect()
 }
 
+/// The cores that processes ready to run (and not running) may use: their
+/// affinities together (for core 0's timer: wake a tickless core one of
+/// them may run on). 0 if none, or the table is busy (the next tick looks
+/// again).
+pub fn ready_waiting() -> u64 {
+    TABLE.try_lock().map_or(0, |t| t.values().filter(|p| p.state == State::Ready).fold(0, |m, p| m | p.affinity))
+}
+
 /// Is any process other than the current one ready to run, or about to
 /// be: a sleep that has ended, or a pending wake-up (e.g. a pipe got data)?
 /// Those only become Ready when the scheduler runs, so the timer must call

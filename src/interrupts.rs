@@ -36,6 +36,7 @@ lazy_static! {
     idt[(PIC_1_OFFSET + 12) as usize].set_handler_fn(mouse_irq12);
     idt[crate::smp::SPURIOUS_VECTOR as usize].set_handler_fn(spurious_interrupt);
     idt[crate::smp::TLB_VECTOR as usize].set_handler_fn(tlb_interrupt);
+    idt[crate::smp::KICK_VECTOR as usize].set_handler_fn(kick_interrupt);
     unsafe {
         idt[crate::smp::AP_TIMER_VECTOR as usize]
             .set_handler_addr(x86_64::VirtAddr::new(ap_timer_entry as *const () as u64));
@@ -82,6 +83,7 @@ extern "C" fn timer_dispatch(frame: &mut crate::syscall::SyscallFrame) {
     // when going back to a program; below otherwise).
     let took = crate::smp::lock_kernel();
     crate::process::sample_load_if_due();
+    crate::smp::kick_idle_core_if_needed(); // (a core sleeping tickless, and work for it)
     crate::xhci::poll(); // USB keyboards
     crate::virtio_input::poll(); // virtio keyboards and pointers
     // Preemptive multitasking: only when we interrupted a user program, never
@@ -168,6 +170,10 @@ extern "x86-interrupt" fn spurious_interrupt(_f: InterruptStackFrame) {}
 /// TLB (smp::shootdown). No kernel lock: that core holds it, waiting.
 extern "x86-interrupt" fn tlb_interrupt(_f: InterruptStackFrame) {
     crate::smp::tlb_interrupt();
+}
+
+extern "x86-interrupt" fn kick_interrupt(_f: InterruptStackFrame) {
+    crate::smp::kick_interrupt();
 }
 
 /// Let pending interrupts in for a moment. System calls run with interrupts

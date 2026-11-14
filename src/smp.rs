@@ -138,6 +138,42 @@ pub fn lock_kernel() -> bool {
 
 /// The interrupt asking for a TLB flush.
 pub const TLB_VECTOR: u8 = 0x42;
+/// The interrupt waking an idle core whose timer is stopped (tickless):
+/// there's work for it.
+pub const KICK_VECTOR: u8 = 0x43;
+
+/// Cores idle with their timer stopped (bit n: core n). Core 0 always
+/// ticks (it keeps the time) and kicks one of these when a process is
+/// ready to run.
+static TICKLESS: AtomicU64 = AtomicU64::new(0);
+
+/// From core 0's timer: if a process is waiting to run while a core sleeps
+/// with its timer stopped, wake that core (at most a tick late).
+pub fn kick_idle_core_if_needed() {
+    let idle = TICKLESS.load(Ordering::Acquire);
+    if idle == 0 {
+        return;
+    }
+    // A sleeping core one of them may run on (a process pinned to core 2
+    // needs core 2, not any idle one).
+    let wanted = idle & crate::process::ready_waiting();
+    if wanted == 0 {
+        return;
+    }
+    let n = wanted.trailing_zeros() as usize;
+    if let Some(cpu) = PERCPU.get(n) {
+        send_ipi(cpu.apic_id.load(Ordering::Relaxed) as u8, 0x4000 | KICK_VECTOR as u32);
+    }
+}
+
+/// This core's APIC timer on or off (an idle core's, while it sleeps).
+fn ap_timer_running(on: bool) {
+    let lvt = (1 << 17) | AP_TIMER_VECTOR as u32 | if on { 0 } else { 1 << 16 };
+    lapic_write(LAPIC_LVT_TIMER, lvt);
+    if on {
+        lapic_write(LAPIC_TIMER_INIT, 62_500); // (a fresh period)
+    }
+}
 
 /// Flush this core's TLB if another core asked (shootdown), and say so.
 pub fn flush_if_asked() {
@@ -266,8 +302,27 @@ pub fn idle_loop() -> ! {
         }
         crate::process::schedule();
         unlock_kernel();
+        // Nothing to run: the other cores stop their timer while they
+        // sleep (tickless: an idle machine wakes 1000 times a second, not
+        // 1000 per core); core 0 kicks one when there's work, and any
+        // interrupt (a TLB flush too) wakes it.
+        let me = cpu_index();
+        if me != 0 {
+            ap_timer_running(false);
+            TICKLESS.fetch_or(1 << me, Ordering::AcqRel);
+        }
         x86_64::instructions::interrupts::enable_and_hlt();
+        if me != 0 {
+            x86_64::instructions::interrupts::disable();
+            TICKLESS.fetch_and(!(1 << me), Ordering::AcqRel);
+            ap_timer_running(true);
+        }
     }
+}
+
+/// KICK_VECTOR's handler: only waking the core (its idle loop goes on).
+pub fn kick_interrupt() {
+    lapic_eoi();
 }
 
 /// Where core 0's idle context starts (the first switch to it returns
