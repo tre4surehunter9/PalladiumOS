@@ -444,20 +444,23 @@ fn net_route() -> String {
     let hex = |a: [u8; 4]| format!("{:08X}", u32::from_le_bytes(a));
     let mask = |len: u8| if len == 0 { [0; 4] } else { (u32::MAX << (32 - len as u32)).to_be_bytes() };
     let mut out = String::from("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
-    let row = |out: &mut String, dst: [u8; 4], gw: [u8; 4], flags: u32, len: u8, metric: u32| {
-        out.push_str(&format!("eth0\t{}\t{}\t{:04X}\t0\t0\t{}\t{}\t0\t0\t0\n", hex(dst), hex(gw), flags, metric, hex(mask(len))));
+    let row = |out: &mut String, n: usize, dst: [u8; 4], gw: [u8; 4], flags: u32, len: u8| {
+        out.push_str(&format!("eth{}\t{}\t{}\t{:04X}\t0\t0\t0\t{}\t0\t0\t0\n", n, hex(dst), hex(gw), flags, hex(mask(len))));
     };
-    let mut routes = crate::net::ipv4_routes();
-    routes.sort_by_key(|r| r.1 == 0); // (the default route last, as Linux lists it)
-    for (dst, len, gw) in routes.iter().filter(|r| r.1 > 0) {
-        row(&mut out, *dst, *gw, 0x3, *len, 0);
+    let routes = crate::net::ipv4_routes();
+    // The routes added, the cards' networks, then the default routes (as
+    // Linux lists them).
+    for &(n, dst, len, gw) in routes.iter().filter(|r| r.2 > 0) {
+        row(&mut out, n, dst, gw, 0x3, len);
     }
-    if let Some((addr, len)) = crate::net::eth_ipv4() {
-        let m = u32::from_be_bytes(mask(len));
-        row(&mut out, (u32::from_be_bytes(addr) & m).to_be_bytes(), [0; 4], 0x1, len, 0);
+    for n in 0..crate::net::cards() {
+        if let Some((addr, len)) = crate::net::eth_ipv4(n) {
+            let m = u32::from_be_bytes(mask(len));
+            row(&mut out, n, (u32::from_be_bytes(addr) & m).to_be_bytes(), [0; 4], 0x1, len);
+        }
     }
-    for (dst, len, gw) in routes.iter().filter(|r| r.1 == 0) {
-        row(&mut out, *dst, *gw, 0x3, *len, 0);
+    for &(n, dst, len, gw) in routes.iter().filter(|r| r.2 == 0) {
+        row(&mut out, n, dst, gw, 0x3, len);
     }
     out
 }
@@ -472,7 +475,8 @@ fn net_dev() -> String {
         "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n",
     );
     for (name, index) in crate::net::netlink::link_names() {
-        let s = &crate::net::STATS[if index == 1 { 0 } else { 1 }];
+        // (Interface 1 is lo, STATS[0]; 2 eth0, STATS[1]; 3 eth1...)
+        let s = &crate::net::STATS[(index as usize - 1).min(crate::net::STATS.len() - 1)];
         out.push_str(&format!(
             "{:>6}: {:>7} {:>7}    0    0    0     0          0         0 {:>8} {:>7}    0 {:>4}    0     0       0          0\n",
             name,
@@ -500,7 +504,7 @@ fn if_inet6() -> String {
         } else {
             0
         };
-        let name = if index == 1 { "lo" } else { "eth0" };
+        let name = if index == 1 { String::from("lo") } else { format!("eth{}", index - 2) };
         out.push_str(&format!("{} {:02x} {:02x} {:02x} 80 {:>8}\n", hex, index, prefix, scope, name));
     }
     out

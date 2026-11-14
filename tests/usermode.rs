@@ -2295,12 +2295,12 @@ fn python_port_works() {
 
 #[test_case]
 fn routes_can_be_added_and_deleted() {
-    if palladiumos::mounts::resolve("/usr/bin/route").is_err() || palladiumos::net::eth_ipv4().is_none() {
+    if palladiumos::mounts::resolve("/usr/bin/route").is_err() || palladiumos::net::eth_ipv4(0).is_none() {
         palladiumos::serial_print!("(skipped: no busybox or no eth0 address) ");
         return;
     }
     let _ = filesystem::make_dir("/tmp");
-    let (addr, _) = palladiumos::net::eth_ipv4().unwrap();
+    let (addr, _) = palladiumos::net::eth_ipv4(0).unwrap();
     let gw = alloc::format!("{}.{}.{}.2", addr[0], addr[1], addr[2]); // (QEMU's: on eth0's network)
     let script = alloc::format!(
         "route add -net 192.168.50.0 netmask 255.255.255.0 gw {gw} && ip route add 192.168.60.0/24 via {gw} \
@@ -2317,6 +2317,31 @@ fn routes_can_be_added_and_deleted() {
     assert_ne!(sh("route add -net 192.168.70.0 netmask 255.255.255.0 gw 172.16.0.1 2>/dev/null"), 0);
     setup_users();
     assert_ne!(sh(&alloc::format!("setuidgid user route add -net 192.168.80.0 netmask 255.255.255.0 gw {gw} 2>/dev/null")), 0);
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
+fn two_network_cards_work() {
+    // (The usermode test kernel has two virtio-net cards: eth1's network
+    // is 10.0.3.0/24.)
+    assert_eq!(palladiumos::net::cards(), 2);
+    let eth1 = palladiumos::net::wait_for_dhcp_on(1, 5000).expect("no DHCP answer on eth1");
+    let eth0 = palladiumos::net::wait_for_dhcp_on(0, 5000).expect("no DHCP answer on eth0");
+    assert_ne!(eth0.address.address(), eth1.address.address());
+    if palladiumos::mounts::resolve("/usr/bin/ifconfig").is_err() {
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    // Each card's gateway answers ping through that card; both are listed.
+    let script = alloc::format!(
+        "ifconfig eth1 > /tmp/nic1 && ping -c 1 -W 2 {} > /tmp/nic2 && cat /proc/net/dev > /tmp/nic3 && ip -4 addr > /tmp/nic4",
+        eth1.gateway.unwrap()
+    );
+    assert_eq!(sh(&script), 0, "{} {}", file("/tmp/nic1"), file("/tmp/nic2"));
+    assert!(file("/tmp/nic1").contains(&alloc::format!("inet addr:{}", eth1.address.address())), "{}", file("/tmp/nic1"));
+    assert!(file("/tmp/nic2").contains("1 packets received"), "{}", file("/tmp/nic2"));
+    assert!(file("/tmp/nic3").contains("eth0:") && file("/tmp/nic3").contains("eth1:"), "{}", file("/tmp/nic3"));
+    assert!(file("/tmp/nic4").contains("eth1"), "{}", file("/tmp/nic4"));
     assert!(only_kernel_left(), "{:?}", process::list());
 }
 

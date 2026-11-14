@@ -69,7 +69,8 @@ const CONNECT_TIMEOUT_MS: u64 = 20_000;
 /// Which interface a smoltcp socket lives on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Which {
-    Eth,
+    /// A card's interface: eth0, eth1...
+    Eth(u8),
     Lo,
 }
 
@@ -112,12 +113,32 @@ fn ephemeral_port() -> u16 {
 }
 
 /// The interface for talking to `addr`.
-fn route(addr: IpAddress) -> Which {
+fn route_in(net: &Net, addr: IpAddress) -> Which {
     let lo = match addr {
         IpAddress::Ipv4(a) => a.octets()[0] == 127,
         IpAddress::Ipv6(a) => a.is_loopback(),
     };
-    if lo { Which::Lo } else { Which::Eth }
+    if lo {
+        return Which::Lo;
+    }
+    // The card whose network it's on; else the one with a default route
+    // (an IPv4 gateway, or for IPv6 a global address); else eth0.
+    let on = net.eth.iter().find(|e| match addr {
+        IpAddress::Ipv4(a) => e.config.is_some_and(|c| c.address.contains_addr(&a)),
+        IpAddress::Ipv6(a) => e.iface.ip_addrs().iter().any(|c| matches!(c, smoltcp::wire::IpCidr::Ipv6(c6) if c6.contains_addr(&a))),
+    });
+    let via = || {
+        net.eth.iter().find(|e| match addr {
+            IpAddress::Ipv4(_) => e.config.is_some_and(|c| c.gateway.is_some()),
+            IpAddress::Ipv6(_) => e.iface.ip_addrs().iter().any(|c| matches!(c, smoltcp::wire::IpCidr::Ipv6(c6) if c6.address().segments()[0] & 0xffc0 != 0xfe80)),
+        })
+    };
+    Which::Eth(on.or_else(via).map_or(0, |e| e.index as u8))
+}
+
+/// The interface for `addr` (the network lock taken here).
+fn route(addr: IpAddress) -> Which {
+    NET.lock().as_ref().map_or(Which::Lo, |n| route_in(n, addr))
 }
 
 /// A family's unspecified address (0.0.0.0, ::).
@@ -140,7 +161,7 @@ fn with_set<T>(
 ) -> Result<T, i64> {
     match which {
         Which::Lo => Ok(f(&mut net.lo.iface, &mut net.lo.sockets)),
-        Which::Eth => match net.eth.as_mut() {
+        Which::Eth(n) => match net.eth.get_mut(n as usize) {
             Some(eth) => Ok(f(&mut eth.iface, &mut eth.sockets)),
             None => Err(ENETUNREACH),
         },
@@ -161,12 +182,10 @@ fn new_udp() -> udp::Socket<'static> {
 /// Interfaces a socket bound to `addr` (None: 0.0.0.0) listens on.
 fn interfaces_for(net: &Net, addr: Option<IpAddress>) -> Vec<Which> {
     match addr {
-        Some(a) => vec![route(a)],
+        Some(a) => vec![route_in(net, a)],
         None => {
             let mut v = vec![Which::Lo];
-            if net.eth.is_some() {
-                v.push(Which::Eth);
-            }
+            v.extend(net.eth.iter().map(|e| Which::Eth(e.index as u8)));
             v
         }
     }
@@ -508,7 +527,7 @@ impl Socket {
                 let state = self.state.lock();
                 let State::Udp { handles, peer, .. } = &*state else { return Err(EINVAL) };
                 let dest = to.or(*peer).ok_or(EDESTADDRREQ)?;
-                let which = route(dest.addr);
+                let which = route_in(net, dest.addr);
                 let &(_, h) = handles.iter().find(|(w, _)| *w == which).ok_or(ENETUNREACH)?;
                 with_set(net, which, |_, set| set.get_mut::<udp::Socket>(h).send_slice(data, dest))?
                     .map(|_| data.len())
@@ -607,7 +626,7 @@ impl Socket {
                 Some(a) => a,
                 None => peer.ok_or(EDESTADDRREQ)?,
             };
-            let which = route(dest);
+            let which = route_in(net, dest);
             let dest = match dest {
                 IpAddress::Ipv6(d) => {
                     // IPv6: a header from the kernel, and ICMPv6's checksum.
@@ -626,7 +645,7 @@ impl Socket {
             };
             let source = match which {
                 Which::Lo => Ipv4Address::new(127, 0, 0, 1),
-                Which::Eth => net.eth.as_ref().and_then(|e| e.config).map(|c| c.address.address()).ok_or(ENETUNREACH)?,
+                Which::Eth(n) => net.eth.get(n as usize).and_then(|e| e.config).map(|c| c.address.address()).ok_or(ENETUNREACH)?,
             };
             let packet = if *hdrincl {
                 data.to_vec()
@@ -805,12 +824,12 @@ impl Drop for Socket {
 
 /// The source address for packets to `dest`.
 fn source_for(net: &Net, dest: IpAddress) -> Option<IpAddress> {
-    let which = route(dest);
+    let which = route_in(net, dest);
     match dest {
         IpAddress::Ipv6(d) => ipv6_source(net, which, d).map(IpAddress::Ipv6),
         IpAddress::Ipv4(_) => match which {
             Which::Lo => Some(IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1))),
-            Which::Eth => net.eth.as_ref().and_then(|e| e.config).map(|c| IpAddress::Ipv4(c.address.address())),
+            Which::Eth(n) => net.eth.get(n as usize).and_then(|e| e.config).map(|c| IpAddress::Ipv4(c.address.address())),
         },
     }
 }
@@ -819,13 +838,11 @@ fn source_for(net: &Net, dest: IpAddress) -> Option<IpAddress> {
 /// ::1 on loopback; on eth0 a link-local address for a link-local
 /// destination, else the global one (from SLAAC), if there is one.
 fn ipv6_source(net: &Net, which: Which, dest: Ipv6Address) -> Option<Ipv6Address> {
-    if which == Which::Lo {
-        return Some(Ipv6Address::LOCALHOST);
-    }
+    let Which::Eth(n) = which else { return Some(Ipv6Address::LOCALHOST) };
     let link_local = |a: &Ipv6Address| a.segments()[0] & 0xffc0 == 0xfe80;
     let addrs: Vec<Ipv6Address> = net
         .eth
-        .as_ref()?
+        .get(n as usize)?
         .iface
         .ip_addrs()
         .iter()

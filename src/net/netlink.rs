@@ -79,12 +79,13 @@ fn links() -> Vec<Link> {
         addr: Some(([127, 0, 0, 1], 8)),
         gateway: None,
     }];
-    let eth = super::NET.lock().as_ref().and_then(|n| n.eth.as_ref()).map(|e| (e.dev.mac(), e.config));
-    if let Some((mac, config)) = eth {
+    const NAMES: [&[u8]; super::card::MAX_CARDS] = [b"eth0", b"eth1"];
+    let cards: Vec<_> = super::NET.lock().as_ref().map_or(Vec::new(), |n| n.eth.iter().map(|e| (e.index, e.dev.mac(), e.config)).collect());
+    for (i, mac, config) in cards {
         v.push(Link {
-            index: 2,
-            name: b"eth0",
-            flags: if super::ETH_UP.load(core::sync::atomic::Ordering::Relaxed) {
+            index: 2 + i as u32,
+            name: NAMES[i],
+            flags: if super::ETH_UP[i].load(core::sync::atomic::Ordering::Relaxed) {
                 IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST | IFF_LOWER_UP
             } else {
                 IFF_BROADCAST | IFF_MULTICAST | IFF_LOWER_UP
@@ -207,7 +208,10 @@ fn route_messages(out: &mut Vec<u8>, seq: u32, pid: u32, l: &Link) {
     };
     // The routes through a gateway: the default one, and any added.
     const RTPROT_STATIC: u8 = 4;
-    for (dst, len, gw) in super::ipv4_routes() {
+    for (n, dst, len, gw) in super::ipv4_routes() {
+        if 2 + n as u32 != l.index {
+            continue; // (another card's)
+        }
         let proto = if len == 0 && l.gateway == Some(gw) { RTPROT_DHCP } else { RTPROT_STATIC };
         route(out, (len > 0).then_some((dst, len)), Some(gw), proto, 0);
     }
@@ -218,7 +222,7 @@ fn route_messages(out: &mut Vec<u8>, seq: u32, pid: u32, l: &Link) {
 
 /// An IPv6 route on eth0: to `dst`/`prefix`, on the link or through `gw`
 /// (learned from router advertisements: protocol "ra").
-fn route6_message(out: &mut Vec<u8>, seq: u32, pid: u32, dst: [u8; 16], prefix: u8, gw: Option<[u8; 16]>) {
+fn route6_message(out: &mut Vec<u8>, seq: u32, pid: u32, oif: u32, dst: [u8; 16], prefix: u8, gw: Option<[u8; 16]>) {
     const RT_TABLE_MAIN: u8 = 254;
     const RTPROT_KERNEL: u8 = 2;
     const RTPROT_RA: u8 = 9;
@@ -235,7 +239,7 @@ fn route6_message(out: &mut Vec<u8>, seq: u32, pid: u32, dst: [u8; 16], prefix: 
     if let Some(g) = gw {
         attr(&mut body, 5, &g); // RTA_GATEWAY
     }
-    attr(&mut body, 4, &2u32.to_le_bytes()); // RTA_OIF: eth0
+    attr(&mut body, 4, &oif.to_le_bytes()); // RTA_OIF
     attr(&mut body, 6, &(if gw.is_some() { 1024u32 } else { 256 }).to_le_bytes()); // RTA_PRIORITY (Linux's metrics)
     message(out, RTM_NEWROUTE, NLM_F_MULTI, seq, pid, &body);
 }
@@ -270,25 +274,28 @@ pub fn interface_ioctl(request: u64, req: &mut [u8; 40]) -> Option<Result<(), i6
     if [SIOCSIFFLAGS, SIOCSIFADDR, SIOCSIFNETMASK].contains(&request) {
         let end = req[..16].iter().position(|&c| c == 0).unwrap_or(16);
         let name = &req[..end];
-        if name != b"lo" && name != b"eth0" {
-            return Some(Err(ENODEV));
-        }
+        // lo, or card n (eth0, eth1) if there is one.
+        let card = match name {
+            b"lo" => None,
+            [b'e', b't', b'h', d @ b'0'..=b'9'] if ((d - b'0') as usize) < super::cards() => Some((d - b'0') as usize),
+            _ => return Some(Err(ENODEV)),
+        };
         if !crate::process::current_cred().is_root() {
             return Some(Err(EPERM));
         }
         let ipv4 = |req: &[u8; 40]| -> Option<[u8; 4]> {
             (u16::from_le_bytes([req[16], req[17]]) == AF_INET as u16).then(|| req[20..24].try_into().unwrap())
         };
-        return Some(match (request, name) {
-            (SIOCSIFFLAGS, b"eth0") => {
+        return Some(match (request, card) {
+            (SIOCSIFFLAGS, Some(n)) => {
                 let up = u16::from_le_bytes([req[16], req[17]]) & 1 != 0;
-                super::ETH_UP.store(up, core::sync::atomic::Ordering::SeqCst);
+                super::ETH_UP[n].store(up, core::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
-            (SIOCSIFFLAGS, _) => Ok(()), // (lo stays up)
-            (_, b"lo") => Err(EPERM), // (lo's address is fixed)
-            (SIOCSIFADDR, _) => match ipv4(req) {
-                Some(a) if super::set_ipv4(Some(a), None) => Ok(()),
+            (SIOCSIFFLAGS, None) => Ok(()), // (lo stays up)
+            (_, None) => Err(EPERM), // (lo's address is fixed)
+            (SIOCSIFADDR, Some(n)) => match ipv4(req) {
+                Some(a) if super::set_ipv4(n, Some(a), None) => Ok(()),
                 Some(_) => Err(ENODEV),
                 None => Err(EINVAL),
             },
@@ -297,7 +304,7 @@ pub fn interface_ioctl(request: u64, req: &mut [u8; 40]) -> Option<Result<(), i6
                     let m = u32::from_be_bytes(m);
                     if m.leading_ones() + m.trailing_zeros() != 32 {
                         Err(EINVAL) // not a netmask
-                    } else if super::set_ipv4(None, Some(m.leading_ones() as u8)) {
+                    } else if super::set_ipv4(card.unwrap_or(0), None, Some(m.leading_ones() as u8)) {
                         Ok(())
                     } else {
                         Err(ENODEV)
@@ -424,8 +431,8 @@ impl NetlinkSocket {
                     }
                 }
                 if ipv6 {
-                    for (dst, prefix, gw) in super::ipv6_routes() {
-                        route6_message(&mut out, seq, pid, dst, prefix, gw);
+                    for (oif, dst, prefix, gw) in super::ipv6_routes() {
+                        route6_message(&mut out, seq, pid, oif, dst, prefix, gw);
                     }
                 }
             }

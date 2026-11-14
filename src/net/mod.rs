@@ -43,6 +43,8 @@ pub struct IpConfig {
 }
 
 pub struct Eth {
+    /// eth0, eth1: its number.
+    pub index: usize,
     pub iface: Interface,
     pub dev: Card,
     pub sockets: SocketSet<'static>,
@@ -57,7 +59,8 @@ pub struct Lo {
 }
 
 pub struct Net {
-    pub eth: Option<Eth>,
+    /// The cards' interfaces, eth0 first.
+    pub eth: alloc::vec::Vec<Eth>,
     pub lo: Lo,
     /// Closed TCP sockets still saying goodbye (removed once done).
     pub closing: alloc::vec::Vec<(socket::Which, SocketHandle)>,
@@ -97,17 +100,19 @@ impl Stats {
     }
 }
 
-pub static STATS: [Stats; 2] = [Stats::new(), Stats::new()];
+/// lo's, then eth0's, eth1's.
+pub static STATS: [Stats; 1 + card::MAX_CARDS] = [Stats::new(), Stats::new(), Stats::new()];
 
-/// eth0 is up (ifconfig eth0 down: no frames in or out until it's up again).
-pub static ETH_UP: AtomicBool = AtomicBool::new(true);
+/// Each card is up (ifconfig eth0 down: no frames in or out until it's up
+/// again).
+pub static ETH_UP: [AtomicBool; card::MAX_CARDS] = [AtomicBool::new(true), AtomicBool::new(true)];
 
-/// Set eth0's IPv4 address and prefix length by hand (ifconfig eth0 ADDR
-/// netmask MASK), keeping its gateway and DNS server if still on the
-/// network. False: no eth0.
-pub fn set_ipv4(addr: Option<[u8; 4]>, prefix: Option<u8>) -> bool {
+/// Set card `n`'s IPv4 address and prefix length by hand (ifconfig eth0
+/// ADDR netmask MASK), keeping its gateway and DNS server if still on the
+/// network. False: no such card.
+pub fn set_ipv4(n: usize, addr: Option<[u8; 4]>, prefix: Option<u8>) -> bool {
     let mut guard = NET.lock();
-    let Some(eth) = guard.as_mut().and_then(|n| n.eth.as_mut()) else { return false };
+    let Some(eth) = guard.as_mut().and_then(|net| net.eth.get_mut(n)) else { return false };
     let old = eth.config;
     let a = addr.map(Ipv4Address::from_octets).or(old.map(|c| c.address.address())).unwrap_or(Ipv4Address::UNSPECIFIED);
     // Without a netmask: the old one, or the address class's (as Linux).
@@ -126,11 +131,11 @@ pub fn set_ipv4(addr: Option<[u8; 4]>, prefix: Option<u8>) -> bool {
 }
 /// Set by the card's interrupt: there's something to poll for.
 static IRQ: AtomicBool = AtomicBool::new(false);
-/// The card's IRQ line (0 = none) and I/O ports, for the interrupt handler.
-static CARD_IRQ: AtomicU64 = AtomicU64::new(0);
-static CARD_IO: AtomicU64 = AtomicU64::new(0);
+/// Each card's IRQ line (0 = none) and I/O ports, for the interrupt handler.
+static CARD_IRQ: [AtomicU64; card::MAX_CARDS] = [AtomicU64::new(0), AtomicU64::new(0)];
+static CARD_IO: [AtomicU64; card::MAX_CARDS] = [AtomicU64::new(0), AtomicU64::new(0)];
 /// A virtio-net card's ISR register (read to acknowledge its interrupt).
-static CARD_ISR: AtomicU64 = AtomicU64::new(0);
+static CARD_ISR: [AtomicU64; card::MAX_CARDS] = [AtomicU64::new(0), AtomicU64::new(0)];
 /// Tick of the last timer-driven poll.
 static LAST_POLL: AtomicU64 = AtomicU64::new(0);
 
@@ -142,10 +147,10 @@ fn seed() -> u64 {
     crate::random::next_u64()
 }
 
-/// Find the card and set up the interfaces. Returns the card's MAC address
-/// and IRQ, if there is one.
-pub fn init() -> Option<([u8; 6], u8, &'static str)> {
-    let eth = Card::find().map(|mut dev| {
+/// Find the cards and set up the interfaces. Returns each card's MAC
+/// address, IRQ and kind (eth0 first).
+pub fn init() -> alloc::vec::Vec<([u8; 6], u8, &'static str)> {
+    let eth: alloc::vec::Vec<Eth> = Card::find_all().into_iter().map(|mut dev| {
         let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(dev.mac())));
         config.random_seed = seed();
         // IPv6: a global address from the router's advertisements (SLAAC:
@@ -159,17 +164,20 @@ pub fn init() -> Option<([u8; 6], u8, &'static str)> {
         });
         let mut sockets = SocketSet::new(vec![]);
         let dhcp = sockets.add(dhcpv4::Socket::new());
-        Eth { iface, dev, sockets, dhcp, config: None }
-    });
-    let found = eth.as_ref().map(|e| (e.dev.mac(), e.dev.irq(), e.dev.name()));
-    match eth.as_ref().map(|e| &e.dev) {
-        Some(Card::Rtl(r)) => CARD_IO.store(r.io_base() as u64, Ordering::SeqCst),
-        Some(Card::Virtio(v)) => CARD_ISR.store(v.isr, Ordering::SeqCst),
-        None => {}
-    }
-    if let Some((_, irq, _)) = found.filter(|f| f.1 != 0 && f.1 != 0xff) {
-        CARD_IRQ.store(irq as u64, Ordering::SeqCst);
-        crate::interrupts::unmask_irq(irq);
+        Eth { index: dev.index, iface, dev, sockets, dhcp, config: None }
+    }).collect();
+    let found: alloc::vec::Vec<_> = eth.iter().map(|e| (e.dev.mac(), e.dev.irq(), e.dev.name())).collect();
+    for e in &eth {
+        let i = e.index;
+        match &e.dev.hw {
+            card::Hw::Rtl(r) => CARD_IO[i].store(r.io_base() as u64, Ordering::SeqCst),
+            card::Hw::Virtio(v) => CARD_ISR[i].store(v.isr, Ordering::SeqCst),
+        }
+        let irq = e.dev.irq();
+        if irq != 0 && irq != 0xff {
+            CARD_IRQ[i].store(irq as u64, Ordering::SeqCst);
+            crate::interrupts::unmask_irq(irq);
+        }
     }
 
     let mut dev = card::Counted(Loopback::new(Medium::Ip), &STATS[0]);
@@ -185,18 +193,25 @@ pub fn init() -> Option<([u8; 6], u8, &'static str)> {
     found
 }
 
-/// The card's interrupt: acknowledge it and note there's work.
-pub fn interrupt() {
-    let io = CARD_IO.load(Ordering::SeqCst) as u16;
-    if io != 0 {
-        rtl8139::ack_interrupt(io);
+/// A card's interrupt (on `line`): acknowledge the cards on it and note
+/// there's work.
+pub fn interrupt(line: u8) {
+    for i in 0..card::MAX_CARDS {
+        if CARD_IRQ[i].load(Ordering::SeqCst) as u8 != line {
+            continue;
+        }
+        let io = CARD_IO[i].load(Ordering::SeqCst) as u16;
+        if io != 0 {
+            rtl8139::ack_interrupt(io);
+        }
+        virtio_net::ack_interrupt(CARD_ISR[i].load(Ordering::SeqCst));
     }
-    virtio_net::ack_interrupt(CARD_ISR.load(Ordering::SeqCst));
     IRQ.store(true, Ordering::SeqCst);
 }
 
-pub fn card_irq() -> u8 {
-    CARD_IRQ.load(Ordering::SeqCst) as u8
+/// Whether a card interrupts on `line`.
+pub fn is_card_irq(line: u8) -> bool {
+    line != 0 && CARD_IRQ.iter().any(|c| c.load(Ordering::SeqCst) as u8 == line)
 }
 
 /// Move packets for both interfaces; wake socket waiters if anything
@@ -206,9 +221,9 @@ pub fn poll() {
     let Some(net) = guard.as_mut() else { return };
     let t = now();
     let mut changed = false;
-    if let Some(eth) = net.eth.as_mut() {
+    for eth in net.eth.iter_mut() {
         changed |= eth.iface.poll(t, &mut eth.dev, &mut eth.sockets) != smoltcp::iface::PollResult::None;
-        // DHCP: (re)configure eth0.
+        // DHCP: (re)configure the card.
         let event = eth.sockets.get_mut::<dhcpv4::Socket>(eth.dhcp).poll();
         match event {
             Some(dhcpv4::Event::Configured(c)) => {
@@ -259,42 +274,46 @@ pub fn ipv6_addresses() -> alloc::vec::Vec<(u32, Ipv6Address, u8)> {
             out.push((1, c.address(), c.prefix_len()));
         }
     }
-    if let Some(eth) = net.eth.as_ref() {
+    for eth in &net.eth {
         for c in eth.iface.ip_addrs() {
             if let IpCidr::Ipv6(c) = c {
-                out.push((2, c.address(), c.prefix_len()));
+                out.push((2 + eth.index as u32, c.address(), c.prefix_len()));
             }
         }
     }
     out
 }
 
-/// eth0's IPv4 address and prefix length, if it has one.
-pub fn eth_ipv4() -> Option<([u8; 4], u8)> {
+/// Card `n`'s IPv4 address and prefix length, if it has one.
+pub fn eth_ipv4(n: usize) -> Option<([u8; 4], u8)> {
     let guard = NET.lock();
-    let c = guard.as_ref()?.eth.as_ref()?.config?;
+    let c = guard.as_ref()?.eth.get(n)?.config?;
     Some((c.address.address().octets(), c.address.prefix_len()))
 }
 
-/// eth0's IPv4 routes through a gateway (destination, prefix length,
-/// gateway): the default route (DHCP's, or one added) and those added by
-/// hand (route add, ip route add). (Its own network is on the link: not a
-/// route here.)
-pub fn ipv4_routes() -> alloc::vec::Vec<([u8; 4], u8, [u8; 4])> {
+/// The cards' IPv4 routes through a gateway (card, destination, prefix
+/// length, gateway): the default routes (DHCP's, or added) and those added
+/// by hand (route add, ip route add). (A card's own network is on the
+/// link: not a route here.)
+pub fn ipv4_routes() -> alloc::vec::Vec<(usize, [u8; 4], u8, [u8; 4])> {
     let mut out = alloc::vec::Vec::new();
     let mut guard = NET.lock();
-    let Some(eth) = guard.as_mut().and_then(|n| n.eth.as_mut()) else { return out };
-    eth.iface.routes_mut().update(|routes| {
-        for r in routes.iter() {
-            if let (IpCidr::Ipv4(c), IpAddress::Ipv4(via)) = (r.cidr, r.via_router) {
-                out.push((c.address().octets(), c.prefix_len(), via.octets()));
+    let Some(net) = guard.as_mut() else { return out };
+    for eth in net.eth.iter_mut() {
+        let n = eth.index;
+        eth.iface.routes_mut().update(|routes| {
+            for r in routes.iter() {
+                if let (IpCidr::Ipv4(c), IpAddress::Ipv4(via)) = (r.cidr, r.via_router) {
+                    out.push((n, c.address().octets(), c.prefix_len(), via.octets()));
+                }
             }
-        }
-    });
+        });
+    }
     out
 }
 
-/// Add an IPv4 route through `gw` (on eth0's network). Errors: errno.
+/// Add an IPv4 route through `gw`, on the card whose network it's on.
+/// Errors: errno.
 pub fn add_ipv4_route(dst: [u8; 4], prefix: u8, gw: [u8; 4]) -> Result<(), i64> {
     const EEXIST: i64 = 17;
     const ENETUNREACH: i64 = 101;
@@ -304,12 +323,11 @@ pub fn add_ipv4_route(dst: [u8; 4], prefix: u8, gw: [u8; 4]) -> Result<(), i64> 
         return Err(EINVAL);
     }
     let mut guard = NET.lock();
-    let Some(eth) = guard.as_mut().and_then(|n| n.eth.as_mut()) else { return Err(ENETUNREACH) };
     let gw = Ipv4Address::from_octets(gw);
-    // The gateway must be reachable directly: on eth0's network.
-    if !eth.config.is_some_and(|c| c.address.contains_addr(&gw)) {
+    // The gateway must be reachable directly: on a card's network.
+    let Some(eth) = guard.as_mut().and_then(|n| n.eth.iter_mut().find(|e| e.config.is_some_and(|c| c.address.contains_addr(&gw)))) else {
         return Err(ENETUNREACH);
-    }
+    };
     let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix as u32) };
     let net = Ipv4Address::from_bits(u32::from_be_bytes(dst) & mask);
     let cidr = IpCidr::Ipv4(Ipv4Cidr::new(net, prefix));
@@ -336,37 +354,44 @@ pub fn add_ipv4_route(dst: [u8; 4], prefix: u8, gw: [u8; 4]) -> Result<(), i64> 
 pub fn del_ipv4_route(dst: [u8; 4], prefix: u8, gw: Option<[u8; 4]>) -> Result<(), i64> {
     const ESRCH: i64 = 3;
     let mut guard = NET.lock();
-    let Some(eth) = guard.as_mut().and_then(|n| n.eth.as_mut()) else { return Err(ESRCH) };
+    let Some(net) = guard.as_mut() else { return Err(ESRCH) };
     let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix.min(32) as u32) };
-    let net = Ipv4Address::from_bits(u32::from_be_bytes(dst) & mask);
-    let cidr = IpCidr::Ipv4(Ipv4Cidr::new(net, prefix.min(32)));
-    let mut found = false;
-    eth.iface.routes_mut().update(|routes| {
-        if let Some(i) = routes.iter().position(|r| {
-            r.cidr == cidr && gw.is_none_or(|g| r.via_router == IpAddress::Ipv4(Ipv4Address::from_octets(g)))
-        }) {
-            routes.remove(i);
-            found = true;
+    let addr = Ipv4Address::from_bits(u32::from_be_bytes(dst) & mask);
+    let cidr = IpCidr::Ipv4(Ipv4Cidr::new(addr, prefix.min(32)));
+    // (The first card with that route.)
+    for eth in net.eth.iter_mut() {
+        let mut found = false;
+        eth.iface.routes_mut().update(|routes| {
+            if let Some(i) = routes.iter().position(|r| {
+                r.cidr == cidr && gw.is_none_or(|g| r.via_router == IpAddress::Ipv4(Ipv4Address::from_octets(g)))
+            }) {
+                routes.remove(i);
+                found = true;
+            }
+        });
+        if found {
+            if prefix == 0 {
+                if let Some(c) = eth.config.as_mut() {
+                    c.gateway = None;
+                }
+            }
+            return Ok(());
         }
-    });
-    if !found {
-        return Err(ESRCH);
     }
-    if prefix == 0 {
-        if let Some(c) = eth.config.as_mut() {
-            c.gateway = None;
-        }
-    }
-    Ok(())
+    Err(ESRCH)
 }
 
-/// eth0's IPv6 routes: (destination, prefix length, gateway): each of its
-/// networks on the link (no gateway), and those through a router (from
-/// its advertisements: the default route), for netlink (ip -6 route).
-pub fn ipv6_routes() -> alloc::vec::Vec<([u8; 16], u8, Option<[u8; 16]>)> {
+/// The cards' IPv6 routes: (interface number, destination, prefix length,
+/// gateway): each card's networks on the link (no gateway), and those
+/// through a router (from its advertisements: the default route), for
+/// netlink (ip -6 route).
+pub fn ipv6_routes() -> alloc::vec::Vec<(u32, [u8; 16], u8, Option<[u8; 16]>)> {
     let mut out = alloc::vec::Vec::new();
     let mut guard = NET.lock();
-    let Some(eth) = guard.as_mut().and_then(|n| n.eth.as_mut()) else { return out };
+    let Some(n) = guard.as_mut() else { return out };
+    for eth in n.eth.iter_mut() {
+    let oif = 2 + eth.index as u32;
+    let mut mine = alloc::vec::Vec::new();
     for c in eth.iface.ip_addrs() {
         if let IpCidr::Ipv6(c) = c {
             // The network: the address with only its prefix's bits.
@@ -375,18 +400,20 @@ pub fn ipv6_routes() -> alloc::vec::Vec<([u8; 16], u8, Option<[u8; 16]>)> {
                 let keep = (c.prefix_len() as usize).saturating_sub(i * 8).min(8);
                 *b &= !(0xffu16 >> keep) as u8;
             }
-            if !out.iter().any(|(d, p, _)| *d == net && *p == c.prefix_len()) {
-                out.push((net, c.prefix_len(), None));
+            if !mine.iter().any(|(d, p, _)| *d == net && *p == c.prefix_len()) {
+                mine.push((net, c.prefix_len(), None));
             }
         }
     }
     eth.iface.routes_mut().update(|routes| {
         for r in routes.iter() {
             if let (IpCidr::Ipv6(c), IpAddress::Ipv6(via)) = (r.cidr, r.via_router) {
-                out.push((c.address().octets(), c.prefix_len(), Some(via.octets())));
+                mine.push((c.address().octets(), c.prefix_len(), Some(via.octets())));
             }
         }
     });
+    out.extend(mine.into_iter().map(|(d, p, g)| (oif, d, p, g)));
+    }
     out
 }
 
@@ -405,7 +432,7 @@ fn apply(eth: &mut Eth, cfg: IpConfig) {
 /// Without a DHCP answer: QEMU's user network's usual addresses.
 pub fn use_static_config() {
     let mut guard = NET.lock();
-    if let Some(eth) = guard.as_mut().and_then(|n| n.eth.as_mut()) {
+    if let Some(eth) = guard.as_mut().and_then(|n| n.eth.first_mut()) {
         if eth.config.is_none() {
             let cfg = IpConfig {
                 address: Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24),
@@ -431,12 +458,17 @@ pub fn write_resolv_conf() {
 
 /// eth0's configuration, if it has one.
 pub fn config() -> Option<IpConfig> {
-    NET.lock().as_ref().and_then(|n| n.eth.as_ref()).and_then(|e| e.config)
+    NET.lock().as_ref().and_then(|n| n.eth.first()).and_then(|e| e.config)
+}
+
+/// How many network cards there are.
+pub fn cards() -> usize {
+    NET.lock().as_ref().map_or(0, |n| n.eth.len())
 }
 
 /// Is there a network card?
 pub fn has_card() -> bool {
-    NET.lock().as_ref().is_some_and(|n| n.eth.is_some())
+    NET.lock().as_ref().is_some_and(|n| !n.eth.is_empty())
 }
 
 /// Called often (timer ticks in user mode, idle loops): poll if the card
@@ -450,10 +482,15 @@ pub fn poll_if_due() {
 
 /// Wait at boot (up to `ms` milliseconds) for DHCP to configure eth0.
 pub fn wait_for_dhcp(ms: u64) -> Option<IpConfig> {
+    wait_for_dhcp_on(0, ms)
+}
+
+/// Card `n`'s configuration, waiting up to `ms` for DHCP.
+pub fn wait_for_dhcp_on(n: usize, ms: u64) -> Option<IpConfig> {
     let until = crate::process::tick_after_ns(ms * 1_000_000);
     while crate::process::ticks() < until {
         poll();
-        if let Some(c) = config() {
+        if let Some(c) = NET.lock().as_ref().and_then(|net| net.eth.get(n)).and_then(|e| e.config) {
             return Some(c);
         }
         crate::smp::halt();

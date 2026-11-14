@@ -1,6 +1,7 @@
 // Copyright (c) 2026 tre4surehunter9
-//! eth0's network card, whichever it is (virtio-net, or else an RTL8139),
-//! as one smoltcp Device: each driver receives and sends whole frames.
+//! A network card (eth0, eth1), whichever it is (virtio-net or an
+//! RTL8139), as one smoltcp Device: each driver receives and sends whole
+//! frames.
 
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
@@ -14,71 +15,92 @@ use super::virtio_net::VirtioNet;
 /// The largest Ethernet frame (without its CRC).
 pub const MTU: usize = 1514;
 
-pub enum Card {
+/// How many network cards are driven (eth0, eth1).
+pub const MAX_CARDS: usize = 2;
+
+pub enum Hw {
     Virtio(VirtioNet),
     Rtl(Rtl8139),
 }
 
+pub struct Card {
+    /// eth0, eth1...: its number (its counters are STATS[index + 1]).
+    pub index: usize,
+    pub hw: Hw,
+}
+
 impl Card {
-    /// The card there is: virtio-net first (it's faster), else an RTL8139.
-    pub fn find() -> Option<Card> {
-        if let Some(v) = VirtioNet::find() {
-            return Some(Card::Virtio(v));
+    /// The cards there are (at most MAX_CARDS): virtio-net ones first
+    /// (faster), then RTL8139s.
+    pub fn find_all() -> alloc::vec::Vec<Card> {
+        let mut hws = alloc::vec::Vec::new();
+        for n in 0..MAX_CARDS {
+            match VirtioNet::find(n) {
+                Some(v) => hws.push(Hw::Virtio(v)),
+                None => break,
+            }
         }
-        let pci = super::pci::scan().into_iter().find(|d| d.vendor == Rtl8139::VENDOR && d.device == Rtl8139::DEVICE)?;
-        Rtl8139::new(&pci).map(Card::Rtl)
+        for pci in super::pci::scan().into_iter().filter(|d| d.vendor == Rtl8139::VENDOR && d.device == Rtl8139::DEVICE) {
+            if hws.len() >= MAX_CARDS {
+                break;
+            }
+            if let Some(r) = Rtl8139::new(&pci) {
+                hws.push(Hw::Rtl(r));
+            }
+        }
+        hws.into_iter().enumerate().map(|(index, hw)| Card { index, hw }).collect()
     }
 
     pub fn mac(&self) -> [u8; 6] {
-        match self {
-            Card::Virtio(v) => v.mac,
-            Card::Rtl(r) => r.mac,
+        match &self.hw {
+            Hw::Virtio(v) => v.mac,
+            Hw::Rtl(r) => r.mac,
         }
     }
 
     pub fn irq(&self) -> u8 {
-        match self {
-            Card::Virtio(v) => v.irq,
-            Card::Rtl(r) => r.irq,
+        match &self.hw {
+            Hw::Virtio(v) => v.irq,
+            Hw::Rtl(r) => r.irq,
         }
     }
 
     /// Its name, for the boot log and /proc.
     pub fn name(&self) -> &'static str {
-        match self {
-            Card::Virtio(_) => "virtio-net",
-            Card::Rtl(_) => "RTL8139",
+        match &self.hw {
+            Hw::Virtio(_) => "virtio-net",
+            Hw::Rtl(_) => "RTL8139",
         }
     }
 
     fn receive_frame(&mut self, out: &mut [u8; MTU + 4]) -> Option<usize> {
-        if !super::ETH_UP.load(Ordering::Relaxed) {
+        if !super::ETH_UP[self.index].load(Ordering::Relaxed) {
             // Down: frames that arrive are thrown away.
             let mut scratch = [0u8; MTU + 4];
             while self.receive_any(&mut scratch).is_some() {}
             return None;
         }
         let n = self.receive_any(out)?;
-        super::STATS[1].received(n);
+        super::STATS[self.index + 1].received(n);
         Some(n)
     }
 
     fn receive_any(&mut self, out: &mut [u8; MTU + 4]) -> Option<usize> {
-        match self {
-            Card::Virtio(v) => v.receive_frame(out),
-            Card::Rtl(r) => r.receive_frame(out),
+        match &mut self.hw {
+            Hw::Virtio(v) => v.receive_frame(out),
+            Hw::Rtl(r) => r.receive_frame(out),
         }
     }
 
     fn send_frame(&mut self, frame: &[u8]) {
-        if !super::ETH_UP.load(Ordering::Relaxed) {
-            super::STATS[1].tx_dropped.fetch_add(1, Ordering::Relaxed);
+        if !super::ETH_UP[self.index].load(Ordering::Relaxed) {
+            super::STATS[self.index + 1].tx_dropped.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        super::STATS[1].sent(frame.len());
-        match self {
-            Card::Virtio(v) => v.send_frame(frame),
-            Card::Rtl(r) => r.send_frame(frame),
+        super::STATS[self.index + 1].sent(frame.len());
+        match &mut self.hw {
+            Hw::Virtio(v) => v.send_frame(frame),
+            Hw::Rtl(r) => r.send_frame(frame),
         }
     }
 }

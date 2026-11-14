@@ -197,12 +197,15 @@ extern crate alloc;
 /// loopback on lo.
 fn start_network() {
     use palladiumos::{boot_info, boot_ok, boot_warn, net};
-    match net::init() {
-        Some((mac, irq, card)) => {
-            boot_info!(
-                "eth0: {}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, IRQ {}",
-                card, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], irq
-            );
+    let cards = net::init();
+    for (i, (mac, irq, card)) in cards.iter().enumerate() {
+        boot_info!(
+            "eth{}: {}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, IRQ {}",
+            i, card, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], irq
+        );
+    }
+    match cards.first() {
+        Some(_) => {
             // DHCP usually answers at once in QEMU; don't hold up the boot.
             match net::wait_for_dhcp(2200) {
                 Some(c) => boot_ok!(
@@ -217,10 +220,19 @@ fn start_network() {
                 }
             }
             net::write_resolv_conf();
+            // The other cards: DHCP on each (it goes on in the background
+            // if it takes longer).
+            for n in 1..cards.len() {
+                match net::wait_for_dhcp_on(n, 1500) {
+                    Some(c) => boot_ok!("Configured eth{} by DHCP: {}", n, c.address),
+                    None => boot_warn!("No DHCP answer on eth{} yet", n),
+                }
+            }
         }
-        None => boot_warn!("No network card (QEMU: -device rtl8139): only loopback"),
+        None => boot_warn!("No network card (QEMU: -device virtio-net-pci): only loopback"),
     }
-    boot_ok!("Started networking (TCP/IP: lo 127.0.0.1{})", if net::has_card() { ", eth0" } else { "" });
+    let names: alloc::vec::Vec<alloc::string::String> = (0..cards.len()).map(|i| alloc::format!(", eth{}", i)).collect();
+    boot_ok!("Started networking (TCP/IP: lo 127.0.0.1{})", names.concat());
 }
 
 /// `/` is the ext2 disk if there is one (so files survive a reboot),

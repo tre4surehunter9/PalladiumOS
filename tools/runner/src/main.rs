@@ -409,6 +409,8 @@ fn test_extra_args(kernel: &Path, test: bool) -> Vec<&'static str> {
     args.extend(["-device", nic]);
     if virtio {
         args.extend(["-device", "virtio-rng-pci", "-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci"]);
+        // A second network card (eth1), on a network of its own.
+        args.extend(["-netdev", "user,id=net1,net=10.0.3.0/24", "-device", "virtio-net-pci,netdev=net1"]);
     }
     args
 }

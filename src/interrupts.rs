@@ -188,8 +188,8 @@ pub fn let_in() {
 /// stack (which acknowledges the card); then end the interrupt.
 fn pci_irq(line: u8) {
     let _k = crate::smp::enter();
-    if crate::net::card_irq() == line {
-        crate::net::interrupt();
+    if crate::net::is_card_irq(line) {
+        crate::net::interrupt(line);
     }
     unsafe { PICS.lock().notify_end_of_interrupt(PIC_1_OFFSET + line) };
 }

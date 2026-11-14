@@ -54,9 +54,9 @@ fn buffers(n: u16) -> Option<alloc::vec::Vec<(u64, *mut u8)>> {
 }
 
 impl VirtioNet {
-    /// The first virtio network card, set up.
-    pub fn find() -> Option<VirtioNet> {
-        let pci = virtio::find(1).into_iter().next()?;
+    /// The `n`th virtio network card (in PCI order), set up.
+    pub fn find(n: usize) -> Option<VirtioNet> {
+        let pci = virtio::find(1).into_iter().nth(n)?;
         let irq = pci.irq;
         let (dev, features) = Device::new(pci, F_MAC)?;
         let mut rx = dev.queue(0, RX_BUFFERS)?;
