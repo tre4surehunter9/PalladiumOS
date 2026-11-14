@@ -3660,3 +3660,53 @@ pub fn fast_pipe_io(write: bool, fd: u64, ptr: u64, len: u64) -> Option<i64> {
         crate::pipe::fast_read(&pipe, out)
     }
 }
+
+/// poll() without the kernel lock: when every descriptor is a pipe (or
+/// negative: ignored) and one is ready already, or the timeout is 0. None
+/// otherwise (another kind of file, it would wait, a lock was busy): the
+/// usual way. The same answers as poll_ready.
+pub fn fast_poll(fds: u64, nfds: u64, timeout_ms: i64) -> Option<i64> {
+    const POLLIN: i16 = 0x1;
+    const POLLOUT: i16 = 0x4;
+    const POLLERR: i16 = 0x8;
+    const POLLHUP: i16 = 0x10;
+    if nfds == 0 || nfds > 64 || !crate::memory::user_range_ready(fds, nfds * 8, true) {
+        return None;
+    }
+    let files = crate::process::fast_current_files()?;
+    let mut answers = [0i16; 64];
+    {
+        let f = crate::smp::try_lock_spinning(&files)?;
+        for i in 0..nfds as usize {
+            let entry = unsafe { core::slice::from_raw_parts((fds as usize + i * 8) as *const u8, 8) };
+            let fd = i32::from_le_bytes(entry[0..4].try_into().unwrap());
+            let events = i16::from_le_bytes(entry[4..6].try_into().unwrap());
+            if fd < 0 {
+                continue;
+            }
+            let h = f.fds.get(fd as usize).cloned().flatten()?.handle;
+            let desc = crate::smp::try_lock_spinning(&h.desc)?;
+            let revents = match &desc.kind {
+                Kind::PipeRead(r) => match pipe::fast_read_status(&r.pipe())? {
+                    (true, gone) => POLLIN | if gone { POLLHUP } else { 0 },
+                    (false, true) => POLLHUP,
+                    (false, false) => 0,
+                },
+                Kind::PipeWrite(w) => match pipe::fast_write_status(&w.pipe())? {
+                    (_, true) => POLLERR,
+                    (room, false) => if room { POLLOUT } else { 0 },
+                },
+                _ => return None,
+            };
+            answers[i] = revents & (events | POLLERR | POLLHUP);
+        }
+    }
+    let ready = answers[..nfds as usize].iter().filter(|&&r| r != 0).count() as i64;
+    if ready == 0 && timeout_ms != 0 {
+        return None; // (it would wait: the usual way)
+    }
+    for i in 0..nfds as usize {
+        unsafe { core::ptr::write_volatile((fds as usize + i * 8 + 6) as *mut i16, answers[i]) };
+    }
+    Some(ready)
+}

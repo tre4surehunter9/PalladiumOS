@@ -522,6 +522,8 @@ fn fast_syscall(frame: &SyscallFrame) -> Option<i64> {
         SYS_READ => vfs::fast_pipe_io(false, a1, a2, frame.rdx),
         SYS_WRITE => vfs::fast_pipe_io(true, a1, a2, frame.rdx),
         SYS_FUTEX => process::fast_futex_wake(a2, a1, frame.rdx),
+        SYS_POLL => vfs::fast_poll(a1, a2, frame.rdx as i32 as i64),
+        SYS_GETPPID => process::fast_current_ppid(),
         _ => None,
     }
 }

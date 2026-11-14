@@ -259,3 +259,15 @@ pub fn fast_write(pipe: &Arc<Pipe>, data: &[u8]) -> Option<i64> {
     process::wake(pipe.key()); // data for blocked readers
     Some(data.len() as i64)
 }
+
+/// read_status without the kernel lock (lock-free poll); None if busy.
+pub fn fast_read_status(pipe: &Arc<Pipe>) -> Option<(bool, bool)> {
+    let has = !crate::smp::try_lock_spinning(&pipe.buf)?.is_empty();
+    Some((has, pipe.writers.load(Ordering::SeqCst) == 0))
+}
+
+/// write_status without the kernel lock (lock-free poll); None if busy.
+pub fn fast_write_status(pipe: &Arc<Pipe>) -> Option<(bool, bool)> {
+    let room = crate::smp::try_lock_spinning(&pipe.buf)?.len() < PIPE_CAPACITY;
+    Some((room, pipe.readers.load(Ordering::SeqCst) == 0))
+}

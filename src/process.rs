@@ -3742,6 +3742,13 @@ pub fn fast_futex_wake(op: u64, uaddr: u64, max: u64) -> Option<i64> {
     Some(futex_wake_locked(&mut table, key, max.min(u32::MAX as u64) as u32) as i64)
 }
 
+/// getppid() without the kernel lock (the table taken briefly). None if
+/// the table was busy.
+pub fn fast_current_ppid() -> Option<i64> {
+    let table = crate::smp::try_lock_spinning(&TABLE)?;
+    Some(table.get(&current_pid()).map_or(0, |p| p.ppid) as i64)
+}
+
 /// The current process's open files, without the kernel lock (the table
 /// taken briefly). None if the table was busy.
 pub fn fast_current_files() -> Option<Arc<Mutex<Files>>> {
