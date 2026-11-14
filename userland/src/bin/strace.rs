@@ -44,25 +44,38 @@ fn main(args: userlib::Args) -> i32 {
     };
     let argv: Vec<&str> = (i..args.count()).filter_map(|n| args.get(n)).collect();
     let envp: Vec<&str> = environ().collect();
+    // The program: a path, or found in $PATH (before tracing starts, as
+    // Linux's strace does: no failed execve of other directories shown).
+    let program = if cmd.contains('/') {
+        String::from(cmd)
+    } else {
+        let path = environ().find_map(|v| v.strip_prefix("PATH=")).unwrap_or("/bin:/usr/bin");
+        let found = path.split(':').map(|dir| {
+            let mut full = String::from(dir);
+            full.push('/');
+            full.push_str(cmd);
+            full
+        }).find(|full| {
+            let fd = userlib::open(full, userlib::O_RDONLY);
+            if fd >= 0 {
+                let _ = userlib::close(fd as i32);
+            }
+            fd >= 0
+        });
+        match found {
+            Some(f) => f,
+            None => {
+                eprintln!("strace: {}: command not found", cmd);
+                return 127;
+            }
+        }
+    };
     let r = unsafe { userlib::sys::syscall3(SYS_PRCTL, PR_PALLADIUM_TRACE, out_fd, 0) };
     if r < 0 {
         eprintln!("strace: the kernel can't trace (error {})", -r);
         return 1;
     }
-    // The program: a path, or found in $PATH.
-    if cmd.contains('/') {
-        let e = userlib::execve(cmd, &argv, &envp);
-        eprintln!("strace: {}: error {}", cmd, -e);
-        return 127;
-    }
-    let path = environ().find_map(|v| v.strip_prefix("PATH=")).unwrap_or("/bin:/usr/bin");
-    let mut last = 2;
-    for dir in path.split(':') {
-        let mut full = String::from(dir);
-        full.push('/');
-        full.push_str(cmd);
-        last = -userlib::execve(&full, &argv, &envp);
-    }
-    eprintln!("strace: {}: not found (error {})", cmd, last);
+    let e = userlib::execve(&program, &argv, &envp);
+    eprintln!("strace: {}: error {}", program, -e);
     127
 }
