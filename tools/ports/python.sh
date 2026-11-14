@@ -38,15 +38,12 @@ done
 # python pin.
 fetch Python-3.14.10 https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz \
     de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032
-# (No AVX2 code: its BLAKE2 picks it by CPUID alone, and PalladiumOS
-# doesn't enable AVX for programs yet: illegal instruction.)
 ./configure --host=x86_64-linux-musl --build=x86_64-pc-linux-gnu --prefix=/usr CC="$PCC" \
     CPPFLAGS="-I$X/include -I$X/include/ncursesw" LDFLAGS="-L$X/lib -static" \
     LIBS="-lssl -lcrypto -lz -lncursesw" \
     --with-build-python="$BUILD_PY" --disable-shared --without-ensurepip --disable-test-modules \
     --with-openssl="$X" --without-static-libpython \
     ac_cv_file__dev_ptmx=yes ac_cv_file__dev_ptc=no ac_cv_buggy_getaddrinfo=no \
-    ax_cv_check_cflags__Werror__mavx2=no \
     >configure.log 2>&1 || { tail -25 configure.log; exit 1; }
 # Every module configure found (its state "yes" in the Makefile),
 # compiled into the program.

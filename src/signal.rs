@@ -23,7 +23,9 @@ use crate::fpu::FpuState;
 use crate::syscall::{user_slice, user_slice_mut, SyscallFrame};
 
 /// Size of the fxsave area.
-const FP_SIZE: u64 = 512;
+/// The signal frame's FPU area: the whole saved state (XSAVE's layout, as
+/// Linux writes it), then FP_XSTATE_MAGIC2.
+const FP_SIZE: u64 = crate::fpu::STATE_SIZE as u64 + 4;
 
 const UCONTEXT: usize = 304;
 const SIGINFO: usize = 128;
@@ -69,7 +71,19 @@ pub fn setup_frame(frame: &mut SyscallFrame, sig: i32, handler: u64, restorer: u
     let mut fpu = FpuState::initial();
     crate::fpu::save(&mut fpu);
     let fp_off = (fp_at - base) as usize;
-    buf[fp_off..fp_off + FP_SIZE as usize].copy_from_slice(&fpu.0);
+    let state = crate::fpu::STATE_SIZE;
+    buf[fp_off..fp_off + state].copy_from_slice(&fpu.0);
+    if crate::fpu::xsave_on() {
+        // As Linux marks an XSAVE layout: struct _fpx_sw_bytes in fxsave's
+        // software-reserved bytes (magic1, the size with magic2, the state
+        // saved, its size), and magic2 after the state.
+        let sw = fp_off + 464;
+        buf[sw..sw + 4].copy_from_slice(&0x4650_5853u32.to_le_bytes()); // FP_XSTATE_MAGIC1
+        buf[sw + 4..sw + 8].copy_from_slice(&(state as u32 + 4).to_le_bytes());
+        buf[sw + 8..sw + 16].copy_from_slice(&crate::fpu::XFEATURES.to_le_bytes());
+        buf[sw + 16..sw + 20].copy_from_slice(&(state as u32).to_le_bytes());
+        buf[fp_off + state..fp_off + state + 4].copy_from_slice(&0x4650_5845u32.to_le_bytes()); // FP_XSTATE_MAGIC2
+    }
     let put = |buf: &mut [u8], off: usize, v: u64| buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
     put(buf, 0, restorer); // the handler's return address
     let uc = 8;
@@ -123,7 +137,7 @@ pub fn restore_frame(frame: &mut SyscallFrame) -> Result<(u64, (u64, u32, u64)),
     match get(MCONTEXT + 184) {
         0 => crate::fpu::reset(),
         fp_at => {
-            let saved = unsafe { user_slice(fp_at, FP_SIZE) }.ok_or(())?;
+            let saved = unsafe { user_slice(fp_at, crate::fpu::STATE_SIZE as u64) }.ok_or(())?;
             let mut fpu = FpuState::initial();
             fpu.0.copy_from_slice(saved);
             fpu.sanitize();

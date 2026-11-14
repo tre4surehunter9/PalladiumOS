@@ -2415,6 +2415,18 @@ fn ifconfig_shows_and_changes_interfaces() {
 }
 
 #[test_case]
+fn avx_registers_are_kept() {
+    // AVX turned on for programs (XSAVE), and the YMM registers kept across
+    // task switches and signal handlers (test_avx).
+    let Some(_) = c_program("test_avx") else { return };
+    let _ = filesystem::make_dir("/tmp");
+    let status = sh("test_avx > /tmp/avx.out 2>&1");
+    assert_eq!(status, 0, "{}", file("/tmp/avx.out"));
+    assert!(file("/tmp/avx.out").contains("all checks passed"), "{}", file("/tmp/avx.out"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn threads_on_several_cores_see_mapping_changes() {
     // TLB shootdowns (with PALLADIUM_SMP=4: threads on several cores).
     let Some(_) = c_program("test_tlb") else { return };
