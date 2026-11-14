@@ -28,4 +28,7 @@ make -j"$(nproc)" >make.log 2>&1 || { grep -B2 -A6 "error" make.log | tail -30; 
 
 mkdir -p "$SYSROOT/bin"
 install -m 755 -s src/curl "$SYSROOT/bin/curl"
+# libcurl and its headers, for other ports (git's https://), in
+# target/ports/curl.
+rm -rf "$PORTS/curl" && make install DESTDIR="$PORTS/curl" >install.log 2>&1 || { tail -20 install.log; exit 1; }
 echo "curl installed in $SYSROOT/bin"

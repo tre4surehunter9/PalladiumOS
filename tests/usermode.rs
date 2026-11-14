@@ -2223,6 +2223,47 @@ fn curl_port_works() {
 }
 
 #[test_case]
+fn git_port_works() {
+    if palladiumos::mounts::resolve("/usr/bin/git").is_err() {
+        palladiumos::serial_print!("(skipped: git not built) ");
+        return;
+    }
+    // A repository: commits, a branch and a merge, the log; then a local
+    // clone (git's transport, through its helpers in /usr/libexec/git-core).
+    let _ = filesystem::make_dir("/tmp");
+    filesystem::write_file(
+        "/tmp/git.sh",
+        "set -e\n\
+         export HOME=/tmp GIT_PAGER=cat\n\
+         git config --global user.name test\n\
+         git config --global user.email test@example.com\n\
+         git config --global init.defaultBranch main\n\
+         rm -rf /tmp/g /tmp/g2\n\
+         git init -q /tmp/g\n\
+         cd /tmp/g\n\
+         echo one > a.txt\n\
+         git add a.txt\n\
+         git commit -q -m first\n\
+         git checkout -q -b side\n\
+         echo two > b.txt\n\
+         git add b.txt\n\
+         git commit -q -m side\n\
+         git checkout -q main\n\
+         git merge -q --no-edit side\n\
+         git log --format=%s > /tmp/git1\n\
+         git clone -q /tmp/g /tmp/g2\n\
+         ls /tmp/g2 > /tmp/git2\n\
+         git -C /tmp/g2 rev-list --count HEAD > /tmp/git3\n",
+    )
+    .unwrap();
+    assert_eq!(sh("dash /tmp/git.sh > /tmp/git0 2>&1"), 0, "{}", file("/tmp/git0"));
+    assert_eq!(file("/tmp/git1"), "side\nfirst\n");
+    assert_eq!(file("/tmp/git2"), "a.txt\nb.txt\n");
+    assert_eq!(file("/tmp/git3"), "2\n");
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn nano_port_works() {
     if palladiumos::mounts::resolve("/usr/bin/nano").is_err() {
         palladiumos::serial_print!("(skipped: nano not built) ");
