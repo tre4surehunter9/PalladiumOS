@@ -2404,6 +2404,10 @@ fn htop_port_and_sys_cpus() {
         palladiumos::serial_print!("(htop skipped: not built) ");
         return;
     }
+    // What its disk and open-files meters read.
+    assert_eq!(sh("cat /proc/diskstats > /tmp/ds1; cat /proc/sys/fs/file-nr > /tmp/fnr1"), 0);
+    assert!(file("/tmp/ds1").contains(" vdb "), "{}", file("/tmp/ds1")); // (the system disk)
+    assert_eq!(file("/tmp/fnr1").split('\t').count(), 3, "{}", file("/tmp/fnr1"));
     assert_eq!(sh("htop --version > /tmp/htop1 2>&1"), 0, "{}", file("/tmp/htop1"));
     assert!(file("/tmp/htop1").starts_with("htop 3.5.3"), "{}", file("/tmp/htop1"));
     assert!(only_kernel_left(), "{:?}", process::list());

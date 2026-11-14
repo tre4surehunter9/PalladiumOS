@@ -205,6 +205,14 @@ pub fn init_default_files() {
         // nano's settings for everyone: syntax colouring (its files are
         // on the system disk, from tools/ports/nano.sh).
         ("/etc/nanorc", "# nano's settings for everyone (yours: ~/.nanorc). See nanorc(5).\ninclude \"/usr/share/nano/*.nanorc\"\n"),
+        // htop's meters for everyone (yours: ~/.config/htop/htoprc, written
+        // when you change them with F2): the CPUs, memory, disks and
+        // network on the left; tasks, load, uptime, open files on the right.
+        (
+            "/etc/htoprc",
+            "header_layout=two_50_50\ncolumn_meters_0=AllCPUs Memory Swap DiskIO NetworkIO\ncolumn_meter_modes_0=1 1 1 2 2\n\
+             column_meters_1=Tasks LoadAverage Uptime FileDescriptors\ncolumn_meter_modes_1=2 2 2 2\n",
+        ),
     ];
     let _ = make_dir("/etc");
     for dir in ["/etc/xdg", "/etc/xdg/fastfetch", "/etc/dropbear"] {

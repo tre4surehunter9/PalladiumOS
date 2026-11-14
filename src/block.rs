@@ -370,6 +370,10 @@ fn disk_name(index: u8, ide: bool) -> String {
 
 /// Disk `index` (as disk()), with its Linux name.
 fn disk_named(index: u8) -> Option<(Box<dyn BlockDevice>, String)> {
+    disk_named_uncounted(index).map(|(d, name)| (counted(d, &name), name))
+}
+
+fn disk_named_uncounted(index: u8) -> Option<(Box<dyn BlockDevice>, String)> {
     let ide = match index {
         0 => AtaDisk::primary_master(),
         1 => AtaDisk::primary_slave(),
@@ -413,7 +417,7 @@ fn take_named(name: &str) -> Option<(Box<dyn BlockDevice>, String)> {
             if parts.is_empty() {
                 continue; // (dropped: an AHCI port is handed back)
             }
-            let shared = Arc::new(Mutex::new(disk));
+            let shared = Arc::new(Mutex::new(counted(disk, &dev)));
             for (i, (pname, start, sectors)) in parts {
                 crate::serial_println!("partition {}: sectors {}..+{}", pname, start, sectors);
                 let devname = alloc::format!("{}{}", dev, i + 1);
@@ -516,4 +520,70 @@ pub fn mount_sys() {
 pub fn mount_shm() {
     crate::mounts::mount("/dev/shm", Box::new(crate::fdfs::Fdfs::new()));
     let _ = crate::filesystem::chmod("/dev/shm", 0o1777);
+}
+
+// ---------------------------------------------------------------- statistics
+
+/// A disk's reads and writes (whole requests and 512-byte sectors), for
+/// /proc/diskstats (htop's disk meter, iostat, vmstat -d).
+#[derive(Default)]
+pub struct DiskStats {
+    pub reads: core::sync::atomic::AtomicU64,
+    pub sectors_read: core::sync::atomic::AtomicU64,
+    pub writes: core::sync::atomic::AtomicU64,
+    pub sectors_written: core::sync::atomic::AtomicU64,
+}
+
+/// The disks counted: (name without /dev/, its counts).
+static DISK_STATS: Mutex<Vec<(String, Arc<DiskStats>)>> = Mutex::new(Vec::new());
+
+/// The disks' counts, for /proc/diskstats.
+pub fn disk_stats() -> Vec<(String, Arc<DiskStats>)> {
+    DISK_STATS.lock().clone()
+}
+
+/// A disk whose reads and writes are counted.
+struct Counted {
+    inner: Box<dyn BlockDevice>,
+    stats: Arc<DiskStats>,
+}
+
+fn counted(inner: Box<dyn BlockDevice>, devname: &str) -> Box<dyn BlockDevice> {
+    let name = String::from(devname.trim_start_matches("/dev/"));
+    let stats = {
+        let mut all = DISK_STATS.lock();
+        match all.iter().find(|(n, _)| *n == name) {
+            Some((_, s)) => s.clone(),
+            None => {
+                let s = Arc::new(DiskStats::default());
+                all.push((name, s.clone()));
+                s
+            }
+        }
+    };
+    Box::new(Counted { inner, stats })
+}
+
+impl BlockDevice for Counted {
+    fn sectors(&self) -> u64 {
+        self.inner.sectors()
+    }
+
+    fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        use core::sync::atomic::Ordering::Relaxed;
+        self.stats.reads.fetch_add(1, Relaxed);
+        self.stats.sectors_read.fetch_add((buf.len() / SECTOR_SIZE) as u64, Relaxed);
+        self.inner.read(sector, buf)
+    }
+
+    fn write(&mut self, sector: u64, data: &[u8]) -> Result<(), &'static str> {
+        use core::sync::atomic::Ordering::Relaxed;
+        self.stats.writes.fetch_add(1, Relaxed);
+        self.stats.sectors_written.fetch_add((data.len() / SECTOR_SIZE) as u64, Relaxed);
+        self.inner.write(sector, data)
+    }
+
+    fn flush(&mut self) -> Result<(), &'static str> {
+        self.inner.flush()
+    }
 }

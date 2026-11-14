@@ -27,9 +27,13 @@ const SELF: Ino = 2;
 /// /proc/net and its files: (name, inode).
 const NET_DIR: Ino = 13;
 const NET_FILES: &[(&str, Ino)] = &[("if_inet6", 14), ("dev", 15), ("route", 16)];
+/// /proc/sys, /proc/sys/fs, and /proc/sys/fs/file-nr.
+const SYS_DIR: Ino = 18;
+const SYS_FS_DIR: Ino = 19;
+const FILE_NR: Ino = 20;
 /// System files: (name, inode).
 const SYSTEM: &[(&str, Ino)] =
-    &[("cmdline", 11), ("cpuinfo", 3), ("kmsg", 9), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("sound", 12), ("stat", 10), ("uptime", 7), ("version", 8)];
+    &[("cmdline", 11), ("cpuinfo", 3), ("diskstats", 17), ("kmsg", 9), ("loadavg", 4), ("meminfo", 5), ("mounts", 6), ("sound", 12), ("stat", 10), ("uptime", 7), ("version", 8)];
 
 // Files in /proc/PID: (name, number).
 const P_DIR: u64 = 0;
@@ -111,6 +115,8 @@ impl ProcFs {
             12 => crate::sound::status(), // the sound card (as old Linux's /proc/sound)
             14 => if_inet6(),
             15 => net_dev(),
+            17 => diskstats(),
+            FILE_NR => file_nr(),
             16 => net_route(),
             _ => return Err(EINVAL),
         })
@@ -275,12 +281,21 @@ impl FileSystem for ProcFs {
         if dir == NET_DIR {
             return NET_FILES.iter().find(|(n, _)| *n == name).map(|&(_, i)| i).ok_or(ENOENT);
         }
+        if dir == SYS_DIR {
+            return if name == "fs" { Ok(SYS_FS_DIR) } else { Err(ENOENT) };
+        }
+        if dir == SYS_FS_DIR {
+            return if name == "file-nr" { Ok(FILE_NR) } else { Err(ENOENT) };
+        }
         if dir == ROOT {
             if name == "self" {
                 return Ok(SELF);
             }
             if name == "net" {
                 return Ok(NET_DIR);
+            }
+            if name == "sys" {
+                return Ok(SYS_DIR);
             }
             if let Some(&(_, ino)) = SYSTEM.iter().find(|(n, _)| *n == name) {
                 return Ok(ino);
@@ -312,9 +327,9 @@ impl FileSystem for ProcFs {
     }
 
     fn meta(&mut self, ino: Ino) -> FsResult<Meta> {
-        let (kind, perm) = if ino == ROOT || ino == NET_DIR {
+        let (kind, perm) = if ino == ROOT || ino == NET_DIR || ino == SYS_DIR || ino == SYS_FS_DIR {
             (FileType::Dir, 0o555)
-        } else if NET_FILES.iter().any(|&(_, i)| i == ino) {
+        } else if NET_FILES.iter().any(|&(_, i)| i == ino) || ino == FILE_NR {
             (FileType::File, 0o444)
         } else if ino == SELF {
             (FileType::Symlink, 0o777)
@@ -366,11 +381,18 @@ impl FileSystem for ProcFs {
         if dir == NET_DIR {
             return Ok(NET_FILES.iter().map(|&(n, i)| (n.to_string(), i, FileType::File)).collect());
         }
+        if dir == SYS_DIR {
+            return Ok(alloc::vec![("fs".to_string(), SYS_FS_DIR, FileType::Dir)]);
+        }
+        if dir == SYS_FS_DIR {
+            return Ok(alloc::vec![("file-nr".to_string(), FILE_NR, FileType::File)]);
+        }
         if dir == ROOT {
             let mut out: Vec<(String, Ino, FileType)> =
                 SYSTEM.iter().map(|&(n, i)| (n.to_string(), i, FileType::File)).collect();
             out.push(("self".to_string(), SELF, FileType::Symlink));
             out.push(("net".to_string(), NET_DIR, FileType::Dir));
+            out.push(("sys".to_string(), SYS_DIR, FileType::Dir));
             for p in process::snapshot(None).into_iter().filter(|p| !p.kernel) {
                 out.push((p.pid.to_string(), pid_ino(p.pid, P_DIR), FileType::Dir));
             }
@@ -434,6 +456,36 @@ impl FileSystem for ProcFs {
     fn remove(&mut self, _dir: Ino, _name: &str, _is_dir: bool) -> FsResult<()> {
         Err(EPERM)
     }
+}
+
+/// /proc/diskstats, as Linux writes it: per disk, its major and minor
+/// numbers and name, then reads (completed, merged, sectors, ms), writes
+/// (the same), I/Os in progress, ms doing I/O, weighted ms (merges and
+/// times not kept: 0).
+fn diskstats() -> String {
+    use core::sync::atomic::Ordering::Relaxed;
+    let mut out = String::new();
+    for (i, (name, s)) in crate::block::disk_stats().iter().enumerate() {
+        let major = if name.starts_with("vd") { 253 } else if name.starts_with("hd") { 3 } else { 8 };
+        out.push_str(&format!(
+            "{:4} {:7} {} {} 0 {} 0 {} 0 {} 0 0 0 0\n",
+            major,
+            i * 16,
+            name,
+            s.reads.load(Relaxed),
+            s.sectors_read.load(Relaxed),
+            s.writes.load(Relaxed),
+            s.sectors_written.load(Relaxed)
+        ));
+    }
+    out
+}
+
+/// /proc/sys/fs/file-nr: open files (descriptors, all processes), free
+/// handles (0), the most there can be.
+fn file_nr() -> String {
+    let open: usize = process::snapshot(None).iter().filter(|p| !p.kernel).map(|p| p.fds.len()).sum();
+    format!("{}\t0\t{}\n", open, crate::vfs::MAX_FDS * 64)
 }
 
 /// /proc/net/route, as Linux writes it (route and netstat -r read it): per
