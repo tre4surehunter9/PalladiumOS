@@ -2290,6 +2290,21 @@ fn python_port_works() {
     .unwrap();
     assert_eq!(sh("python3 /tmp/t.py > /tmp/py1 2>&1"), 0, "{}", file("/tmp/py1"));
     assert_eq!(file("/tmp/py1"), "3.14.10\n2d711642b726 0909377ad351\n1000\n{\"k\": [1, 2]}\nhi\n");
+    // sqlite3, bz2, lzma and ctypes (their libraries: pylibs.sh).
+    filesystem::write_file(
+        "/tmp/t2.py",
+        "import sqlite3, bz2, lzma, ctypes\n\
+         c = sqlite3.connect(':memory:')\n\
+         c.execute('create table t(x)')\n\
+         c.executemany('insert into t values(?)', [(i,) for i in range(10)])\n\
+         print(c.execute('select sum(x) from t').fetchone()[0])\n\
+         d = b'hello' * 1000\n\
+         print(bz2.decompress(bz2.compress(d)) == d, lzma.decompress(lzma.compress(d)) == d)\n\
+         print(ctypes.sizeof(ctypes.c_long), ctypes.c_int(42).value)\n",
+    )
+    .unwrap();
+    assert_eq!(sh("python3 /tmp/t2.py > /tmp/py2 2>&1"), 0, "{}", file("/tmp/py2"));
+    assert_eq!(file("/tmp/py2"), "45\nTrue True\n8 42\n");
     assert!(only_kernel_left(), "{:?}", process::list());
 }
 

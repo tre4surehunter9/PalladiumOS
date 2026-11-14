@@ -695,6 +695,9 @@ extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         SYS_RSEQ => -ENOSYS,
         SYS_PIDFD_OPEN => -ENOSYS, // (callers fall back to waitpid)
         SYS_IO_URING_SETUP => -ENOSYS, // (callers fall back to epoll)
+        // Landlock (sandboxing: xz tries it): not here, as on a Linux
+        // built without it (programs go on without the sandbox).
+        444..=446 => -ENOSYS,
         SYS_TIMES => process::sys_times(a1),
         SYS_FCHMODAT2 => vfs::sys_fchmodat2(a1, a2, a3, a4),
         SYS_TIME => {

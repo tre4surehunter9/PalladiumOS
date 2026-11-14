@@ -4,16 +4,20 @@
 # not Alpine's: no `alpine` needed) and its standard library in
 # /usr/lib/python3.14. One static program: the C modules are compiled in
 # (from Modules/Setup.stdlib, as configure found them), with OpenSSL (ssl,
-# hashlib) and zlib from links.sh and ncurses (curses, and the
-# interactive prompt's line editing) from xterm.sh. Not here: the test
-# suite, IDLE, tkinter, and modules whose libraries aren't built (sqlite3,
-# ctypes, bz2, lzma).
+# hashlib) and zlib from links.sh, ncurses (curses, and the interactive
+# prompt's line editing) from xterm.sh, and SQLite, libffi, bzip2 and xz
+# (sqlite3, ctypes, bz2, lzma) from pylibs.sh. (ctypes can't load other
+# libraries: a static program has no dlopen.) Not here: the test suite,
+# IDLE, tkinter.
 . "$(dirname "$0")/common.sh"
 
 X="$PORTS/x11"
 for f in libssl.a libz.a libncursesw.a; do
     [ -f "$X/lib/$f" ] || { echo "$f isn't built: run tools/ports/links.sh and xterm.sh first" >&2; exit 1; }
 done
+# SQLite, libffi, bzip2, xz: pylibs.sh.
+PL="$PORTS/pylibs"
+[ -f "$PL/lib/libsqlite3.a" ] || { echo "run tools/ports/pylibs.sh first (sqlite3, ctypes, bz2, lzma)" >&2; exit 1; }
 # Cross-compiling needs this machine's Python of the same version.
 BUILD_PY=$(command -v python3.14 || true)
 if [ -z "$BUILD_PY" ]; then
@@ -23,13 +27,13 @@ fi
 
 # Only the cross-built libraries (not this machine's: their headers and
 # libraries aren't for PalladiumOS), and the modules without them off.
-PKG_CONFIG_LIBDIR="$X/lib/pkgconfig:$X/share/pkgconfig"
+PKG_CONFIG_LIBDIR="$PL/lib/pkgconfig:$X/lib/pkgconfig:$X/share/pkgconfig"
 PKG_CONFIG_PATH="$PKG_CONFIG_LIBDIR"
 export PKG_CONFIG_LIBDIR PKG_CONFIG_PATH
 # (Most built-in hashes too: they bring the same HACL* code, which clashes
 # when all are in one program; hashlib has them from OpenSSL. Not BLAKE2:
 # hashlib always takes that one from its own module.)
-for m in _bz2 _lzma _ctypes _ctypes_test _sqlite3 _dbm _gdbm _tkinter readline _uuid _zstd \
+for m in _ctypes_test _dbm _gdbm _tkinter readline _uuid _zstd \
     _md5 _sha1 _sha2 _sha3 _hmac; do
     export "py_cv_module_$m=n/a"
 done
@@ -39,7 +43,7 @@ done
 fetch Python-3.14.10 https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz \
     de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032
 ./configure --host=x86_64-linux-musl --build=x86_64-pc-linux-gnu --prefix=/usr CC="$PCC" \
-    CPPFLAGS="-I$X/include -I$X/include/ncursesw" LDFLAGS="-L$X/lib -static" \
+    CPPFLAGS="-I$PL/include -I$X/include -I$X/include/ncursesw" LDFLAGS="-L$PL/lib -L$X/lib -static" \
     LIBS="-lssl -lcrypto -lz -lncursesw" \
     --with-build-python="$BUILD_PY" --disable-shared --without-ensurepip --disable-test-modules \
     --with-openssl="$X" --without-static-libpython \
