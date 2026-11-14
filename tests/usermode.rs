@@ -2264,6 +2264,36 @@ fn git_port_works() {
 }
 
 #[test_case]
+fn python_port_works() {
+    if palladiumos::mounts::resolve("/usr/bin/python3").is_err() {
+        palladiumos::serial_print!("(skipped: python not built) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    // CPython with its C modules compiled in: hashes (OpenSSL's, and its
+    // own BLAKE2), zlib, json, asyncio, sockets over loopback.
+    filesystem::write_file(
+        "/tmp/t.py",
+        "import hashlib, zlib, json, asyncio, socket, sys\n\
+         print(sys.version.split()[0])\n\
+         print(hashlib.sha256(b'x').hexdigest()[:12], hashlib.blake2b(b'x').hexdigest()[:12])\n\
+         print(len(zlib.decompress(zlib.compress(b'a' * 1000))))\n\
+         print(json.dumps({'k': [1, 2]}))\n\
+         async def main():\n\
+         \x20   srv = await asyncio.start_server(lambda r, w: (w.write(b'hi'), w.close()), '127.0.0.1', 0)\n\
+         \x20   port = srv.sockets[0].getsockname()[1]\n\
+         \x20   r, w = await asyncio.open_connection('127.0.0.1', port)\n\
+         \x20   print((await r.read()).decode())\n\
+         \x20   srv.close()\n\
+         asyncio.run(main())\n",
+    )
+    .unwrap();
+    assert_eq!(sh("python3 /tmp/t.py > /tmp/py1 2>&1"), 0, "{}", file("/tmp/py1"));
+    assert_eq!(file("/tmp/py1"), "3.14.10\n2d711642b726 0909377ad351\n1000\n{\"k\": [1, 2]}\nhi\n");
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn nano_port_works() {
     if palladiumos::mounts::resolve("/usr/bin/nano").is_err() {
         palladiumos::serial_print!("(skipped: nano not built) ");
