@@ -419,7 +419,7 @@ impl Socket {
             super::poll();
             return Err(EINPROGRESS);
         }
-        let deadline = process::ticks() + (CONNECT_TIMEOUT_MS * 1_000_000).div_ceil(process::TICK_NS);
+        let deadline = process::tick_after_ns(CONNECT_TIMEOUT_MS * 1_000_000);
         let r = wait(self, 0, Some(deadline), |net| match self.tcp_state(net) {
             Some(tcp::State::Established) | Some(tcp::State::CloseWait) => Some(Ok(())),
             Some(tcp::State::SynSent) | Some(tcp::State::SynReceived) => None,

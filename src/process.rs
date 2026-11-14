@@ -1951,7 +1951,60 @@ pub fn tty_signal(sig: i32) {
 
 /// Called from the timer interrupt.
 pub fn tick() {
+    // The time-stamp counter now, and how far it goes in a tick (averaged:
+    // the timer's interrupts arrive a little late or early), for clock_ns.
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let last = TICK_TSC.load(Ordering::Relaxed);
+    if last != 0 && tsc > last {
+        let d = tsc - last;
+        let per = TSC_PER_TICK.load(Ordering::Relaxed);
+        let per = if per == 0 { d } else { (per * 15 + d) / 16 };
+        TSC_PER_TICK.store(per, Ordering::Relaxed);
+    }
+    CLOCK_SEQ.fetch_add(1, Ordering::AcqRel);
+    TICK_TSC.store(tsc, Ordering::Relaxed);
     TICKS.fetch_add(1, Ordering::Relaxed);
+    CLOCK_SEQ.fetch_add(1, Ordering::AcqRel);
+}
+
+/// The tick to wake at for a wait of `ns` nanoseconds from now: the first
+/// one at or after clock_ns() + ns (so a sleep lasts at least that long by
+/// the clock programs read: it's finer than a tick).
+pub fn tick_after_ns(ns: u64) -> u64 {
+    clock_ns().saturating_add(ns).div_ceil(TICK_NS)
+}
+
+/// The time-stamp counter at the last tick, and per tick (see clock_ns).
+static TICK_TSC: AtomicU64 = AtomicU64::new(0);
+static TSC_PER_TICK: AtomicU64 = AtomicU64::new(0);
+/// Odd while tick() is changing them.
+static CLOCK_SEQ: AtomicU64 = AtomicU64::new(0);
+/// The latest clock_ns returned: it never goes back.
+static CLOCK_LAST: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds since boot, finer than a tick: the ticks, and the time-stamp
+/// counter since the last one (at most a tick's worth). For reading the
+/// time (clock_gettime, gettimeofday): two calls in a row see different
+/// times, as programs expect (musl's mkstemp names files from it, and
+/// retries with the same name while it stands still). Never goes back.
+pub fn clock_ns() -> u64 {
+    let (ticks, since) = loop {
+        let seq = CLOCK_SEQ.load(Ordering::Acquire);
+        if seq & 1 != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+        let (t, at, per) = (TICKS.load(Ordering::Relaxed), TICK_TSC.load(Ordering::Relaxed), TSC_PER_TICK.load(Ordering::Relaxed));
+        if CLOCK_SEQ.load(Ordering::Acquire) != seq {
+            continue;
+        }
+        let now = unsafe { core::arch::x86_64::_rdtsc() };
+        let since = if per == 0 || now <= at { 0 } else { ((now - at) as u128 * TICK_NS as u128 / per as u128).min(TICK_NS as u128 - 1) as u64 };
+        break (t, since);
+    };
+    let ns = ticks * TICK_NS + since;
+    let prev = CLOCK_LAST.fetch_max(ns, Ordering::AcqRel);
+    ns.max(prev)
 }
 
 /// Every 5 seconds, the load averages: from core 0's timer interrupt, with
@@ -2707,7 +2760,7 @@ pub fn sys_rt_sigtimedwait(set: u64, info: u64, timeout: u64) -> i64 {
         let Some(ts) = (unsafe { user_slice(timeout, 16) }) else { return -EFAULT };
         let sec = u64::from_le_bytes(ts[0..8].try_into().unwrap());
         let nsec = u64::from_le_bytes(ts[8..16].try_into().unwrap());
-        Some(ticks() + sec.saturating_mul(1_000_000_000).saturating_add(nsec).div_ceil(TICK_NS))
+        Some(tick_after_ns(sec.saturating_mul(1_000_000_000).saturating_add(nsec)))
     };
     loop {
         let taken = {
@@ -2910,7 +2963,7 @@ pub fn sys_clock_nanosleep(clock: u64, flags: u64, req: u64, rem: u64) -> i64 {
     }
     let mut total = (sec as u64).saturating_mul(1_000_000_000).saturating_add(nsec as u64);
     if flags & TIMER_ABSTIME != 0 {
-        let now = if clock == 0 { crate::rtc::now_ns() } else { ticks() * TICK_NS };
+        let now = if clock == 0 { crate::rtc::now_ns() } else { clock_ns() };
         total = total.saturating_sub(now);
         return sleep_ns(total, 0); // nothing "remains" of an absolute time
     }
@@ -2920,7 +2973,7 @@ pub fn sys_clock_nanosleep(clock: u64, flags: u64, req: u64, rem: u64) -> i64 {
 /// Sleep `total` nanoseconds (rounded up to ticks); EINTR (with the time
 /// left in `rem`, if given) when a signal interrupts it.
 fn sleep_ns(total: u64, rem: u64) -> i64 {
-    let wake_at = ticks() + total.div_ceil(TICK_NS);
+    let wake_at = tick_after_ns(total);
     loop {
         if ticks() >= wake_at {
             return 0;
@@ -2956,7 +3009,7 @@ pub fn sys_clock_gettime(clock: u64, tp: u64) -> i64 {
     let ns = match clock {
         0 | 5 => crate::rtc::now_ns(),
         2 | 3 => cpu_time_ns(),
-        1 | 4 | 6 | 7 => ticks() * TICK_NS,
+        1 | 4 | 6 | 7 => clock_ns(),
         _ => return -EINVAL,
     };
     let Some(out) = (unsafe { user_slice_mut(tp, 16) }) else { return -EFAULT };
@@ -3723,13 +3776,13 @@ pub fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3:
                 let mut ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
                 if op & 0x7f == WAIT_BITSET {
                     // An absolute time on CLOCK_MONOTONIC (or REALTIME).
-                    let now = if op & CLOCK_REALTIME != 0 { crate::rtc::now_ns() } else { ticks() * TICK_NS };
+                    let now = if op & CLOCK_REALTIME != 0 { crate::rtc::now_ns() } else { clock_ns() };
                     if ns <= now {
                         return -ETIMEDOUT;
                     }
                     ns -= now;
                 }
-                Some(ticks() + ns.div_ceil(TICK_NS).max(1))
+                Some(tick_after_ns(ns).max(ticks() + 1))
             } else {
                 None
             };

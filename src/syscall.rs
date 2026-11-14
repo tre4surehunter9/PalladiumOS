@@ -501,7 +501,7 @@ fn fast_syscall(frame: &SyscallFrame) -> Option<i64> {
         SYS_CLOCK_GETTIME => {
             let ns = match a1 {
                 0 | 5 => crate::rtc::now_ns(),
-                1 | 4 | 6 | 7 => process::ticks() * process::TICK_NS,
+                1 | 4 | 6 | 7 => process::clock_ns(),
                 _ => return None, // (CPU time: from the process table)
             };
             write_pair(a2, ns / 1_000_000_000, ns % 1_000_000_000)
@@ -980,7 +980,7 @@ fn ms_deadline(ms: i64) -> Option<u64> {
     match ms {
         ..0 => None,
         0 => Some(0),
-        ms => Some(process::ticks() + (ms as u64 * 1_000_000).div_ceil(process::TICK_NS)),
+        ms => Some(process::tick_after_ns(ms as u64 * 1_000_000)),
     }
 }
 
@@ -993,7 +993,7 @@ fn timespec_deadline(ts: u64) -> Result<Option<u64>, i64> {
     let sec = u64::from_le_bytes(t[0..8].try_into().unwrap());
     let nsec = u64::from_le_bytes(t[8..16].try_into().unwrap());
     let ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
-    Ok(Some(if ns == 0 { 0 } else { process::ticks() + ns.div_ceil(process::TICK_NS) }))
+    Ok(Some(if ns == 0 { 0 } else { process::tick_after_ns(ns) }))
 }
 
 /// sched_getscheduler, sched_getparam, sched_setscheduler: everything runs
@@ -1082,7 +1082,7 @@ fn sys_sysinfo(out: u64) -> i64 {
 
 /// poll(fds, nfds, timeout ms; -1 = forever)
 fn sys_poll(fds: u64, nfds: u64, timeout_ms: i64) -> i64 {
-    let deadline = (timeout_ms > 0).then(|| process::ticks() + (timeout_ms as u64 * 1_000_000).div_ceil(process::TICK_NS));
+    let deadline = (timeout_ms > 0).then(|| process::tick_after_ns(timeout_ms as u64 * 1_000_000));
     poll_until(fds, nfds, timeout_ms == 0, deadline)
 }
 
@@ -1096,7 +1096,7 @@ fn sys_ppoll(fds: u64, nfds: u64, ts: u64) -> i64 {
     let sec = u64::from_le_bytes(t[0..8].try_into().unwrap());
     let nsec = u64::from_le_bytes(t[8..16].try_into().unwrap());
     let ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
-    let deadline = (ns > 0).then(|| process::ticks() + ns.div_ceil(process::TICK_NS));
+    let deadline = (ns > 0).then(|| process::tick_after_ns(ns));
     poll_until(fds, nfds, ns == 0, deadline)
 }
 
@@ -1184,7 +1184,7 @@ fn sys_select(nfds: u64, rset: u64, wset: u64, eset: u64, timeout: u64, pselect:
         let sec = u64::from_le_bytes(t[0..8].try_into().unwrap());
         let frac = u64::from_le_bytes(t[8..16].try_into().unwrap());
         let ns = sec.saturating_mul(1_000_000_000).saturating_add(if pselect { frac } else { frac.saturating_mul(1000) });
-        (Some(process::ticks() + ns.div_ceil(process::TICK_NS)), ns == 0)
+        (Some(process::tick_after_ns(ns)), ns == 0)
     };
     loop {
         crate::net::poll_if_due();

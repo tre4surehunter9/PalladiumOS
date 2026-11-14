@@ -637,7 +637,7 @@ pub fn slave_read(end: &End, buf: &mut [u8]) -> i64 {
                 }
                 // Wait at most VTIME tenths of a second.
                 let d = *deadline.get_or_insert_with(|| {
-                    process::ticks() + (vtime as u64 * 100_000_000).div_ceil(process::TICK_NS)
+                    process::tick_after_ns(vtime as u64 * 100_000_000)
                 });
                 if process::ticks() >= d {
                     return 0;

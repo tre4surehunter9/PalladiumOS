@@ -64,7 +64,7 @@ pub fn init() {
 
 /// Current Unix time in nanoseconds.
 pub fn now_ns() -> u64 {
-    BOOT_TIME.load(Ordering::Relaxed) * 1_000_000_000 + crate::process::ticks() * crate::process::TICK_NS
+    BOOT_TIME.load(Ordering::Relaxed) * 1_000_000_000 + crate::process::clock_ns()
 }
 
 /// Current Unix time in seconds.
