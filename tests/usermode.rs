@@ -2407,6 +2407,35 @@ fn strace_shows_system_calls() {
 }
 
 #[test_case]
+fn dosbox_recompiler_runs_programs() {
+    // DOSBox's recompiling core (core=dynamic: it writes machine code and
+    // runs it) on a small DOS program: a loop of 2.6 million instructions,
+    // then exit. Without a window: SDL's dummy drivers.
+    if palladiumos::mounts::resolve("/usr/bin/dosbox.bin").is_err() {
+        palladiumos::serial_print!("(skipped: dosbox not built) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    let _ = filesystem::make_dir("/tmp/dos");
+    let program: [u8; 20] = [
+        0xbb, 0x28, 0x00, 0xb9, 0xff, 0xff, 0x01, 0xc8, 0x31, 0xc2, 0xe2, 0xfa, 0x4b, 0x75, 0xf4, 0xb8, 0x00, 0x4c, 0xcd, 0x21,
+    ];
+    filesystem::write_bytes("/tmp/dos/LOOP.COM", &program).unwrap();
+    // (4 MB of DOS memory: the test kernel has QEMU's 128 MB in all.)
+    filesystem::write_file("/tmp/dos/dyn.conf", "[dosbox]\nmemsize=4\n[cpu]\ncore=dynamic\ncycles=max\n[sdl]\noutput=surface\n[mixer]\nnosound=true\n").unwrap();
+    let status = sh("SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy dosbox.bin -conf /tmp/dos/dyn.conf \
+         -c 'mount d /tmp/dos' -c 'd:' -c 'LOOP.COM' -c 'echo ran' -c exit > /tmp/dos/out 2>&1");
+    // (SDL leaves the console's keyboard mode changed, as on Linux: put it
+    // back for the tests after this one.)
+    let _ = sh("kbd_mode -a");
+    if status != 0 {
+        let _ = sh("dmesg | tail -3 > /tmp/dos/log");
+    }
+    assert_eq!(status, 0, "{}\n{}", file("/tmp/dos/out"), file("/tmp/dos/log"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn nano_port_works() {
     if palladiumos::mounts::resolve("/usr/bin/nano").is_err() {
         palladiumos::serial_print!("(skipped: nano not built) ");

@@ -408,6 +408,9 @@ fn test_extra_args(kernel: &Path, test: bool) -> Vec<&'static str> {
     let nic = if virtio { "virtio-net-pci,netdev=net0" } else { "rtl8139,netdev=net0" };
     args.extend(["-device", nic]);
     if virtio {
+        // 1 GiB, as cargo run has (big programs: DOSBox's recompiler,
+        // Python, Mesa; QEMU's default is 128 MiB).
+        args.extend(["-m", "1G"]);
         args.extend(["-device", "virtio-rng-pci", "-device", "virtio-keyboard-pci", "-device", "virtio-tablet-pci"]);
         // A second network card (eth1), on a network of its own.
         args.extend(["-netdev", "user,id=net1,net=10.0.3.0/24", "-device", "virtio-net-pci,netdev=net1"]);
