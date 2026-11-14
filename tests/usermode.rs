@@ -2361,6 +2361,19 @@ fn two_network_cards_work() {
 }
 
 #[test_case]
+fn micro_port_works() {
+    // A Go program (static, its own system calls: threads, epoll, signals).
+    if palladiumos::mounts::resolve("/usr/bin/micro").is_err() {
+        palladiumos::serial_print!("(skipped: micro not built) ");
+        return;
+    }
+    let _ = filesystem::make_dir("/tmp");
+    assert_eq!(sh("micro -version > /tmp/mi1 2>&1"), 0, "{}", file("/tmp/mi1"));
+    assert!(file("/tmp/mi1").starts_with("Version: 2.0.15"), "{}", file("/tmp/mi1"));
+    assert!(only_kernel_left(), "{:?}", process::list());
+}
+
+#[test_case]
 fn nano_port_works() {
     if palladiumos::mounts::resolve("/usr/bin/nano").is_err() {
         palladiumos::serial_print!("(skipped: nano not built) ");
